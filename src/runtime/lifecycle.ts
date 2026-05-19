@@ -44,12 +44,9 @@ import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import type { LanguageCode, LensResult } from '@/types';
 
-const SLEEP_AFTER_MS = 5 * 60 * 1000;
-
 let running = false;
 let buffer: PcmRingBuffer | null = null;
 let unsubscribeEvents: (() => void) | null = null;
-let sleepTimer: ReturnType<typeof setTimeout> | null = null;
 let inflight: AbortController | null = null;
 let analyzing = false;
 let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
@@ -99,8 +96,6 @@ export async function stopHudRuntime(): Promise<void> {
   unsubscribeEvents = null;
   inflight?.abort();
   inflight = null;
-  if (sleepTimer) clearTimeout(sleepTimer);
-  sleepTimer = null;
   buffer?.clear();
   buffer = null;
   try { await getBridge().audioControl(false); } catch { /* ignore */ }
@@ -141,8 +136,6 @@ function handleEvent(event: EvenHubEvent): void {
 
   if (event.sysEvent && isLifecycleSysEvent(event.sysEvent.eventType)) {
     switch (event.sysEvent.eventType) {
-      case OsEventTypeList.FOREGROUND_EXIT_EVENT: void pauseListening(); return;
-      case OsEventTypeList.FOREGROUND_ENTER_EVENT: void resumeListening(); return;
       case OsEventTypeList.SYSTEM_EXIT_EVENT:
       case OsEventTypeList.ABNORMAL_EXIT_EVENT: void stopHudRuntime(); return;
     }
@@ -181,7 +174,6 @@ function handleEvent(event: EvenHubEvent): void {
 }
 
 async function handlePickerEvent(g: Gesture): Promise<void> {
-  resetSleepTimer();
   if (typeof g.itemIndex === 'number') lastPickerIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const persona = personaAtIndex(lastPickerIndex);
@@ -190,14 +182,12 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 }
 
 async function handleActiveGesture(g: Gesture): Promise<void> {
-  resetSleepTimer();
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     await showMenuPage(formatTime());
   }
 }
 
 async function handleMenuGesture(g: Gesture): Promise<void> {
-  resetSleepTimer();
   if (typeof g.itemIndex === 'number') lastMenuIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const option = menuOptionAtIndex(lastMenuIndex);
@@ -211,21 +201,16 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
 }
 
 async function handleHistoryListGesture(g: Gesture): Promise<void> {
-  resetSleepTimer();
   if (typeof g.itemIndex === 'number') lastHistoryIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     if (lastHistoryIndex === 0) { lastMenuIndex = 0; await restoreActivePage(); return; }
     const entries = getHistoryListEntries();
     const entry = entries[lastHistoryIndex - 1];
     if (entry) await showHistoryDetailPage(entry);
-  } else if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
-    lastMenuIndex = 0;
-    await restoreActivePage();
   }
 }
 
 async function handleHistoryDetailGesture(g: Gesture): Promise<void> {
-  resetSleepTimer();
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     await restoreHistoryListPage();
   }
@@ -261,7 +246,6 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
     setAppPhase('error');
     return;
   }
-  resetSleepTimer();
   startAutoSummaryTimer();
   setAppPhase('listening');
 }
@@ -510,36 +494,6 @@ function extractBadge(result: LensResult): string {
     case 'eli5': return 'ELI5';
     case 'session-summary': return 'SUMMARY';
   }
-}
-
-async function pauseListening(): Promise<void> {
-  try { await getBridge().audioControl(false); } catch { /* ignore */ }
-  await setRecIndicator(false);
-  setAppPhase('sleeping');
-}
-
-async function resumeListening(): Promise<void> {
-  if (currentHudPage() !== 'active') return;
-  try { await getBridge().audioControl(true); } catch { /* ignore */ }
-  await setStatus('listening');
-  await setRecIndicator(true);
-  setAppPhase('listening');
-  resetSleepTimer();
-}
-
-function resetSleepTimer(): void {
-  if (sleepTimer) clearTimeout(sleepTimer);
-  sleepTimer = setTimeout(() => void enterSleep(), SLEEP_AFTER_MS);
-}
-
-async function enterSleep(): Promise<void> {
-  if (currentHudPage() !== 'active') return;
-  try {
-    await getBridge().audioControl(false);
-    await setStatus('sleeping');
-    await setRecIndicator(false);
-    setAppPhase('sleeping');
-  } catch { /* ignore */ }
 }
 
 function summarize(event: EvenHubEvent): Record<string, unknown> {
