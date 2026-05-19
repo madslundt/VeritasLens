@@ -212,7 +212,7 @@ Upload `veritaslens.ehpk` to the **Even Hub developer portal** for review. The p
 
 ## License
 
-MIT. See [LICENSE](LICENSE) when added.
+MIT. See [LICENSE](LICENSE).
 
 ---
 
