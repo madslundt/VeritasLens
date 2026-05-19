@@ -27,7 +27,6 @@ A real-time **contextual intelligence layer** for [Even Realities G2](https://ww
 - **Continuous recording.** The PCM ring buffer keeps filling during compute, display, and menu states so the next analysis can pick up whatever was said in between. A `● REC` indicator shows when the mic is hot.
 - **Zero-persistence audio.** PCM is held in a single in-memory `Uint8Array` ring buffer. Nothing is written to disk, ever.
 - **BYOK (Bring Your Own Key).** Your Gemini API key never leaves the device except as part of the `generateContent` request *you* initiate.
-- **Battery polite.** Mic auto-pauses after 5 min of gesture inactivity and on foreground exit; resumes on next interaction.
 
 ---
 
@@ -37,8 +36,8 @@ A real-time **contextual intelligence layer** for [Even Realities G2](https://ww
 |-----------------|---------------------|-----------------------------|-------------------------------|----------------------------|
 | Single tap      | Start selected lens | Open menu                   | Confirm highlighted option    | Open highlighted entry     |
 | Double tap      | Trigger analysis    | Trigger analysis            | Trigger analysis              | Trigger analysis           |
-| Swipe up        | —                   | Scroll reason text up       | Cycle highlight up            | Back to active session     |
-| Swipe down      | —                   | Scroll reason text down     | Cycle highlight down          | —                          |
+| Swipe up        | —                   | Scroll reason text up       | Cycle highlight up            | Cycle highlight up         |
+| Swipe down      | —                   | Scroll reason text down     | Cycle highlight down          | Cycle highlight down       |
 
 On the History Detail page: tap returns to the history list; swipe up/down scrolls the detail text.
 

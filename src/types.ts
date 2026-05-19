@@ -88,7 +88,6 @@ export type AppPhase =
   | 'listening'
   | 'thinking'
   | 'displaying'
-  | 'sleeping'
   | 'error';
 
 /** Mode the bundle is running in, determined by SDK LaunchSource. */
