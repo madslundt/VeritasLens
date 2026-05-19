@@ -47,6 +47,7 @@ let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
 let lastPickerIndex = 0;
 let lastMenuIndex = 0;
 let lastHistoryIndex = 0;
+let currentSessionId = '';
 
 export function isHudRunning(): boolean { return running; }
 
@@ -187,9 +188,9 @@ async function handleHistoryListGesture(g: Gesture): Promise<void> {
   resetSleepTimer();
   if (typeof g.itemIndex === 'number') lastHistoryIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    if (lastHistoryIndex === 0) { await restoreActivePage(); return; }
     const entries = sessionHistory();
-    if (entries.length === 0) { await restoreActivePage(); return; }
-    const entry = entries[lastHistoryIndex];
+    const entry = entries[lastHistoryIndex - 1];
     if (entry) await showHistoryDetailPage(entry);
   } else if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
     await restoreActivePage();
@@ -220,6 +221,7 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   const persona = getPersona(personaId);
   if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
   setActivePersona(personaId);
+  currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   lastMenuIndex = 0;
   await showActivePage(persona);
   await setStatus('listening');
@@ -294,6 +296,7 @@ async function runAnalysis(): Promise<void> {
     stopSpinner();
     setStateResult(result);
     pushHistoryEntry({
+      sessionId: currentSessionId,
       lensId: persona.id,
       lensName: persona.name,
       question: extractQuestion(result),
@@ -348,6 +351,7 @@ async function runAutoSummary(): Promise<void> {
     });
     const result = persona.parse(rawText);
     pushHistoryEntry({
+      sessionId: currentSessionId,
       lensId: persona.id,
       lensName: persona.name,
       question: extractQuestion(result),

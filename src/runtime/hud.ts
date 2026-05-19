@@ -262,6 +262,14 @@ function clip(s: string, max: number): string {
   return `${s.slice(0, max - 1)}…`;
 }
 
+function badgeGlyph(badge: string): string {
+  const u = badge.toUpperCase();
+  if (u === 'TRUE' || u === 'PLAUSIBLE' || u === 'NEUTRAL') return '✓ ';
+  if (u === 'FALSE' || u === 'SUSPICIOUS' || u === 'BIASED') return '✗ ';
+  if (u === 'UNVERIFIED') return '? ';
+  return '';
+}
+
 // ------- page builders ----------------------------------------------------
 
 function buildUnconfiguredPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer | RebuildPageContainer {
@@ -339,6 +347,18 @@ function buildMenuPage(): RebuildPageContainer {
 }
 
 function buildActivePage(): RebuildPageContainer {
+  const status = new TextContainerProperty({
+    containerID: CONTAINER.status,
+    containerName: NAME.status,
+    xPosition: 16,
+    yPosition: 220,
+    width: 80,
+    height: 28,
+    borderWidth: 0,
+    paddingLength: 4,
+    content: '',
+    isEventCapture: 0,
+  });
   const rec = new TextContainerProperty({
     containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
     xPosition: SCREEN_W - 96, yPosition: 230, width: 80, height: 28,
@@ -358,14 +378,14 @@ function buildActivePage(): RebuildPageContainer {
   });
   const eventList = new ListContainerProperty({
     containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 224,
-    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    width: SCREEN_W - 120, height: 40, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: 1, itemWidth: SCREEN_W - 120, isItemSelectBorderEn: 0,
       itemName: ['Tap: menu · Double-tap: check'],
     }),
     isEventCapture: 1,
   });
-  return new RebuildPageContainer({ containerTotalNum: 5, listObject: [eventList], textObject: [claim, verdict, reason, rec] });
+  return new RebuildPageContainer({ containerTotalNum: 6, listObject: [eventList], textObject: [status, claim, verdict, reason, rec] });
 }
 
 function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
@@ -375,8 +395,8 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
     content: 'History', isEventCapture: 0,
   });
   const itemNames = entries.length > 0
-    ? entries.map((e) => `[${e.badge}] ${clip(e.question, 60)}`)
-    : ['No history yet'];
+    ? ['← Back', ...entries.map((e) => `${badgeGlyph(e.badge)}${clip(e.question, 55)}`)]
+    : ['← Back', 'No history yet'];
   const list = new ListContainerProperty({
     containerID: CONTAINER.historyList, containerName: NAME.historyList, xPosition: 16, yPosition: 80,
     width: SCREEN_W - 32, height: 128, borderWidth: 0, paddingLength: 4,
@@ -389,7 +409,7 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
   const hint = new TextContainerProperty({
     containerID: CONTAINER.historyHint, containerName: NAME.historyHint, xPosition: 16, yPosition: 224,
     width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
-    content: entries.length > 0 ? 'Swipe ⇅ · Tap for detail' : 'Tap to go back',
+    content: 'Swipe ⇅ · Tap: detail · Tap ← : back',
     isEventCapture: 0,
   });
   return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });

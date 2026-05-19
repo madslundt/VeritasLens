@@ -21,6 +21,7 @@ import {
   type GeminiModel,
   type HistoryEntry,
   type LanguageCode,
+  type LensResult,
 } from '@/types';
 import { personas } from '@/personas';
 
@@ -37,6 +38,40 @@ const AUTO_INTERVAL_OPTIONS: { value: AutoSummaryInterval; label: string }[] = [
   { value: 5, label: 'Every 5 minutes' },
 ];
 
+function badgeIcon(badge: string): string {
+  const u = badge.toUpperCase();
+  if (u === 'TRUE' || u === 'PLAUSIBLE' || u === 'NEUTRAL') return '✓';
+  if (u === 'FALSE' || u === 'SUSPICIOUS' || u === 'BIASED') return '✗';
+  if (u === 'UNVERIFIED') return '?';
+  return '•';
+}
+
+function formatResultText(result: LensResult): string {
+  switch (result.type) {
+    case 'fact-check':
+      return `${result.claim}\n\n${result.reason}`;
+    case 'trivia':
+      return `${result.answer}\n\n${result.description}`;
+    case 'logical-fallacy':
+      return `${result.fallacy}\n\n${result.explanation}`;
+    case 'stats-check':
+      return `${result.stat}\n\n${result.reason}`;
+    case 'bias':
+      return result.direction ? `${result.direction}\n\n${result.reason}` : result.reason;
+    case 'translation':
+      return result.translatedText;
+    case 'eli5':
+      return result.explanation;
+    case 'session-summary':
+      return result.summary;
+  }
+}
+
+function formatTime(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+}
+
 export const SettingsView: Component = () => {
   const [draftKey, setDraftKey] = createSignal(settings().geminiApiKey);
   const [draftModel, setDraftModel] = createSignal<GeminiModel>(settings().geminiModel);
@@ -47,10 +82,32 @@ export const SettingsView: Component = () => {
   const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [testState, setTestState] = createSignal<'idle' | 'running' | 'ok' | 'fail'>('idle');
   const [testMessage, setTestMessage] = createSignal('');
-  const [expandedId, setExpandedId] = createSignal<string | null>(null);
+
+  // Session log navigation
+  const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
+  const [expandedEntryId, setExpandedEntryId] = createSignal<string | null>(null);
 
   const isConfigured = createMemo(() => settings().geminiApiKey.trim().length >= 10);
   const canSave = createMemo(() => draftKey().trim().length >= 10);
+
+  // Group history entries by sessionId, preserving insertion order
+  const sessionGroups = createMemo(() => {
+    const groups = new Map<string, HistoryEntry[]>();
+    for (const entry of sessionHistory()) {
+      const arr = groups.get(entry.sessionId) ?? [];
+      arr.push(entry);
+      groups.set(entry.sessionId, arr);
+    }
+    return [...groups.entries()].map(([id, entries]) => ({
+      sessionId: id,
+      startTime: entries[0]!.timestamp,
+      entries,
+    }));
+  });
+
+  const selectedSessionEntries = createMemo(() =>
+    sessionGroups().find((g) => g.sessionId === selectedSessionId())?.entries ?? [],
+  );
 
   const onSave = async () => {
     setSaveState('saving');
@@ -92,12 +149,74 @@ export const SettingsView: Component = () => {
     }
   };
 
-  const formatTime = (ts: number) => {
-    const d = new Date(ts);
-    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  // Session detail view
+  const SessionDetailView = () => {
+    const entries = selectedSessionEntries();
+    return (
+      <div class="session-detail">
+        <div class="field-header">
+          <button type="button" class="link-button" onClick={() => { setSelectedSessionId(null); setExpandedEntryId(null); }}>
+            ← Back
+          </button>
+          <span class="field-label">
+            Session {entries[0] ? formatTime(entries[0].timestamp) : ''}
+          </span>
+        </div>
+        <ul class="history-list">
+          <For each={entries}>
+            {(entry) => (
+              <li class="history-row">
+                <button
+                  type="button"
+                  class="history-question"
+                  onClick={() => setExpandedEntryId((prev) => (prev === entry.id ? null : entry.id))}
+                >
+                  <span class="history-icon">{badgeIcon(entry.badge)}</span>
+                  <span class="history-badge">{entry.badge}</span>
+                  <span class="history-time">{formatTime(entry.timestamp)}</span>
+                  <span class="history-lens">{entry.lensName}</span>
+                  <span class="history-q">{entry.question}</span>
+                </button>
+                <Show when={expandedEntryId() === entry.id}>
+                  <div class="history-detail">
+                    <pre>{formatResultText(entry.result)}</pre>
+                  </div>
+                </Show>
+              </li>
+            )}
+          </For>
+        </ul>
+      </div>
+    );
   };
 
-  const renderDetail = (entry: HistoryEntry) => JSON.stringify(entry.result, null, 2);
+  // Session list view
+  const SessionListView = () => (
+    <div class="session-list">
+      <Show
+        when={sessionGroups().length > 0}
+        fallback={<p class="muted">No analyses yet this session.</p>}
+      >
+        <ul class="history-list">
+          <For each={sessionGroups()}>
+            {(group) => (
+              <li class="history-row">
+                <button
+                  type="button"
+                  class="history-question"
+                  onClick={() => { setSelectedSessionId(group.sessionId); setExpandedEntryId(null); }}
+                >
+                  <span class="history-time">{formatTime(group.startTime)}</span>
+                  <span class="history-q">{group.entries.length} {group.entries.length === 1 ? 'check' : 'checks'}</span>
+                  <span class="history-lens">{[...new Set(group.entries.map((e) => e.lensName))].join(', ')}</span>
+                </button>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </div>
+  );
 
   return (
     <main class="settings">
@@ -265,31 +384,8 @@ export const SettingsView: Component = () => {
         <div class="field-header">
           <span class="field-label">Session Log</span>
         </div>
-        <Show
-          when={sessionHistory().length > 0}
-          fallback={<p class="muted">No analyses yet this session.</p>}
-        >
-          <ul class="history-list">
-            <For each={sessionHistory()}>
-              {(entry) => (
-                <li class="history-row">
-                  <button
-                    type="button"
-                    class="history-question"
-                    onClick={() => setExpandedId((prev) => (prev === entry.id ? null : entry.id))}
-                  >
-                    <span class="history-badge">[{entry.badge}]</span>
-                    <span class="history-time">{formatTime(entry.timestamp)}</span>
-                    <span class="history-q">{entry.question}</span>
-                    <span class="history-lens">{entry.lensName}</span>
-                  </button>
-                  <Show when={expandedId() === entry.id}>
-                    <div class="history-detail"><pre>{renderDetail(entry)}</pre></div>
-                  </Show>
-                </li>
-              )}
-            </For>
-          </ul>
+        <Show when={selectedSessionId() !== null} fallback={<SessionListView />}>
+          <SessionDetailView />
         </Show>
       </section>
 

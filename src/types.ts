@@ -14,6 +14,7 @@ export type LensResult =
 /** One entry in the in-memory session history. */
 export interface HistoryEntry {
   id: string;
+  sessionId: string;
   timestamp: number;
   lensId: string;
   lensName: string;
