@@ -6,7 +6,6 @@ import {
   DEFAULT_LANGUAGE,
   DEFAULT_BUFFER_DURATION,
   DEFAULT_AUTO_SUMMARY_INTERVAL,
-  GEMINI_MODELS,
   LANGUAGES,
   type AppMode,
   type AppPhase,
@@ -28,6 +27,8 @@ const SETTINGS_KEY_AUTO_SUMMARY_INTERVAL = 'veritaslens.autoSummaryInterval';
 
 export const [appMode, setAppMode] = createSignal<AppMode>('settings');
 export const [appPhase, setAppPhase] = createSignal<AppPhase>('booting');
+export const [availableModels, setAvailableModels] = createSignal<string[]>([DEFAULT_GEMINI_MODEL]);
+export const [modelsLoading, setModelsLoading] = createSignal<boolean>(false);
 export const [activePersona, setActivePersona] = createSignal<string>('fact-checker');
 export const [lensResult, setLensResult] = createSignal<LensResult | null>(null);
 export const [deviceStatus, setDeviceStatus] = createSignal<DeviceStatus | null>(null);
@@ -121,7 +122,7 @@ export function clearSessionHistory(): void {
 }
 
 function coerceModel(raw: string | null | undefined): GeminiModel {
-  if (raw && (GEMINI_MODELS as readonly string[]).includes(raw)) return raw as GeminiModel;
+  if (raw && raw.startsWith('gemini-')) return raw as GeminiModel;
   return DEFAULT_GEMINI_MODEL;
 }
 

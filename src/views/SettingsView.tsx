@@ -1,7 +1,9 @@
 // src/views/SettingsView.tsx
-import { createMemo, createSignal, For, Show, type Component } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, Show, type Component } from 'solid-js';
 import {
+  availableModels,
   deviceStatus,
+  modelsLoading,
   saveAutoSummaryEnabled,
   saveAutoSummaryInterval,
   saveBufferDuration,
@@ -9,12 +11,13 @@ import {
   saveGeminiModel,
   saveResponseLanguage,
   sessionHistory,
+  setAvailableModels,
+  setModelsLoading,
   settings,
 } from '@/state/store';
 import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import {
-  GEMINI_MODELS,
   LANGUAGES,
   type AutoSummaryInterval,
   type BufferDuration,
@@ -46,18 +49,35 @@ function badgeIcon(badge: string): string {
   return '•';
 }
 
+function badgeClass(badge: string): string {
+  const u = badge.toUpperCase();
+  if (u === 'TRUE' || u === 'PLAUSIBLE' || u === 'NEUTRAL') return 'ok';
+  if (u === 'FALSE' || u === 'SUSPICIOUS' || u === 'BIASED') return 'bad';
+  if (u === 'UNVERIFIED') return 'unk';
+  return '';
+}
+
 function formatResultText(result: LensResult): string {
   switch (result.type) {
-    case 'fact-check':
-      return `${result.claim}\n\n${result.reason}`;
+    case 'fact-check': {
+      const icon = result.verdict === 'TRUE' ? '✓' : result.verdict === 'FALSE' ? '✗' : '?';
+      return `${icon} ${result.verdict}\n\n${result.reason}`;
+    }
     case 'trivia':
       return `${result.answer}\n\n${result.description}`;
     case 'logical-fallacy':
       return `${result.fallacy}\n\n${result.explanation}`;
-    case 'stats-check':
-      return `${result.stat}\n\n${result.reason}`;
-    case 'bias':
-      return result.direction ? `${result.direction}\n\n${result.reason}` : result.reason;
+    case 'stats-check': {
+      const icon = result.verdict === 'PLAUSIBLE' ? '✓' : '✗';
+      return `${icon} ${result.verdict}\n\n${result.reason}`;
+    }
+    case 'bias': {
+      const icon = result.verdict === 'NEUTRAL' ? '✓' : '✗';
+      const firstLine = result.direction
+        ? `${icon} ${result.verdict} · ${result.direction}`
+        : `${icon} ${result.verdict}`;
+      return `${firstLine}\n\n${result.reason}`;
+    }
     case 'translation':
       return result.translatedText;
     case 'eli5':
@@ -72,6 +92,18 @@ function formatTime(ts: number): string {
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
 }
 
+function formatSessionDate(ts: number): string {
+  const now = new Date();
+  const d = new Date(ts);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYesterday = startOfToday - 86_400_000;
+  const hh = d.getHours().toString().padStart(2, '0');
+  const mm = d.getMinutes().toString().padStart(2, '0');
+  if (ts >= startOfToday) return `Today ${hh}:${mm}`;
+  if (ts >= startOfYesterday) return `Yesterday ${hh}:${mm}`;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 export const SettingsView: Component = () => {
   const [draftKey, setDraftKey] = createSignal(settings().geminiApiKey);
   const [draftModel, setDraftModel] = createSignal<GeminiModel>(settings().geminiModel);
@@ -82,10 +114,23 @@ export const SettingsView: Component = () => {
   const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [testState, setTestState] = createSignal<'idle' | 'running' | 'ok' | 'fail'>('idle');
   const [testMessage, setTestMessage] = createSignal('');
+  const [activeTab, setActiveTab] = createSignal<'config' | 'history'>('config');
 
   // Session log navigation
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
   const [expandedEntryId, setExpandedEntryId] = createSignal<string | null>(null);
+
+  createEffect(() => {
+    const key = draftKey();
+    if (key.trim().length < 10) return;
+    setModelsLoading(true);
+    void import('@/llm/gemini').then(({ fetchAvailableModels }) =>
+      fetchAvailableModels(key)
+        .then((models) => { if (models.length > 0) setAvailableModels(models); })
+        .catch(() => { /* keep static fallback */ })
+        .finally(() => setModelsLoading(false)),
+    );
+  });
 
   const isConfigured = createMemo(() => settings().geminiApiKey.trim().length >= 10);
   const canSave = createMemo(() => draftKey().trim().length >= 10);
@@ -171,14 +216,15 @@ export const SettingsView: Component = () => {
                   class="history-question"
                   onClick={() => setExpandedEntryId((prev) => (prev === entry.id ? null : entry.id))}
                 >
-                  <span class="history-icon">{badgeIcon(entry.badge)}</span>
-                  <span class="history-badge">{entry.badge}</span>
+                  <span class={`history-icon ${badgeClass(entry.badge)}`}>{badgeIcon(entry.badge)}</span>
+                  <span class={`history-badge ${badgeClass(entry.badge)}`}>{entry.badge}</span>
                   <span class="history-time">{formatTime(entry.timestamp)}</span>
                   <span class="history-lens">{entry.lensName}</span>
                   <span class="history-q">{entry.question}</span>
                 </button>
                 <Show when={expandedEntryId() === entry.id}>
                   <div class="history-detail">
+                    <p class="history-detail-question">{entry.question}</p>
                     <pre>{formatResultText(entry.result)}</pre>
                   </div>
                 </Show>
@@ -206,9 +252,9 @@ export const SettingsView: Component = () => {
                   class="history-question"
                   onClick={() => { setSelectedSessionId(group.sessionId); setExpandedEntryId(null); }}
                 >
-                  <span class="history-time">{formatTime(group.startTime)}</span>
-                  <span class="history-q">{group.entries.length} {group.entries.length === 1 ? 'check' : 'checks'}</span>
-                  <span class="history-lens">{[...new Set(group.entries.map((e) => e.lensName))].join(', ')}</span>
+                  <span class="history-q">{[...new Set(group.entries.map((e) => e.lensName))].join(', ')}</span>
+                  <span class="history-time">{formatSessionDate(group.startTime)}</span>
+                  <span class="history-badge">{group.entries.length} {group.entries.length === 1 ? 'check' : 'checks'}</span>
                 </button>
               </li>
             )}
@@ -245,154 +291,186 @@ export const SettingsView: Component = () => {
         )}
       </Show>
 
-      <section class="lenses-card">
-        <div class="field-header">
-          <span class="field-label">Lenses</span>
-        </div>
-        <ul class="lens-list">
-          <For each={personas()}>
-            {(p) => (
-              <li class="lens-row">
-                <div class="lens-info">
-                  <strong>{p.name}</strong>
-                  <span class="lens-desc">{p.description}</span>
-                </div>
-              </li>
-            )}
-          </For>
-        </ul>
-      </section>
+      <div class="tab-bar" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          class="tab-btn"
+          classList={{ active: activeTab() === 'config' }}
+          onClick={() => setActiveTab('config')}
+        >
+          Settings
+        </button>
+        <button
+          type="button"
+          role="tab"
+          class="tab-btn"
+          classList={{ active: activeTab() === 'history' }}
+          onClick={() => setActiveTab('history')}
+        >
+          History
+        </button>
+      </div>
 
-      <form
-        class="config"
-        onSubmit={(e) => {
-          e.preventDefault();
-          void onSave();
-        }}
-      >
-        <label class="field">
-          <span class="field-label">Gemini API key</span>
-          <input
-            type="password"
-            autocomplete="off"
-            spellcheck={false}
-            placeholder="AIza…"
-            value={draftKey()}
-            onInput={(e) => setDraftKey(e.currentTarget.value)}
-          />
-          <span class="field-hint">
-            Stored only on this device. Get one at{' '}
-            <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer">
-              aistudio.google.com
-            </a>
-            .
-          </span>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Model</span>
-          <select
-            value={draftModel()}
-            onChange={(e) => setDraftModel(e.currentTarget.value as GeminiModel)}
-          >
-            <For each={GEMINI_MODELS}>{(m) => <option value={m}>{m}</option>}</For>
-          </select>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Response language</span>
-          <select
-            value={draftLanguage()}
-            onChange={(e) => setDraftLanguage(e.currentTarget.value as LanguageCode)}
-          >
-            <For each={Object.entries(LANGUAGES)}>
-              {([code, name]) => <option value={code}>{name}</option>}
-            </For>
-          </select>
-        </label>
-
-        <label class="field">
-          <span class="field-label">Recording buffer</span>
-          <select
-            value={draftBuffer()}
-            onChange={(e) => setDraftBuffer(Number(e.currentTarget.value) as BufferDuration)}
-          >
-            <For each={BUFFER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
-          </select>
-          <span class="field-hint">
-            Longer buffers give Gemini more context but use more tokens per request.
-          </span>
-        </label>
-
-        <div class="field">
-          <span class="field-label">Auto-summary</span>
-          <label class="toggle-row">
-            <input
-              type="checkbox"
-              checked={draftAutoEnabled()}
-              onChange={(e) => setDraftAutoEnabled(e.currentTarget.checked)}
-            />
-            <span>Enable background summaries</span>
-          </label>
-          <Show when={draftAutoEnabled()}>
-            <select
-              value={draftAutoInterval()}
-              onChange={(e) => setDraftAutoInterval(Number(e.currentTarget.value) as AutoSummaryInterval)}
-            >
-              <For each={AUTO_INTERVAL_OPTIONS}>
-                {(opt) => <option value={opt.value}>{opt.label}</option>}
+      <Show when={activeTab() === 'config'}>
+        <>
+          <section class="lenses-card">
+            <div class="field-header">
+              <span class="field-label">Lenses</span>
+            </div>
+            <ul class="lens-list">
+              <For each={personas()}>
+                {(p) => (
+                  <li class="lens-row">
+                    <div class="lens-info">
+                      <strong>{p.name}</strong>
+                      <span class="lens-desc">{p.description}</span>
+                    </div>
+                  </li>
+                )}
               </For>
-            </select>
-            <span class="field-hint warning">
-              ⚠ Auto-summary sends an API request at each interval (~30 calls/hour at 2 min).
-              Significantly higher API cost. Results appear in History only, not on the HUD.
-            </span>
-          </Show>
-        </div>
+            </ul>
+          </section>
 
-        <div class="form-actions">
-          <button type="submit" class="primary" disabled={!canSave() || saveState() === 'saving'}>
-            {saveState() === 'saving' ? 'Saving…' : 'Save'}
-          </button>
-          <button
-            type="button"
-            class="secondary"
-            onClick={onTest}
-            disabled={testState() === 'running' || !isConfigured()}
+          <form
+            class="config"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void onSave();
+            }}
           >
-            <Show when={testState() === 'running'} fallback="Test connection">
-              <span class="spinner inline" />
-              Testing…
-            </Show>
-          </button>
-          <Show when={saveState() === 'saved'}>
-            <span class="status ok">Saved</span>
-          </Show>
-          <Show when={saveState() === 'error'}>
-            <span class="status err">Could not save</span>
-          </Show>
-          <Show when={testState() === 'ok' && testMessage()}>
-            <span class="status ok">{testMessage()}</span>
-          </Show>
-          <Show when={testState() === 'fail' && testMessage()}>
-            <span class="status err">{testMessage()}</span>
-          </Show>
-        </div>
-      </form>
+            <label class="field">
+              <span class="field-label">Gemini API key</span>
+              <input
+                type="password"
+                autocomplete="off"
+                spellcheck={false}
+                placeholder="AIza…"
+                value={draftKey()}
+                onInput={(e) => setDraftKey(e.currentTarget.value)}
+              />
+              <span class="field-hint">
+                Stored only on this device. Get one at{' '}
+                <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer">
+                  aistudio.google.com
+                </a>
+                .
+              </span>
+            </label>
 
-      <section class="session-log">
-        <div class="field-header">
-          <span class="field-label">Session Log</span>
-        </div>
-        <Show when={selectedSessionId() !== null} fallback={<SessionListView />}>
-          <SessionDetailView />
-        </Show>
-      </section>
+            <label class="field">
+              <span class="field-label">
+                Model
+                <Show when={modelsLoading()}>
+                  <span class="spinner inline" />
+                </Show>
+              </span>
+              <select
+                value={draftModel()}
+                onChange={(e) => setDraftModel(e.currentTarget.value as GeminiModel)}
+              >
+                <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
+              </select>
+              <Show when={!isConfigured() && !modelsLoading()}>
+                <span class="field-hint">Enter an API key above to load available models.</span>
+              </Show>
+            </label>
 
-      <footer class="privacy">
-        Audio is held in a rolling in-memory buffer, never written to disk. Your API key is sent
-        only as part of the Gemini request you trigger. Session log is cleared when the app closes.
-      </footer>
+            <label class="field">
+              <span class="field-label">Response language</span>
+              <select
+                value={draftLanguage()}
+                onChange={(e) => setDraftLanguage(e.currentTarget.value as LanguageCode)}
+              >
+                <For each={Object.entries(LANGUAGES)}>
+                  {([code, name]) => <option value={code}>{name}</option>}
+                </For>
+              </select>
+            </label>
+
+            <label class="field">
+              <span class="field-label">Recording buffer</span>
+              <select
+                value={draftBuffer()}
+                onChange={(e) => setDraftBuffer(Number(e.currentTarget.value) as BufferDuration)}
+              >
+                <For each={BUFFER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
+              </select>
+              <span class="field-hint">
+                Longer buffers give Gemini more context but use more tokens per request.
+              </span>
+            </label>
+
+            <div class="field">
+              <span class="field-label">Auto-summary</span>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftAutoEnabled()}
+                  onChange={(e) => setDraftAutoEnabled(e.currentTarget.checked)}
+                />
+                <span>Enable background summaries</span>
+              </label>
+              <Show when={draftAutoEnabled()}>
+                <select
+                  value={draftAutoInterval()}
+                  onChange={(e) => setDraftAutoInterval(Number(e.currentTarget.value) as AutoSummaryInterval)}
+                >
+                  <For each={AUTO_INTERVAL_OPTIONS}>
+                    {(opt) => <option value={opt.value}>{opt.label}</option>}
+                  </For>
+                </select>
+                <span class="field-hint warning">
+                  ⚠ Auto-summary sends an API request at each interval (~30 calls/hour at 2 min).
+                  Significantly higher API cost. Results appear in History only, not on the HUD.
+                </span>
+              </Show>
+            </div>
+
+            <div class="form-actions">
+              <button type="submit" class="primary" disabled={!canSave() || saveState() === 'saving'}>
+                {saveState() === 'saving' ? 'Saving…' : 'Save'}
+              </button>
+              <button
+                type="button"
+                class="secondary"
+                onClick={onTest}
+                disabled={testState() === 'running' || !isConfigured()}
+              >
+                <Show when={testState() === 'running'} fallback="Test connection">
+                  <span class="spinner inline" />
+                  Testing…
+                </Show>
+              </button>
+              <Show when={saveState() === 'saved'}>
+                <span class="status ok">Saved</span>
+              </Show>
+              <Show when={saveState() === 'error'}>
+                <span class="status err">Could not save</span>
+              </Show>
+              <Show when={testState() === 'ok' && testMessage()}>
+                <span class="status ok">{testMessage()}</span>
+              </Show>
+              <Show when={testState() === 'fail' && testMessage()}>
+                <span class="status err">{testMessage()}</span>
+              </Show>
+            </div>
+          </form>
+
+          <footer class="privacy">
+            Audio is held in a rolling in-memory buffer, never written to disk. Your API key is sent
+            only as part of the Gemini request you trigger. Session log is cleared when the app closes.
+          </footer>
+        </>
+      </Show>
+
+      <Show when={activeTab() === 'history'}>
+        <section class="session-log">
+          <Show when={selectedSessionId() !== null} fallback={<SessionListView />}>
+            <SessionDetailView />
+          </Show>
+        </section>
+      </Show>
     </main>
   );
 };

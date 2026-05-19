@@ -55,6 +55,7 @@ export const CONTAINER = {
   reason: 23,
   activeList: 24,
   recIndicator: 25,
+  activeHint: 26,
   // history pages
   historyList: 30,
   historyHint: 31,
@@ -71,6 +72,7 @@ const NAME = {
   reason: 'vl-reason',
   activeList: 'vl-act-lst',
   recIndicator: 'vl-rec',
+  activeHint: 'vl-act-hint',
   historyList: 'vl-hist-lst',
   historyHint: 'vl-hist-hint',
 } as const;
@@ -82,6 +84,8 @@ const STATUS_LABEL: Record<string, string> = {
   displaying: '  ✓   ',
   sleeping: ' ZZZ  ',
   error: ' ERR  ',
+  retry1: 'Retry 1/2',
+  retry2: 'Retry 2/2',
 };
 
 export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'none';
@@ -93,6 +97,13 @@ export const MENU_OPTIONS = [
   { id: 'exit', label: 'Exit' },
 ] as const;
 export type MenuOptionId = (typeof MENU_OPTIONS)[number]['id'];
+
+const DETAIL_PAGE_CHARS = 200;
+const ACTIVE_PAGE_CHARS = 200;
+let detailReasonFull = '';
+let detailReasonOffset = 0;
+let activeReasonFull = '';
+let activeReasonOffset = 0;
 
 let bootstrapped = false;
 let currentPage: HudPage = 'none';
@@ -168,9 +179,20 @@ export async function showHistoryListPage(entries: HistoryEntry[]): Promise<void
 
 export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showHistoryDetailPage().');
+  detailReasonFull = formatLensResult(entry.result).bottom;
+  detailReasonOffset = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
   currentPage = 'history-detail';
+}
+
+export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
+  if (currentPage !== 'history-detail') return;
+  const maxOffset = Math.max(0, detailReasonFull.length - DETAIL_PAGE_CHARS);
+  const newOffset = Math.max(0, Math.min(maxOffset, detailReasonOffset + dir * DETAIL_PAGE_CHARS));
+  if (newOffset === detailReasonOffset) return;
+  detailReasonOffset = newOffset;
+  await upgradeText(CONTAINER.reason, NAME.reason, detailReasonFull.slice(detailReasonOffset, detailReasonOffset + DETAIL_PAGE_CHARS));
 }
 
 export async function restoreHistoryListPage(): Promise<void> {
@@ -192,6 +214,8 @@ export async function setStatus(label: keyof typeof STATUS_LABEL | string): Prom
 export async function setLensResult(result: LensResult | null): Promise<void> {
   if (currentPage !== 'active' && currentPage !== 'history-detail') return;
   if (!result) {
+    activeReasonFull = '';
+    activeReasonOffset = 0;
     await Promise.all([
       upgradeText(CONTAINER.claim, NAME.claim, ''),
       upgradeText(CONTAINER.verdict, NAME.verdict, ''),
@@ -200,11 +224,26 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     return;
   }
   const { top, middle, bottom } = formatLensResult(result);
+  let reasonContent = bottom;
+  if (currentPage === 'active') {
+    activeReasonFull = bottom;
+    activeReasonOffset = 0;
+    reasonContent = bottom.slice(0, ACTIVE_PAGE_CHARS);
+  }
   await Promise.all([
     upgradeText(CONTAINER.claim, NAME.claim, top),
     upgradeText(CONTAINER.verdict, NAME.verdict, middle),
-    upgradeText(CONTAINER.reason, NAME.reason, bottom),
+    upgradeText(CONTAINER.reason, NAME.reason, reasonContent),
   ]);
+}
+
+export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
+  if (currentPage !== 'active') return;
+  const maxOffset = Math.max(0, activeReasonFull.length - ACTIVE_PAGE_CHARS);
+  const newOffset = Math.max(0, Math.min(maxOffset, activeReasonOffset + dir * ACTIVE_PAGE_CHARS));
+  if (newOffset === activeReasonOffset) return;
+  activeReasonOffset = newOffset;
+  await upgradeText(CONTAINER.reason, NAME.reason, activeReasonFull.slice(activeReasonOffset, activeReasonOffset + ACTIVE_PAGE_CHARS));
 }
 
 /** Toggle the recording indicator in the bottom-right of the active page. */
@@ -218,7 +257,7 @@ async function upgradeText(containerID: number, containerName: string, content: 
     containerID,
     containerName,
     contentOffset: 0,
-    contentLength: content.length,
+    contentLength: 0, // 0 = full replacement (SDK semantics)
     content,
   });
   await getBridge().textContainerUpgrade(upgrade);
@@ -229,31 +268,31 @@ function formatLensResult(result: LensResult): { top: string; middle: string; bo
     case 'fact-check':
       return {
         top: clip(result.claim, 140),
-        middle: result.verdict === 'TRUE' ? '✓ TRUE' : result.verdict === 'FALSE' ? '✗ FALSE' : '? UNVERIFIED',
+        middle: result.verdict === 'TRUE' ? '+ TRUE' : result.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED',
         bottom: clip(result.reason, 240),
       };
     case 'trivia':
-      return { top: 'Trivia Answer', middle: clip(result.answer, 140), bottom: clip(result.description, 240) };
+      return { top: clip(result.question, 140), middle: clip(result.answer, 60), bottom: clip(result.description, 240) };
     case 'logical-fallacy':
-      return { top: 'Logical Fallacy', middle: result.fallacy.toUpperCase(), bottom: clip(result.explanation, 240) };
+      return { top: result.fallacy.toUpperCase(), middle: '', bottom: clip(result.explanation, 240) };
     case 'stats-check':
       return {
         top: clip(result.stat, 140),
-        middle: result.verdict === 'PLAUSIBLE' ? '✓ PLAUSIBLE' : '✗ SUSPICIOUS',
+        middle: result.verdict === 'PLAUSIBLE' ? '+ PLAUSIBLE' : '- SUSPICIOUS',
         bottom: clip(result.reason, 240),
       };
     case 'bias':
       return {
-        top: 'Bias Analysis',
-        middle: result.verdict === 'NEUTRAL' ? '✓ NEUTRAL' : `✗ BIASED · ${clip(result.direction, 20)}`,
+        top: result.direction ? clip(result.direction, 140) : '',
+        middle: result.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED',
         bottom: clip(result.reason, 240),
       };
     case 'translation':
-      return { top: 'Translation', middle: clip(result.translatedText, 140), bottom: '' };
+      return { top: clip(result.translatedText, 140), middle: '', bottom: '' };
     case 'eli5':
-      return { top: 'Plain English', middle: '', bottom: clip(result.explanation, 240) };
+      return { top: '', middle: '', bottom: clip(result.explanation, 240) };
     case 'session-summary':
-      return { top: 'Session Summary', middle: '', bottom: clip(result.summary, 240) };
+      return { top: '', middle: '', bottom: clip(result.summary, 240) };
   }
 }
 
@@ -264,8 +303,8 @@ function clip(s: string, max: number): string {
 
 function badgeGlyph(badge: string): string {
   const u = badge.toUpperCase();
-  if (u === 'TRUE' || u === 'PLAUSIBLE' || u === 'NEUTRAL') return '✓ ';
-  if (u === 'FALSE' || u === 'SUSPICIOUS' || u === 'BIASED') return '✗ ';
+  if (u === 'TRUE' || u === 'PLAUSIBLE' || u === 'NEUTRAL') return '+ ';
+  if (u === 'FALSE' || u === 'SUSPICIOUS' || u === 'BIASED') return '- ';
   if (u === 'UNVERIFIED') return '? ';
   return '';
 }
@@ -347,45 +386,45 @@ function buildMenuPage(): RebuildPageContainer {
 }
 
 function buildActivePage(): RebuildPageContainer {
+  // Full-screen invisible capturer — sits behind all content so SDK has nothing
+  // to scroll visually, but still fires textEvents (swipe) and sysEvents (tap).
+  const eventCapture = new TextContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList,
+    xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
+    borderWidth: 0, paddingLength: 0, content: ' ', isEventCapture: 1,
+  });
   const status = new TextContainerProperty({
-    containerID: CONTAINER.status,
-    containerName: NAME.status,
-    xPosition: 16,
-    yPosition: 220,
-    width: 80,
-    height: 28,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: '',
-    isEventCapture: 0,
+    containerID: CONTAINER.status, containerName: NAME.status,
+    xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 22,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const claim = new TextContainerProperty({
+    containerID: CONTAINER.claim, containerName: NAME.claim,
+    xPosition: 16, yPosition: 28, width: SCREEN_W - 32, height: 68,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const verdict = new TextContainerProperty({
+    containerID: CONTAINER.verdict, containerName: NAME.verdict,
+    xPosition: 16, yPosition: 98, width: SCREEN_W - 32, height: 26,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const reason = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 126, width: SCREEN_W - 32, height: 126,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const rec = new TextContainerProperty({
     containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
-    xPosition: SCREEN_W - 96, yPosition: 230, width: 80, height: 28,
+    xPosition: SCREEN_W - 96, yPosition: 256, width: 80, height: 28,
     borderWidth: 0, paddingLength: 4, content: '● REC', isEventCapture: 0,
   });
-  const claim = new TextContainerProperty({
-    containerID: CONTAINER.claim, containerName: NAME.claim, xPosition: 16, yPosition: 32,
-    width: SCREEN_W - 32, height: 68, borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
+    xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
+    borderWidth: 0, paddingLength: 4, content: 'Tap: menu · Double-tap: check',
+    isEventCapture: 0,
   });
-  const verdict = new TextContainerProperty({
-    containerID: CONTAINER.verdict, containerName: NAME.verdict, xPosition: 16, yPosition: 104,
-    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const reason = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 148,
-    width: SCREEN_W - 32, height: 64, borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const eventList = new ListContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 224,
-    width: SCREEN_W - 120, height: 40, borderWidth: 0, paddingLength: 4,
-    itemContainer: new ListItemContainerProperty({
-      itemCount: 1, itemWidth: SCREEN_W - 120, isItemSelectBorderEn: 0,
-      itemName: ['Tap: menu · Double-tap: check'],
-    }),
-    isEventCapture: 1,
-  });
-  return new RebuildPageContainer({ containerTotalNum: 6, listObject: [eventList], textObject: [status, claim, verdict, reason, rec] });
+  return new RebuildPageContainer({ containerTotalNum: 7, listObject: [], textObject: [eventCapture, status, claim, verdict, reason, rec, hint] });
 }
 
 function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
@@ -416,30 +455,30 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
 }
 
 function buildHistoryDetailPage(entry: HistoryEntry): RebuildPageContainer {
-  const { top, middle, bottom } = formatLensResult(entry.result);
+  const { top, middle } = formatLensResult(entry.result);
+  const reasonContent = detailReasonFull.slice(detailReasonOffset, detailReasonOffset + DETAIL_PAGE_CHARS);
   const claim = new TextContainerProperty({
-    containerID: CONTAINER.claim, containerName: NAME.claim, xPosition: 16, yPosition: 32,
-    width: SCREEN_W - 32, height: 68, borderWidth: 0, paddingLength: 4, content: top, isEventCapture: 0,
+    containerID: CONTAINER.claim, containerName: NAME.claim,
+    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
+    borderWidth: 0, paddingLength: 4, content: top, isEventCapture: 0,
   });
   const verdict = new TextContainerProperty({
-    containerID: CONTAINER.verdict, containerName: NAME.verdict, xPosition: 16, yPosition: 104,
-    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4, content: middle, isEventCapture: 0,
+    containerID: CONTAINER.verdict, containerName: NAME.verdict,
+    xPosition: 16, yPosition: 102, width: SCREEN_W - 32, height: 26,
+    borderWidth: 0, paddingLength: 4, content: middle, isEventCapture: 0,
   });
   const reason = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 148,
-    width: SCREEN_W - 32, height: 64, borderWidth: 0, paddingLength: 4, content: bottom, isEventCapture: 0,
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 130, width: SCREEN_W - 32, height: 126,
+    borderWidth: 0, paddingLength: 4, content: reasonContent, isEventCapture: 1,
   });
-  const eventList = new ListContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 224,
-    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
-    itemContainer: new ListItemContainerProperty({
-      itemCount: 1, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 0,
-      itemName: ['Tap: back · Double-tap: new check'],
-    }),
-    isEventCapture: 1,
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList,
+    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
   });
   void entry;
-  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [eventList], textObject: [claim, verdict, reason] });
+  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [], textObject: [claim, verdict, reason, hint] });
 }
 
 export function _resetHudBootstrapForTesting(): void {
@@ -447,4 +486,8 @@ export function _resetHudBootstrapForTesting(): void {
   currentPage = 'none';
   menuPersona = null;
   cachedHistoryEntries = [];
+  detailReasonFull = '';
+  detailReasonOffset = 0;
+  activeReasonFull = '';
+  activeReasonOffset = 0;
 }

@@ -27,7 +27,7 @@ export interface Persona {
 const BUILTINS: Persona[] = [
   {
     id: 'fact-checker',
-    name: 'Fact-Checker',
+    name: 'Fact Checker',
     description: 'Labels the most check-worthy claim TRUE / FALSE / UNVERIFIED.',
     hint: 'Tap to fact-check',
     buildPrompt: buildFactCheckerPrompt,

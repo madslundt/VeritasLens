@@ -8,6 +8,8 @@ import {
   personaAtIndex,
   restoreActivePage,
   restoreHistoryListPage,
+  scrollActiveReason,
+  scrollHistoryDetail,
   setLensResult,
   setRecIndicator,
   setStatus,
@@ -19,7 +21,7 @@ import {
   showUnconfiguredPage,
 } from './hud';
 import { callLens } from '@/llm/gemini';
-import { getPersona, type PersonaId } from '@/personas';
+import { getPersona, type Persona, type PersonaId } from '@/personas';
 import {
   activePersona,
   lensResult as stateResultGet,
@@ -33,7 +35,7 @@ import {
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import type { LensResult } from '@/types';
+import type { LanguageCode, LensResult } from '@/types';
 
 const SLEEP_AFTER_MS = 5 * 60 * 1000;
 
@@ -99,9 +101,9 @@ export async function stopHudRuntime(): Promise<void> {
 interface Gesture { type: OsEventTypeList | undefined; itemIndex?: number; }
 
 function extractGesture(event: EvenHubEvent): Gesture | null {
-  if (event.listEvent) return { type: event.listEvent.eventType, itemIndex: event.listEvent.currentSelectItemIndex };
+  if (event.listEvent) return { type: event.listEvent.eventType, itemIndex: event.listEvent.currentSelectItemIndex ?? 0 };
   if (event.sysEvent) {
-    const et = event.sysEvent.eventType;
+    const et = event.sysEvent.eventType ?? 0; // protobuf: undefined → 0 = CLICK_EVENT
     if (
       et === OsEventTypeList.CLICK_EVENT ||
       et === OsEventTypeList.DOUBLE_CLICK_EVENT ||
@@ -137,6 +139,18 @@ function handleEvent(event: EvenHubEvent): void {
 
   if (event.audioEvent && buffer) { buffer.append(event.audioEvent.audioPcm); return; }
 
+  if (event.textEvent) {
+    const type = event.textEvent.eventType ?? 0;
+    if (currentHudPage() === 'history-detail') {
+      if (type === OsEventTypeList.SCROLL_TOP_EVENT) void scrollHistoryDetail(-1);
+      else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) void scrollHistoryDetail(1);
+    } else if (currentHudPage() === 'active') {
+      if (type === OsEventTypeList.SCROLL_TOP_EVENT) void scrollActiveReason(-1);
+      else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) void scrollActiveReason(1);
+    }
+    return;
+  }
+
   const gesture = extractGesture(event);
   if (!gesture) return;
 
@@ -162,11 +176,8 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 
 async function handleActiveGesture(g: Gesture): Promise<void> {
   resetSleepTimer();
-  switch (g.type) {
-    case OsEventTypeList.CLICK_EVENT:
-    case undefined: await showMenuPage(); break;
-    case OsEventTypeList.SCROLL_TOP_EVENT: await leaveActiveSession(); break;
-    case OsEventTypeList.SCROLL_BOTTOM_EVENT: await clearResultAndKeepListening(); break;
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    await showMenuPage();
   }
 }
 
@@ -188,11 +199,12 @@ async function handleHistoryListGesture(g: Gesture): Promise<void> {
   resetSleepTimer();
   if (typeof g.itemIndex === 'number') lastHistoryIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    if (lastHistoryIndex === 0) { await restoreActivePage(); return; }
+    if (lastHistoryIndex === 0) { lastMenuIndex = 0; await restoreActivePage(); return; }
     const entries = sessionHistory();
     const entry = entries[lastHistoryIndex - 1];
     if (entry) await showHistoryDetailPage(entry);
   } else if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
+    lastMenuIndex = 0;
     await restoreActivePage();
   }
 }
@@ -263,6 +275,25 @@ function stopSpinner(): void {
   spinnerTimer = null;
 }
 
+function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
+  const base = persona.buildPrompt(lang);
+  const recent = sessionHistory().slice(-3).map((e, i) => `${i + 1}. ${e.question}`);
+  const parts = [
+    'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
+    'If no clear human speech is detected, set noSpeech to true in your response.',
+    '',
+    base,
+  ];
+  if (recent.length > 0) {
+    parts.push(
+      '',
+      'RECENT: These have already been analyzed this session — if the audio contains the same content, focus on anything new instead:',
+      ...recent,
+    );
+  }
+  return parts.join('\n');
+}
+
 async function runAnalysis(): Promise<void> {
   const page = currentHudPage();
   if (page === 'history-list' || page === 'history-detail') await restoreActivePage();
@@ -283,7 +314,7 @@ async function runAnalysis(): Promise<void> {
 
   try {
     const wav = buffer.snapshotWav();
-    const prompt = persona.buildPrompt(settings().responseLanguage);
+    const prompt = buildPromptWithContext(persona, settings().responseLanguage);
     const rawText = await callLens({
       apiKey,
       wav,
@@ -291,6 +322,10 @@ async function runAnalysis(): Promise<void> {
       schema: persona.schema,
       model: settings().geminiModel,
       signal: inflight.signal,
+      onRetry: async (attempt) => {
+        stopSpinner();
+        await setStatus(`retry${attempt}`);
+      },
     });
     const result = persona.parse(rawText);
     stopSpinner();
@@ -309,18 +344,17 @@ async function runAnalysis(): Promise<void> {
   } catch (err) {
     stopSpinner();
     if ((err as Error)?.name === 'AbortError') return;
+    if ((err as Error)?.name === 'NoSpeechError') {
+      await setStatus('listening');
+      setAppPhase('listening');
+      return;
+    }
     setErrorMessage(err instanceof Error ? err.message : String(err));
     await setStatus('error');
     setAppPhase('error');
   }
 }
 
-async function clearResultAndKeepListening(): Promise<void> {
-  setStateResult(null);
-  await setLensResult(null);
-  await setStatus('listening');
-  setAppPhase('listening');
-}
 
 function startAutoSummaryTimer(): void {
   stopAutoSummaryTimer();
@@ -364,7 +398,7 @@ async function runAutoSummary(): Promise<void> {
 function extractQuestion(result: LensResult): string {
   switch (result.type) {
     case 'fact-check': return result.claim;
-    case 'trivia': return result.answer;
+    case 'trivia': return result.question;
     case 'logical-fallacy': return result.fallacy;
     case 'stats-check': return result.stat;
     case 'bias': return result.direction || result.verdict;

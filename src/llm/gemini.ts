@@ -30,14 +30,27 @@ export interface CallLensOptions {
   schema: Record<string, unknown>;
   signal?: AbortSignal;
   model?: GeminiModel | string;
+  /** Called before each retry (attempt = 1 or 2). */
+  onRetry?: (attempt: number) => void | Promise<void>;
 }
+
+const MAX_RETRIES = 2;
 
 /**
  * Send audio + prompt to Gemini and return the raw JSON text from the response.
  * Each lens's parse() function handles decoding the JSON.
+ * Retries up to MAX_RETRIES times on 503 responses, calling opts.onRetry before each retry.
  */
 export async function callLens(opts: CallLensOptions): Promise<string> {
   if (!opts.apiKey) throw new Error('Missing Gemini API key.');
+
+  const augmentedSchema = {
+    ...opts.schema,
+    properties: {
+      noSpeech: { type: 'boolean', description: 'Set to true if no clear human speech is detected.' },
+      ...(opts.schema['properties'] as Record<string, unknown> ?? {}),
+    },
+  };
 
   const body = {
     contents: [
@@ -52,32 +65,60 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     generationConfig: {
       temperature: 0.2,
       responseMimeType: 'application/json',
-      responseSchema: opts.schema,
+      responseSchema: augmentedSchema,
     },
   };
 
-  const response = await fetch(
-    `${ENDPOINT(opts.model ?? DEFAULT_GEMINI_MODEL)}?key=${encodeURIComponent(opts.apiKey)}`,
-    {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: opts.signal,
-    },
-  );
+  let lastError: Error | undefined;
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 200)}`);
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await opts.onRetry?.(attempt);
+      await retryDelay(1000, opts.signal);
+    }
+
+    const response = await fetch(
+      `${ENDPOINT(opts.model ?? DEFAULT_GEMINI_MODEL)}?key=${encodeURIComponent(opts.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: opts.signal,
+      },
+    );
+
+    if (response.status === 503) {
+      const errText = await response.text();
+      lastError = new Error(`Gemini HTTP 503: ${truncate(errText, 200)}`);
+      continue;
+    }
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 200)}`);
+    }
+
+    const payload = (await response.json()) as GenerateContentResponse;
+    if (payload.promptFeedback?.blockReason) {
+      throw new Error(`Gemini blocked the prompt: ${payload.promptFeedback.blockReason}`);
+    }
+    const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error('Gemini returned no text candidate.');
+    return text;
   }
 
-  const payload = (await response.json()) as GenerateContentResponse;
-  if (payload.promptFeedback?.blockReason) {
-    throw new Error(`Gemini blocked the prompt: ${payload.promptFeedback.blockReason}`);
-  }
-  const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (!text) throw new Error('Gemini returned no text candidate.');
-  return text;
+  throw lastError ?? new Error('callLens: exhausted retries without a result.');
+}
+
+function retryDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) { reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })); return; }
+    const timer = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+    }, { once: true });
+  });
 }
 
 /**
@@ -106,6 +147,28 @@ export async function runSelfTest(
     model,
   });
   return { latencyMs: Math.round(performance.now() - t0) };
+}
+
+interface ModelsListResponse {
+  models?: Array<{ name?: string; supportedGenerationMethods?: string[] }>;
+}
+
+/** Fetch available Gemini models that support generateContent, sorted newest-first. */
+export async function fetchAvailableModels(apiKey: string): Promise<string[]> {
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+  );
+  if (!response.ok) return [];
+  const data = (await response.json()) as ModelsListResponse;
+  return (data.models ?? [])
+    .filter(
+      (m) =>
+        m.name?.startsWith('models/gemini-') &&
+        m.supportedGenerationMethods?.includes('generateContent'),
+    )
+    .map((m) => m.name!.replace('models/', ''))
+    .sort()
+    .reverse();
 }
 
 function truncate(s: string, n: number): string {

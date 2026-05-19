@@ -65,10 +65,11 @@ import { parseTriviaResponse, buildTriviaPrompt } from '../src/personas/trivia';
 describe('trivia', () => {
   it('parses a valid trivia response', () => {
     const result = parseTriviaResponse(
-      JSON.stringify({ answer: 'Paris', description: 'Capital of France since the 10th century.' }),
+      JSON.stringify({ question: 'What is the capital of France?', answer: 'Paris', description: 'Capital of France since the 10th century.' }),
     );
     expect(result.type).toBe('trivia');
     if (result.type === 'trivia') {
+      expect(result.question).toBe('What is the capital of France?');
       expect(result.answer).toBe('Paris');
       expect(result.description).toContain('France');
     }
@@ -76,7 +77,7 @@ describe('trivia', () => {
 
   it('truncates long answers to 60 chars', () => {
     const long = 'A'.repeat(100);
-    const result = parseTriviaResponse(JSON.stringify({ answer: long, description: 'ok' }));
+    const result = parseTriviaResponse(JSON.stringify({ question: 'Q?', answer: long, description: 'ok' }));
     if (result.type === 'trivia') expect(result.answer.length).toBeLessThanOrEqual(60);
   });
 

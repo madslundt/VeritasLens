@@ -3,7 +3,7 @@
 /** Result union — every built-in lens returns one of these shapes. */
 export type LensResult =
   | { type: 'fact-check'; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; claim: string; reason: string }
-  | { type: 'trivia'; answer: string; description: string }
+  | { type: 'trivia'; question: string; answer: string; description: string }
   | { type: 'logical-fallacy'; fallacy: string; explanation: string }
   | { type: 'stats-check'; verdict: 'PLAUSIBLE' | 'SUSPICIOUS'; stat: string; reason: string }
   | { type: 'bias'; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string }

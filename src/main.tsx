@@ -7,8 +7,10 @@ import {
   loadSettings,
   setAppMode,
   setAppPhase,
+  setAvailableModels,
   setDeviceStatus,
   setErrorMessage,
+  setModelsLoading,
   settings,
 } from './state/store';
 import './main.css';
@@ -33,6 +35,19 @@ async function bootstrap(): Promise<void> {
     bridge.onDeviceStatusChanged((status) => setDeviceStatus(status));
 
     await loadSettings((k) => bridge.getLocalStorage(k));
+
+    setAvailableModels([settings().geminiModel]);
+
+    const apiKey = settings().geminiApiKey;
+    if (apiKey.trim().length >= 10) {
+      setModelsLoading(true);
+      void import('./llm/gemini').then(({ fetchAvailableModels }) =>
+        fetchAvailableModels(apiKey)
+          .then((models) => { if (models.length > 0) setAvailableModels(models); })
+          .catch(() => { /* keep static fallback */ })
+          .finally(() => setModelsLoading(false)),
+      );
+    }
 
     setAppPhase('idle');
 
