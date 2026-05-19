@@ -78,12 +78,12 @@ const NAME = {
 } as const;
 
 const STATUS_LABEL: Record<string, string> = {
-  idle: '  OK  ',
-  listening: ' MIC  ',
-  thinking: ' ...  ',
-  displaying: '  ✓   ',
-  sleeping: ' ZZZ  ',
-  error: ' ERR  ',
+  idle: 'OK',
+  listening: '',
+  thinking: '...',
+  displaying: '✓',
+  sleeping: 'ZZZ',
+  error: 'ERR',
   retry1: 'Retry 1/2',
   retry2: 'Retry 2/2',
 };
@@ -395,36 +395,30 @@ function buildActivePage(): RebuildPageContainer {
   });
   const status = new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 112, yPosition: 8, width: 96, height: 22,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const claim = new TextContainerProperty({
-    containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 64,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const verdict = new TextContainerProperty({
-    containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 98, width: SCREEN_W - 32, height: 26,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const reason = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 126, width: SCREEN_W - 32, height: 120,
+    xPosition: 16, yPosition: 4, width: 96, height: 26,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const rec = new TextContainerProperty({
     containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
-    xPosition: SCREEN_W - 96, yPosition: 252, width: 80, height: 28,
+    xPosition: SCREEN_W - 112, yPosition: 4, width: 104, height: 26,
     borderWidth: 0, paddingLength: 4, content: '● REC', isEventCapture: 0,
   });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
-    xPosition: 16, yPosition: 252, width: SCREEN_W - 120, height: 28,
-    borderWidth: 0, paddingLength: 4, content: 'Tap: menu · Double-tap: check',
-    isEventCapture: 0,
+  const claim = new TextContainerProperty({
+    containerID: CONTAINER.claim, containerName: NAME.claim,
+    xPosition: 16, yPosition: 34, width: SCREEN_W - 32, height: 54,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
-  return new RebuildPageContainer({ containerTotalNum: 7, listObject: [], textObject: [eventCapture, status, claim, verdict, reason, rec, hint] });
+  const verdict = new TextContainerProperty({
+    containerID: CONTAINER.verdict, containerName: NAME.verdict,
+    xPosition: 16, yPosition: 90, width: SCREEN_W - 32, height: 26,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const reason = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 118, width: SCREEN_W - 32, height: 162,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  return new RebuildPageContainer({ containerTotalNum: 6, listObject: [], textObject: [eventCapture, status, rec, claim, verdict, reason] });
 }
 
 function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {

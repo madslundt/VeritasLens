@@ -147,7 +147,7 @@ export const SettingsView: Component = () => {
       sessionId: id,
       startTime: entries[0]!.timestamp,
       entries,
-    }));
+    })).reverse();
   });
 
   const selectedSessionEntries = createMemo(() =>

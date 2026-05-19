@@ -188,7 +188,7 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
     const option = menuOptionAtIndex(lastMenuIndex);
     switch (option) {
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
-      case 'history': await showHistoryListPage(sessionHistory()); break;
+      case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
       case 'cancel': await restoreActiveWithResult(); break;
       case 'exit': await leaveActiveSession(); break;
     }
