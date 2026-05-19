@@ -339,13 +339,13 @@ function buildUnconfiguredPage(mode: 'create' | 'rebuild'): CreateStartUpPageCon
 function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer | RebuildPageContainer {
   const currentPersonas = getPickerPersonas(settings().bufferDuration);
   const title = new TextContainerProperty({
-    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
     content: 'Pick a lens', isEventCapture: 0,
   });
   const list = new ListContainerProperty({
-    containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 76,
-    width: SCREEN_W - 32, height: 148, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 48,
+    width: SCREEN_W - 32, height: 200, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: currentPersonas.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: currentPersonas.map((p) => p.name),
@@ -353,8 +353,8 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 232,
-    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
+    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
     content: currentPersonas.length > 1 ? 'Swipe ⇅ · Tap to start' : 'Tap to start',
     isEventCapture: 0,
   });
@@ -364,13 +364,13 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
 
 function buildMenuPage(): RebuildPageContainer {
   const title = new TextContainerProperty({
-    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
     content: 'Menu', isEventCapture: 0,
   });
   const list = new ListContainerProperty({
-    containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 76,
-    width: SCREEN_W - 32, height: 148, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
+    width: SCREEN_W - 32, height: 200, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: MENU_OPTIONS.map((o) => o.label),
@@ -378,8 +378,8 @@ function buildMenuPage(): RebuildPageContainer {
     isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 232,
-    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
+    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
     content: 'Swipe ⇅ · Tap to confirm', isEventCapture: 0,
   });
   return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
@@ -429,7 +429,7 @@ function buildActivePage(): RebuildPageContainer {
 
 function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
   const title = new TextContainerProperty({
-    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
     content: 'History', isEventCapture: 0,
   });
@@ -437,8 +437,8 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
     ? ['← Back', ...entries.map((e) => `${badgeGlyph(e.badge)}${clip(e.question, 55)}`)]
     : ['← Back', 'No history yet'];
   const list = new ListContainerProperty({
-    containerID: CONTAINER.historyList, containerName: NAME.historyList, xPosition: 16, yPosition: 80,
-    width: SCREEN_W - 32, height: 128, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.historyList, containerName: NAME.historyList, xPosition: 16, yPosition: 48,
+    width: SCREEN_W - 32, height: 200, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: itemNames,
@@ -446,8 +446,8 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
     isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
-    containerID: CONTAINER.historyHint, containerName: NAME.historyHint, xPosition: 16, yPosition: 224,
-    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.historyHint, containerName: NAME.historyHint, xPosition: 16, yPosition: 252,
+    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
     content: 'Swipe ⇅ · Tap: detail · Tap ← : back',
     isEventCapture: 0,
   });
