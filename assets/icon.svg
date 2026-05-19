@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f1a2c"/>
+      <stop offset="1" stop-color="#1a2a45"/>
+    </linearGradient>
+    <radialGradient id="lensGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#9be7ff" stop-opacity="0.85"/>
+      <stop offset="0.6" stop-color="#3aa0d8" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#3aa0d8" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sparkleGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="1"/>
+      <stop offset="0.4" stop-color="#bfeaff" stop-opacity="0.6"/>
+      <stop offset="1" stop-color="#bfeaff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Rounded-square background -->
+  <rect width="1024" height="1024" rx="225" ry="225" fill="url(#bg)"/>
+
+  <!-- Concentric listening rings -->
+  <g fill="none" stroke="#ffffff" stroke-width="2">
+    <circle cx="512" cy="520" r="170" stroke-opacity="0.10"/>
+    <circle cx="512" cy="520" r="240" stroke-opacity="0.07"/>
+    <circle cx="512" cy="520" r="320" stroke-opacity="0.05"/>
+    <circle cx="512" cy="520" r="400" stroke-opacity="0.035"/>
+  </g>
+
+  <!-- Soft glow behind the right lens -->
+  <circle cx="600" cy="520" r="170" fill="url(#lensGlow)"/>
+
+  <!-- Wraparound smart-glasses visor -->
+  <g fill="none" stroke="#e6f0fa" stroke-width="14" stroke-linejoin="round" stroke-linecap="round">
+    <!-- Visor outline: two lens forms joined by a soft bridge -->
+    <path d="M 244 500
+             C 244 432, 308 412, 360 412
+             L 460 412
+             C 496 412, 508 432, 512 460
+             C 516 432, 528 412, 564 412
+             L 664 412
+             C 716 412, 780 432, 780 500
+             L 780 552
+             C 780 596, 740 612, 700 612
+             L 568 612
+             C 540 612, 524 596, 512 568
+             C 500 596, 484 612, 456 612
+             L 324 612
+             C 284 612, 244 596, 244 552
+             Z"
+          fill="rgba(8,16,30,0.55)"/>
+  </g>
+
+  <!-- Subtle inner lens highlight (left lens) -->
+  <path d="M 282 460
+           C 290 442, 320 436, 360 436
+           L 440 436
+           C 460 436, 472 446, 478 462"
+        fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="6" stroke-linecap="round"/>
+
+  <!-- Sparkle glow halo -->
+  <circle cx="612" cy="520" r="78" fill="url(#sparkleGlow)"/>
+
+  <!-- 4-point sparkle -->
+  <path d="M 612 446
+           L 624 508
+           L 686 520
+           L 624 532
+           L 612 594
+           L 600 532
+           L 538 520
+           L 600 508 Z"
+        fill="#eaf6ff"/>
+  <circle cx="612" cy="520" r="6" fill="#ffffff"/>
+
+  <!-- Small twinkle within the left lens (intelligence/dust signal) -->
+  <g fill="#9be7ff" opacity="0.85">
+    <circle cx="370" cy="490" r="4"/>
+    <circle cx="395" cy="540" r="3"/>
+    <circle cx="420" cy="500" r="2.5"/>
+    <circle cx="345" cy="520" r="2.5"/>
+  </g>
+
+  <!-- Waveform bars (right of sparkle) -->
+  <g fill="#9be7ff">
+    <rect x="700" y="500" width="7" height="40" rx="3.5"/>
+    <rect x="716" y="486" width="7" height="68" rx="3.5"/>
+    <rect x="732" y="472" width="7" height="96" rx="3.5"/>
+    <rect x="748" y="490" width="7" height="60" rx="3.5"/>
+  </g>
+
+  <!-- Coral tap-target accent (echoes the orange finger in the reference) -->
+  <g stroke="#e07a5f" stroke-linecap="round" fill="none">
+    <path d="M 802 492 A 26 26 0 0 1 802 548" stroke-width="7"/>
+    <path d="M 822 478 A 44 44 0 0 1 822 562" stroke-width="6" stroke-opacity="0.75"/>
+  </g>
+  <circle cx="784" cy="520" r="11" fill="#e07a5f"/>
+</svg>

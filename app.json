@@ -2,21 +2,21 @@
   "package_id": "com.veritaslens.app",
   "edition": "202601",
   "name": "VeritasLens",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "network",
-      "desc": "VeritasLens sends a short audio snippet to Google Gemini to fact-check what was just said. Your API key and audio never leave the device except for the request you trigger.",
+      "desc": "VeritasLens sends a short audio snippet to Google Gemini for the analysis lens you trigger (fact check, trivia, fallacy, stats, bias, translation, simplify, summary, or auto-routed). Your API key and audio leave the device only as part of that request.",
       "whitelist": [
         "https://generativelanguage.googleapis.com"
       ]
     },
     {
       "name": "g2-microphone",
-      "desc": "VeritasLens listens to a rolling 30-second buffer of nearby audio in memory only. Audio is never written to disk and is dropped immediately after each fact-check."
+      "desc": "VeritasLens listens to a rolling in-memory buffer of nearby audio (30 seconds to 10 minutes, configurable). Audio is never written to disk and is dropped immediately after each analysis."
     }
   ],
   "supported_languages": [

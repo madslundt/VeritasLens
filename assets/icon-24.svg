@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Simplified glasses silhouette + sparkle, optimised for 24 px monochrome -->
+  <g fill="#000000">
+    <!-- Left lens -->
+    <path d="M 3 11
+             C 3 9.3, 4.3 8, 6 8
+             L 9 8
+             C 10.4 8, 11.5 9.1, 11.5 10.5
+             L 11.5 13
+             C 11.5 14.4, 10.4 15.5, 9 15.5
+             L 6 15.5
+             C 4.3 15.5, 3 14.2, 3 12.5 Z"/>
+    <!-- Bridge -->
+    <rect x="11" y="11" width="2" height="1.5"/>
+    <!-- Right lens (hollowed to host sparkle) -->
+    <path d="M 12.5 10.5
+             C 12.5 9.1, 13.6 8, 15 8
+             L 18 8
+             C 19.7 8, 21 9.3, 21 11
+             L 21 12.5
+             C 21 14.2, 19.7 15.5, 18 15.5
+             L 15 15.5
+             C 13.6 15.5, 12.5 14.4, 12.5 13 Z
+             M 17 9.6
+             L 17.5 11.2
+             L 19.1 11.7
+             L 17.5 12.2
+             L 17 13.8
+             L 16.5 12.2
+             L 14.9 11.7
+             L 16.5 11.2 Z"
+          fill-rule="evenodd"/>
+  </g>
+</svg>
