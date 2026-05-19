@@ -1,79 +1,53 @@
+// src/views/SettingsView.tsx
 import { createMemo, createSignal, For, Show, type Component } from 'solid-js';
 import {
-  addCustomPersona,
   deviceStatus,
-  removeCustomPersona,
+  saveAutoSummaryEnabled,
+  saveAutoSummaryInterval,
+  saveBufferDuration,
   saveGeminiKey,
   saveGeminiModel,
   saveResponseLanguage,
+  sessionHistory,
   settings,
 } from '@/state/store';
 import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
-import { GEMINI_MODELS, LANGUAGES, type GeminiModel, type LanguageCode } from '@/types';
+import {
+  GEMINI_MODELS,
+  LANGUAGES,
+  type AutoSummaryInterval,
+  type BufferDuration,
+  type GeminiModel,
+  type HistoryEntry,
+  type LanguageCode,
+} from '@/types';
 import { personas } from '@/personas';
+
+const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
+  { value: 30, label: '30 seconds' },
+  { value: 120, label: '2 minutes' },
+  { value: 300, label: '5 minutes' },
+  { value: 600, label: '10 minutes' },
+];
+
+const AUTO_INTERVAL_OPTIONS: { value: AutoSummaryInterval; label: string }[] = [
+  { value: 1, label: 'Every minute' },
+  { value: 2, label: 'Every 2 minutes' },
+  { value: 5, label: 'Every 5 minutes' },
+];
 
 export const SettingsView: Component = () => {
   const [draftKey, setDraftKey] = createSignal(settings().geminiApiKey);
   const [draftModel, setDraftModel] = createSignal<GeminiModel>(settings().geminiModel);
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
+  const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
+  const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
+  const [draftAutoInterval, setDraftAutoInterval] = createSignal<AutoSummaryInterval>(settings().autoSummaryInterval);
   const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [testState, setTestState] = createSignal<'idle' | 'running' | 'ok' | 'fail'>('idle');
-  const [testMessage, setTestMessage] = createSignal<string>('');
-
-  // Custom-lens form state
-  const [isAddingLens, setIsAddingLens] = createSignal(false);
-  const [lensName, setLensName] = createSignal('');
-  const [lensDesc, setLensDesc] = createSignal('');
-  const [lensPrompt, setLensPrompt] = createSignal('');
-  const [lensError, setLensError] = createSignal<string | null>(null);
-
-  const lensFormValid = createMemo(
-    () => lensName().trim().length > 0 && lensPrompt().trim().length > 0,
-  );
-
-  const resetLensForm = () => {
-    setLensName('');
-    setLensDesc('');
-    setLensPrompt('');
-    setLensError(null);
-  };
-
-  const onAddLens = async () => {
-    if (!lensFormValid()) return;
-    setLensError(null);
-    try {
-      const bridge = getBridge();
-      await addCustomPersona(
-        (k, v) => bridge.setLocalStorage(k, v),
-        (k) => bridge.getLocalStorage(k),
-        {
-          name: lensName().trim(),
-          description: lensDesc().trim() || 'Custom lens',
-          prompt: lensPrompt().trim(),
-        },
-      );
-      resetLensForm();
-      setIsAddingLens(false);
-      if (isHudRunning()) await refreshHudPage();
-    } catch (err) {
-      setLensError(err instanceof Error ? err.message : String(err));
-    }
-  };
-
-  const onRemoveLens = async (id: string) => {
-    try {
-      const bridge = getBridge();
-      await removeCustomPersona(
-        (k, v) => bridge.setLocalStorage(k, v),
-        (k) => bridge.getLocalStorage(k),
-        id,
-      );
-      if (isHudRunning()) await refreshHudPage();
-    } catch (err) {
-      setLensError(err instanceof Error ? err.message : String(err));
-    }
-  };
+  const [testMessage, setTestMessage] = createSignal('');
+  const [expandedId, setExpandedId] = createSignal<string | null>(null);
 
   const isConfigured = createMemo(() => settings().geminiApiKey.trim().length >= 10);
   const canSave = createMemo(() => draftKey().trim().length >= 10);
@@ -83,12 +57,15 @@ export const SettingsView: Component = () => {
     try {
       const bridge = getBridge();
       const setLs = (k: string, v: string) => bridge.setLocalStorage(k, v);
-      const [keyOk, modelOk, langOk] = await Promise.all([
+      const results = await Promise.all([
         saveGeminiKey(setLs, draftKey().trim()),
         saveGeminiModel(setLs, draftModel()),
         saveResponseLanguage(setLs, draftLanguage()),
+        saveBufferDuration(setLs, draftBuffer()),
+        saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
+        saveAutoSummaryInterval(setLs, draftAutoInterval()),
       ]);
-      if (keyOk && modelOk && langOk) {
+      if (results.every(Boolean)) {
         setSaveState('saved');
         setTimeout(() => setSaveState('idle'), 1500);
         if (!isHudRunning()) await startHudRuntime();
@@ -114,6 +91,13 @@ export const SettingsView: Component = () => {
       setTestMessage(err instanceof Error ? err.message : String(err));
     }
   };
+
+  const formatTime = (ts: number) => {
+    const d = new Date(ts);
+    return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+  };
+
+  const renderDetail = (entry: HistoryEntry) => JSON.stringify(entry.result, null, 2);
 
   return (
     <main class="settings">
@@ -145,20 +129,7 @@ export const SettingsView: Component = () => {
       <section class="lenses-card">
         <div class="field-header">
           <span class="field-label">Lenses</span>
-          <Show when={!isAddingLens()}>
-            <button
-              type="button"
-              class="link-button"
-              onClick={() => {
-                resetLensForm();
-                setIsAddingLens(true);
-              }}
-            >
-              + Add lens
-            </button>
-          </Show>
         </div>
-
         <ul class="lens-list">
           <For each={personas()}>
             {(p) => (
@@ -167,68 +138,10 @@ export const SettingsView: Component = () => {
                   <strong>{p.name}</strong>
                   <span class="lens-desc">{p.description}</span>
                 </div>
-                <Show when={!p.builtin}>
-                  <button
-                    type="button"
-                    class="link-button danger"
-                    onClick={() => void onRemoveLens(p.id)}
-                    title={`Remove "${p.name}"`}
-                  >
-                    Remove
-                  </button>
-                </Show>
               </li>
             )}
           </For>
         </ul>
-
-        <Show when={isAddingLens()}>
-          <div class="lens-form">
-            <input
-              type="text"
-              placeholder="Name (e.g. Translator)"
-              value={lensName()}
-              onInput={(e) => setLensName(e.currentTarget.value)}
-              maxLength={32}
-            />
-            <input
-              type="text"
-              placeholder="Short description (optional)"
-              value={lensDesc()}
-              onInput={(e) => setLensDesc(e.currentTarget.value)}
-              maxLength={120}
-            />
-            <textarea
-              placeholder="Describe what this lens should do with the last 30 seconds of audio. e.g. 'Translate the speech to English.' or 'Summarize the conversation into action items.' or 'Tell me if I'm talking too much.'"
-              value={lensPrompt()}
-              onInput={(e) => setLensPrompt(e.currentTarget.value)}
-              rows={5}
-            />
-            <Show when={lensError()}>
-              <span class="status err">{lensError()}</span>
-            </Show>
-            <div class="lens-form-actions">
-              <button
-                type="button"
-                class="primary"
-                onClick={() => void onAddLens()}
-                disabled={!lensFormValid()}
-              >
-                Save lens
-              </button>
-              <button
-                type="button"
-                class="secondary"
-                onClick={() => {
-                  setIsAddingLens(false);
-                  resetLensForm();
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </Show>
       </section>
 
       <form
@@ -279,6 +192,45 @@ export const SettingsView: Component = () => {
           </select>
         </label>
 
+        <label class="field">
+          <span class="field-label">Recording buffer</span>
+          <select
+            value={draftBuffer()}
+            onChange={(e) => setDraftBuffer(Number(e.currentTarget.value) as BufferDuration)}
+          >
+            <For each={BUFFER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
+          </select>
+          <span class="field-hint">
+            Longer buffers give Gemini more context but use more tokens per request.
+          </span>
+        </label>
+
+        <div class="field">
+          <span class="field-label">Auto-summary</span>
+          <label class="toggle-row">
+            <input
+              type="checkbox"
+              checked={draftAutoEnabled()}
+              onChange={(e) => setDraftAutoEnabled(e.currentTarget.checked)}
+            />
+            <span>Enable background summaries</span>
+          </label>
+          <Show when={draftAutoEnabled()}>
+            <select
+              value={draftAutoInterval()}
+              onChange={(e) => setDraftAutoInterval(Number(e.currentTarget.value) as AutoSummaryInterval)}
+            >
+              <For each={AUTO_INTERVAL_OPTIONS}>
+                {(opt) => <option value={opt.value}>{opt.label}</option>}
+              </For>
+            </select>
+            <span class="field-hint warning">
+              ⚠ Auto-summary sends an API request at each interval (~30 calls/hour at 2 min).
+              Significantly higher API cost. Results appear in History only, not on the HUD.
+            </span>
+          </Show>
+        </div>
+
         <div class="form-actions">
           <button type="submit" class="primary" disabled={!canSave() || saveState() === 'saving'}>
             {saveState() === 'saving' ? 'Saving…' : 'Save'}
@@ -309,9 +261,41 @@ export const SettingsView: Component = () => {
         </div>
       </form>
 
+      <section class="session-log">
+        <div class="field-header">
+          <span class="field-label">Session Log</span>
+        </div>
+        <Show
+          when={sessionHistory().length > 0}
+          fallback={<p class="muted">No analyses yet this session.</p>}
+        >
+          <ul class="history-list">
+            <For each={sessionHistory()}>
+              {(entry) => (
+                <li class="history-row">
+                  <button
+                    type="button"
+                    class="history-question"
+                    onClick={() => setExpandedId((prev) => (prev === entry.id ? null : entry.id))}
+                  >
+                    <span class="history-badge">[{entry.badge}]</span>
+                    <span class="history-time">{formatTime(entry.timestamp)}</span>
+                    <span class="history-q">{entry.question}</span>
+                    <span class="history-lens">{entry.lensName}</span>
+                  </button>
+                  <Show when={expandedId() === entry.id}>
+                    <div class="history-detail"><pre>{renderDetail(entry)}</pre></div>
+                  </Show>
+                </li>
+              )}
+            </For>
+          </ul>
+        </Show>
+      </section>
+
       <footer class="privacy">
-        Audio is held in a 30-second rolling in-memory buffer, never written to disk. Your API key
-        is sent only as part of the Gemini request you trigger.
+        Audio is held in a rolling in-memory buffer, never written to disk. Your API key is sent
+        only as part of the Gemini request you trigger. Session log is cleared when the app closes.
       </footer>
     </main>
   );

@@ -4,7 +4,6 @@ import { App } from './App';
 import { initBridge } from './runtime/bridge';
 import { startHudRuntime } from './runtime/lifecycle';
 import {
-  loadCustomPersonas,
   loadSettings,
   setAppMode,
   setAppPhase,
@@ -34,7 +33,6 @@ async function bootstrap(): Promise<void> {
     bridge.onDeviceStatusChanged((status) => setDeviceStatus(status));
 
     await loadSettings((k) => bridge.getLocalStorage(k));
-    await loadCustomPersonas((k) => bridge.getLocalStorage(k));
 
     setAppPhase('idle');
 
