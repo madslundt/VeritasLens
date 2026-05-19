@@ -80,7 +80,7 @@ a {
 .settings {
   max-width: 520px;
   margin: 0 auto;
-  padding: 1.75rem 1.25rem 3rem;
+  padding: 1.75rem 1.25rem max(3rem, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
   gap: 1.25rem;

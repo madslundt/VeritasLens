@@ -344,8 +344,8 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     content: 'Pick a lens', isEventCapture: 0,
   });
   const list = new ListContainerProperty({
-    containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 88,
-    width: SCREEN_W - 32, height: 120, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 76,
+    width: SCREEN_W - 32, height: 148, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: currentPersonas.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: currentPersonas.map((p) => p.name),
@@ -353,7 +353,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 224,
+    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 232,
     width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
     content: currentPersonas.length > 1 ? 'Swipe ⇅ · Tap to start' : 'Tap to start',
     isEventCapture: 0,
@@ -369,8 +369,8 @@ function buildMenuPage(): RebuildPageContainer {
     content: 'Menu', isEventCapture: 0,
   });
   const list = new ListContainerProperty({
-    containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 88,
-    width: SCREEN_W - 32, height: 120, borderWidth: 0, paddingLength: 4,
+    containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 76,
+    width: SCREEN_W - 32, height: 148, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: MENU_OPTIONS.map((o) => o.label),
@@ -378,7 +378,7 @@ function buildMenuPage(): RebuildPageContainer {
     isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 224,
+    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 232,
     width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
     content: 'Swipe ⇅ · Tap to confirm', isEventCapture: 0,
   });
@@ -395,12 +395,12 @@ function buildActivePage(): RebuildPageContainer {
   });
   const status = new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 22,
+    xPosition: SCREEN_W - 112, yPosition: 8, width: 96, height: 22,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 28, width: SCREEN_W - 32, height: 68,
+    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 64,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const verdict = new TextContainerProperty({
@@ -410,17 +410,17 @@ function buildActivePage(): RebuildPageContainer {
   });
   const reason = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 126, width: SCREEN_W - 32, height: 126,
+    xPosition: 16, yPosition: 126, width: SCREEN_W - 32, height: 120,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const rec = new TextContainerProperty({
     containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
-    xPosition: SCREEN_W - 96, yPosition: 256, width: 80, height: 28,
+    xPosition: SCREEN_W - 96, yPosition: 252, width: 80, height: 28,
     borderWidth: 0, paddingLength: 4, content: '● REC', isEventCapture: 0,
   });
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
-    xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 120, height: 28,
     borderWidth: 0, paddingLength: 4, content: 'Tap: menu · Double-tap: check',
     isEventCapture: 0,
   });
