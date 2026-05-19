@@ -92,6 +92,9 @@ const STATUS_LABEL: Record<string, string> = {
 
 export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'none';
 
+export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
+export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
+
 export const MENU_OPTIONS = [
   { id: 'fact-check', label: 'Check' },
   { id: 'history', label: 'History' },
@@ -253,6 +256,11 @@ export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
 export async function setRecIndicator(on: boolean): Promise<void> {
   if (currentPage !== 'active') return;
   await upgradeText(CONTAINER.recIndicator, NAME.recIndicator, on ? '● REC' : '');
+}
+
+export async function setActiveHint(content: string): Promise<void> {
+  if (currentPage !== 'active') return;
+  await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
 }
 
 
@@ -438,7 +446,7 @@ function buildActivePage(): RebuildPageContainer {
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
     xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
-    borderWidth: 0, paddingLength: 4, content: 'Tap: menu · Double-tap: check',
+    borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT,
     isEventCapture: 0,
   });
   return new RebuildPageContainer({ containerTotalNum: 7, listObject: [], textObject: [eventCapture, status, claim, verdict, reason, rec, hint] });

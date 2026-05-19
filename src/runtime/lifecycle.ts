@@ -2,6 +2,8 @@
 import { getBridge } from './bridge';
 import { PcmRingBuffer } from './audioBuffer';
 import {
+  ACTIVE_HINT_ANALYZING,
+  ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   currentHudPage,
   menuOptionAtIndex,
@@ -11,6 +13,7 @@ import {
   restoreHistoryListPage,
   scrollActiveReason,
   scrollHistoryDetail,
+  setActiveHint,
   setLensResult,
   setRecIndicator,
   setStatus,
@@ -48,6 +51,7 @@ let buffer: PcmRingBuffer | null = null;
 let unsubscribeEvents: (() => void) | null = null;
 let sleepTimer: ReturnType<typeof setTimeout> | null = null;
 let inflight: AbortController | null = null;
+let analyzing = false;
 let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
 
 let lastPickerIndex = 0;
@@ -161,8 +165,12 @@ function handleEvent(event: EvenHubEvent): void {
   const gesture = extractGesture(event);
   if (!gesture) return;
 
-  // Double-tap is universal: always triggers a new analysis from any page.
-  if (gesture.type === OsEventTypeList.DOUBLE_CLICK_EVENT) { void runAnalysis(); return; }
+  // Double-tap is universal: starts analysis, or cancels an in-flight one.
+  if (gesture.type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+    if (analyzing) { inflight?.abort(); return; }
+    void runAnalysis();
+    return;
+  }
 
   const page = currentHudPage();
   if (page === 'picker') void handlePickerEvent(gesture);
@@ -336,9 +344,12 @@ async function runAnalysis(): Promise<void> {
   if (!persona) return;
 
   inflight?.abort();
-  inflight = new AbortController();
+  const controller = new AbortController();
+  inflight = controller;
+  analyzing = true;
   setAppPhase('thinking');
   await setStatus('thinking');
+  await setActiveHint(ACTIVE_HINT_ANALYZING);
   startSpinner();
 
   try {
@@ -361,7 +372,7 @@ async function runAnalysis(): Promise<void> {
         prompt: `${classifierContext}\n\n${classifierPrompt}`,
         schema: AUTO_CLASSIFIER_SCHEMA,
         model: settings().geminiAutoModel,
-        signal: inflight.signal,
+        signal: controller.signal,
         onRetry,
       });
       const { chosenLensId } = parseAutoClassifierResponse(classifierRaw);
@@ -385,7 +396,7 @@ async function runAnalysis(): Promise<void> {
       prompt: `${analysisContext}\n\n${analysisPrompt}`,
       schema: analysisPersona.schema,
       model: settings().geminiModel,
-      signal: inflight.signal,
+      signal: controller.signal,
       onRetry,
     });
     const result = analysisPersona.parse(rawText);
@@ -402,18 +413,28 @@ async function runAnalysis(): Promise<void> {
     }, (k, v) => getBridge().setLocalStorage(k, v));
     await setLensResult(result);
     await setStatus('displaying');
+    await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('displaying');
   } catch (err) {
     stopSpinner();
-    if ((err as Error)?.name === 'AbortError') return;
+    if ((err as Error)?.name === 'AbortError') {
+      await setStatus('listening');
+      await setActiveHint(ACTIVE_HINT_DEFAULT);
+      setAppPhase('listening');
+      return;
+    }
     if ((err as Error)?.name === 'NoSpeechError') {
       await setStatus('listening');
+      await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('listening');
       return;
     }
     setErrorMessage(err instanceof Error ? err.message : String(err));
     await setStatus('error');
+    await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('error');
+  } finally {
+    if (inflight === controller) analyzing = false;
   }
 }
 
