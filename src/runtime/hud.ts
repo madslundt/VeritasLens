@@ -111,6 +111,7 @@ let bootstrapped = false;
 let currentPage: HudPage = 'none';
 let menuPersona: Persona | null = null;
 let cachedHistoryEntries: HistoryEntry[] = [];
+export function getHistoryListEntries(): HistoryEntry[] { return cachedHistoryEntries; }
 
 export function currentHudPage(): HudPage { return currentPage; }
 

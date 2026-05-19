@@ -17,6 +17,7 @@ import {
   showActivePage,
   showHistoryDetailPage,
   showHistoryListPage,
+  getHistoryListEntries,
   showMenuPage,
   showPickerPage,
   showUnconfiguredPage,
@@ -206,7 +207,7 @@ async function handleHistoryListGesture(g: Gesture): Promise<void> {
   if (typeof g.itemIndex === 'number') lastHistoryIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     if (lastHistoryIndex === 0) { lastMenuIndex = 0; await restoreActivePage(); return; }
-    const entries = sessionHistory();
+    const entries = getHistoryListEntries();
     const entry = entries[lastHistoryIndex - 1];
     if (entry) await showHistoryDetailPage(entry);
   } else if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
