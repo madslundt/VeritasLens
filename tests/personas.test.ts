@@ -1,6 +1,7 @@
 // tests/personas.test.ts
 import { describe, it, expect } from 'vitest';
 import { trimTo, isRecord, parseJsonResponse } from '../src/personas/_utils';
+import { parseFactCheckerResponse, buildFactCheckerPrompt } from '../src/personas/factChecker';
 
 describe('_utils', () => {
   it('trimTo leaves short strings unchanged', () => {
@@ -33,5 +34,28 @@ describe('_utils', () => {
 
   it('parseJsonResponse throws if no JSON found', () => {
     expect(() => parseJsonResponse('no json here')).toThrow();
+  });
+});
+
+describe('fact-checker', () => {
+  it('parses a valid TRUE response', () => {
+    const result = parseFactCheckerResponse(
+      JSON.stringify({ verdict: 'TRUE', claim: 'Water boils at 100C.', reason: 'At sea level, yes.' }),
+    );
+    expect(result.type).toBe('fact-check');
+    if (result.type === 'fact-check') {
+      expect(result.verdict).toBe('TRUE');
+      expect(result.claim).toBe('Water boils at 100C.');
+    }
+  });
+
+  it('falls back to UNVERIFIED for unknown verdict', () => {
+    const result = parseFactCheckerResponse(JSON.stringify({ verdict: 'MAYBE', claim: 'x', reason: 'y' }));
+    if (result.type === 'fact-check') expect(result.verdict).toBe('UNVERIFIED');
+  });
+
+  it('buildFactCheckerPrompt includes the language name', () => {
+    const prompt = buildFactCheckerPrompt('de');
+    expect(prompt).toContain('Deutsch');
   });
 });
