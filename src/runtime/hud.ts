@@ -1,3 +1,4 @@
+// src/runtime/hud.ts
 import {
   CreateStartUpPageContainer,
   ListContainerProperty,
@@ -8,8 +9,9 @@ import {
   TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
 import { getBridge } from './bridge';
-import { getPersonas, type Persona } from '@/personas';
-import type { Verdict, VerdictLabel } from '@/types';
+import { getPickerPersonas, type Persona } from '@/personas';
+import { settings } from '@/state/store';
+import type { HistoryEntry, LensResult } from '@/types';
 
 /**
  * HUD layout for VeritasLens.
@@ -24,12 +26,14 @@ import type { Verdict, VerdictLabel } from '@/types';
  * pairs a list container (events) with text containers (display).
  *
  * Pages:
- *   - "unconfigured" : single visible message asking the user to configure on phone
- *   - "picker"       : list of registered personas; scroll moves SDK selection,
- *                      tap starts the highlighted one
- *   - "active"       : status / verdict / reason text + a small list at the
- *                      bottom that captures taps (single = menu, double = check)
- *   - "menu"         : two options (Fact-check / Exit) — list-based picker
+ *   - "unconfigured"    : single visible message asking the user to configure on phone
+ *   - "picker"          : list of registered personas; scroll moves SDK selection,
+ *                         tap starts the highlighted one
+ *   - "active"          : status / verdict / reason text + a small list at the
+ *                         bottom that captures taps (single = menu, double = check)
+ *   - "menu"            : four options (Check / History / Cancel / Exit)
+ *   - "history-list"    : list of past questions with verdict badge
+ *   - "history-detail"  : full result for a selected history entry
  */
 
 export const SCREEN_W = 576;
@@ -51,6 +55,9 @@ export const CONTAINER = {
   reason: 23,
   activeList: 24,
   recIndicator: 25,
+  // history pages
+  historyList: 30,
+  historyHint: 31,
 } as const;
 
 const NAME = {
@@ -64,6 +71,8 @@ const NAME = {
   reason: 'vl-reason',
   activeList: 'vl-act-lst',
   recIndicator: 'vl-rec',
+  historyList: 'vl-hist-lst',
+  historyHint: 'vl-hist-hint',
 } as const;
 
 const STATUS_LABEL: Record<string, string> = {
@@ -75,32 +84,26 @@ const STATUS_LABEL: Record<string, string> = {
   error: ' ERR  ',
 };
 
-const VERDICT_GLYPH: Record<VerdictLabel, string> = {
-  TRUE: '✓ TRUE',
-  FALSE: '✗ FALSE',
-  UNVERIFIED: '? UNVERIFIED',
-};
-
-export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'none';
+export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'none';
 
 export const MENU_OPTIONS = [
-  { id: 'fact-check', label: 'Fact-check now' },
+  { id: 'fact-check', label: 'Check' },
+  { id: 'history', label: 'History' },
   { id: 'cancel', label: 'Cancel' },
-  { id: 'exit', label: 'Exit to picker' },
+  { id: 'exit', label: 'Exit' },
 ] as const;
 export type MenuOptionId = (typeof MENU_OPTIONS)[number]['id'];
 
 let bootstrapped = false;
 let currentPage: HudPage = 'none';
 let menuPersona: Persona | null = null;
+let cachedHistoryEntries: HistoryEntry[] = [];
 
-export function currentHudPage(): HudPage {
-  return currentPage;
-}
+export function currentHudPage(): HudPage { return currentPage; }
 
 /** Look up the persona at the given index from the host event payload. */
 export function personaAtIndex(idx: number | undefined | null): Persona | null {
-  const list = getPersonas();
+  const list = getPickerPersonas(settings().bufferDuration);
   const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
   return list[safe] ?? list[0] ?? null;
 }
@@ -127,31 +130,23 @@ export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'pic
 }
 
 export async function showUnconfiguredPage(): Promise<void> {
-  if (!bootstrapped) {
-    await bootstrapHud('unconfigured');
-    return;
-  }
+  if (!bootstrapped) { await bootstrapHud('unconfigured'); return; }
   const ok = await getBridge().rebuildPageContainer(buildUnconfiguredPage('rebuild') as RebuildPageContainer);
   if (!ok) throw new Error('rebuildPageContainer (unconfigured) failed.');
   currentPage = 'unconfigured';
 }
 
 export async function showPickerPage(): Promise<void> {
-  if (!bootstrapped) {
-    await bootstrapHud('picker');
-    return;
-  }
+  if (!bootstrapped) { await bootstrapHud('picker'); return; }
   const ok = await getBridge().rebuildPageContainer(buildPickerPage('rebuild') as RebuildPageContainer);
   if (!ok) throw new Error('rebuildPageContainer (picker) failed.');
   currentPage = 'picker';
 }
 
 export async function showActivePage(persona: Persona): Promise<void> {
-  if (!bootstrapped) {
-    throw new Error('bootstrapHud() must run before showActivePage().');
-  }
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showActivePage().');
   menuPersona = persona;
-  const ok = await getBridge().rebuildPageContainer(buildActivePage(persona));
+  const ok = await getBridge().rebuildPageContainer(buildActivePage());
   if (!ok) throw new Error('rebuildPageContainer (active) failed.');
   currentPage = 'active';
 }
@@ -161,6 +156,25 @@ export async function showMenuPage(): Promise<void> {
   const ok = await getBridge().rebuildPageContainer(buildMenuPage());
   if (!ok) throw new Error('rebuildPageContainer (menu) failed.');
   currentPage = 'menu';
+}
+
+export async function showHistoryListPage(entries: HistoryEntry[]): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showHistoryListPage().');
+  cachedHistoryEntries = entries;
+  const ok = await getBridge().rebuildPageContainer(buildHistoryListPage(entries));
+  if (!ok) throw new Error('rebuildPageContainer (history-list) failed.');
+  currentPage = 'history-list';
+}
+
+export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showHistoryDetailPage().');
+  const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry));
+  if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
+  currentPage = 'history-detail';
+}
+
+export async function restoreHistoryListPage(): Promise<void> {
+  await showHistoryListPage(cachedHistoryEntries);
 }
 
 /** Resume the previously-active persona page after the menu. */
@@ -175,9 +189,9 @@ export async function setStatus(label: keyof typeof STATUS_LABEL | string): Prom
   await upgradeText(CONTAINER.status, NAME.status, content);
 }
 
-export async function setVerdict(v: Verdict | null): Promise<void> {
-  if (currentPage !== 'active') return;
-  if (!v) {
+export async function setLensResult(result: LensResult | null): Promise<void> {
+  if (currentPage !== 'active' && currentPage !== 'history-detail') return;
+  if (!result) {
     await Promise.all([
       upgradeText(CONTAINER.claim, NAME.claim, ''),
       upgradeText(CONTAINER.verdict, NAME.verdict, ''),
@@ -185,16 +199,11 @@ export async function setVerdict(v: Verdict | null): Promise<void> {
     ]);
     return;
   }
-  const glyph = VERDICT_GLYPH[v.verdict] ?? v.verdict;
-  // Claim wraps across 2 lines in the allocated 56 px height; constrain at
-  // ~140 chars (safe for the chosen font; trim if longer). Reason is 2-3
-  // short sentences (~240 chars).
-  const claimLine = v.claim.length > 140 ? `${v.claim.slice(0, 137)}…` : v.claim;
-  const reasonBlock = v.reason.length > 240 ? `${v.reason.slice(0, 237)}…` : v.reason;
+  const { top, middle, bottom } = formatLensResult(result);
   await Promise.all([
-    upgradeText(CONTAINER.claim, NAME.claim, claimLine),
-    upgradeText(CONTAINER.verdict, NAME.verdict, glyph),
-    upgradeText(CONTAINER.reason, NAME.reason, reasonBlock),
+    upgradeText(CONTAINER.claim, NAME.claim, top),
+    upgradeText(CONTAINER.verdict, NAME.verdict, middle),
+    upgradeText(CONTAINER.reason, NAME.reason, bottom),
   ]);
 }
 
@@ -215,271 +224,207 @@ async function upgradeText(containerID: number, containerName: string, content: 
   await getBridge().textContainerUpgrade(upgrade);
 }
 
+function formatLensResult(result: LensResult): { top: string; middle: string; bottom: string } {
+  switch (result.type) {
+    case 'fact-check':
+      return {
+        top: clip(result.claim, 140),
+        middle: result.verdict === 'TRUE' ? '✓ TRUE' : result.verdict === 'FALSE' ? '✗ FALSE' : '? UNVERIFIED',
+        bottom: clip(result.reason, 240),
+      };
+    case 'trivia':
+      return { top: 'Trivia Answer', middle: clip(result.answer, 140), bottom: clip(result.description, 240) };
+    case 'logical-fallacy':
+      return { top: 'Logical Fallacy', middle: result.fallacy.toUpperCase(), bottom: clip(result.explanation, 240) };
+    case 'stats-check':
+      return {
+        top: clip(result.stat, 140),
+        middle: result.verdict === 'PLAUSIBLE' ? '✓ PLAUSIBLE' : '✗ SUSPICIOUS',
+        bottom: clip(result.reason, 240),
+      };
+    case 'bias':
+      return {
+        top: 'Bias Analysis',
+        middle: result.verdict === 'NEUTRAL' ? '✓ NEUTRAL' : `✗ BIASED · ${clip(result.direction, 20)}`,
+        bottom: clip(result.reason, 240),
+      };
+    case 'translation':
+      return { top: 'Translation', middle: clip(result.translatedText, 140), bottom: '' };
+    case 'eli5':
+      return { top: 'Plain English', middle: '', bottom: clip(result.explanation, 240) };
+    case 'session-summary':
+      return { top: 'Session Summary', middle: '', bottom: clip(result.summary, 240) };
+  }
+}
+
+function clip(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 1)}…`;
+}
+
 // ------- page builders ----------------------------------------------------
 
 function buildUnconfiguredPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer | RebuildPageContainer {
-  // Use the full canvas: title near the top, message in the middle,
-  // event-sink near the bottom. Each text container is given generous
-  // vertical room so the SDK has space to center the glyphs.
   const title = new TextContainerProperty({
-    containerID: CONTAINER.title,
-    containerName: NAME.title,
-    xPosition: 16,
-    yPosition: 32,
-    width: SCREEN_W - 32,
-    height: 40,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: 'VeritasLens',
-    isEventCapture: 0,
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
+    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    content: 'VeritasLens', isEventCapture: 0,
   });
-
   const msg = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint,
-    containerName: 'vl-msg',
-    xPosition: 16,
-    yPosition: 96,
-    width: SCREEN_W - 32,
-    height: 88,
-    borderWidth: 0,
-    paddingLength: 4,
+    containerID: CONTAINER.pickerHint, containerName: 'vl-msg', xPosition: 16, yPosition: 96,
+    width: SCREEN_W - 32, height: 88, borderWidth: 0, paddingLength: 4,
     content: 'Configure on your phone to begin. Add your Gemini API key from the app menu.',
     isEventCapture: 0,
   });
-
-  // Single-item list acts as the event sink so any user input is routed
-  // here cleanly. Full width and generous height for a clean render.
   const sink = new ListContainerProperty({
-    containerID: CONTAINER.pickerList,
-    containerName: NAME.pickerList,
-    xPosition: 16,
-    yPosition: 216,
-    width: SCREEN_W - 32,
-    height: 40,
-    borderWidth: 0,
-    paddingLength: 4,
+    containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 216,
+    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
-      itemCount: 1,
-      itemWidth: SCREEN_W - 48,
-      isItemSelectBorderEn: 0,
+      itemCount: 1, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 0,
       itemName: ['Waiting for API key…'],
     }),
     isEventCapture: 1,
   });
-
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
-  return new Ctor({
-    containerTotalNum: 3,
-    listObject: [sink],
-    textObject: [title, msg],
-  });
+  return new Ctor({ containerTotalNum: 3, listObject: [sink], textObject: [title, msg] });
 }
 
 function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer | RebuildPageContainer {
+  const currentPersonas = getPickerPersonas(settings().bufferDuration);
   const title = new TextContainerProperty({
-    containerID: CONTAINER.title,
-    containerName: NAME.title,
-    xPosition: 16,
-    yPosition: 32,
-    width: SCREEN_W - 32,
-    height: 36,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: 'Pick a lens',
-    isEventCapture: 0,
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
+    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
+    content: 'Pick a lens', isEventCapture: 0,
   });
-
-  const currentPersonas = getPersonas();
-  // Borderless: highlight ring around the selected item is enough structure.
   const list = new ListContainerProperty({
-    containerID: CONTAINER.pickerList,
-    containerName: NAME.pickerList,
-    xPosition: 16,
-    yPosition: 88,
-    width: SCREEN_W - 32,
-    height: 120,
-    borderWidth: 0,
-    paddingLength: 4,
+    containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 88,
+    width: SCREEN_W - 32, height: 120, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
-      itemCount: currentPersonas.length,
-      itemWidth: SCREEN_W - 48,
-      isItemSelectBorderEn: 1,
+      itemCount: currentPersonas.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: currentPersonas.map((p) => p.name),
     }),
     isEventCapture: 1,
   });
-
   const hint = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint,
-    containerName: NAME.pickerHint,
-    xPosition: 16,
-    yPosition: 224,
-    width: SCREEN_W - 32,
-    height: 40,
-    borderWidth: 0,
-    paddingLength: 4,
+    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 224,
+    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
     content: currentPersonas.length > 1 ? 'Swipe ⇅ · Tap to start' : 'Tap to start',
     isEventCapture: 0,
   });
-
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
-  return new Ctor({
-    containerTotalNum: 3,
-    listObject: [list],
-    textObject: [title, hint],
-  });
+  return new Ctor({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
 }
 
 function buildMenuPage(): RebuildPageContainer {
   const title = new TextContainerProperty({
-    containerID: CONTAINER.title,
-    containerName: NAME.title,
-    xPosition: 16,
-    yPosition: 32,
-    width: SCREEN_W - 32,
-    height: 36,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: 'Menu',
-    isEventCapture: 0,
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
+    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
+    content: 'Menu', isEventCapture: 0,
   });
-
   const list = new ListContainerProperty({
-    containerID: CONTAINER.menuList,
-    containerName: NAME.menuList,
-    xPosition: 16,
-    yPosition: 88,
-    width: SCREEN_W - 32,
-    height: 120,
-    borderWidth: 0,
-    paddingLength: 4,
+    containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 88,
+    width: SCREEN_W - 32, height: 120, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
-      itemCount: MENU_OPTIONS.length,
-      itemWidth: SCREEN_W - 48,
-      isItemSelectBorderEn: 1,
+      itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: MENU_OPTIONS.map((o) => o.label),
     }),
     isEventCapture: 1,
   });
-
   const hint = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint,
-    containerName: NAME.pickerHint,
-    xPosition: 16,
-    yPosition: 224,
-    width: SCREEN_W - 32,
-    height: 40,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: 'Swipe ⇅ · Tap to confirm',
-    isEventCapture: 0,
+    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 224,
+    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    content: 'Swipe ⇅ · Tap to confirm', isEventCapture: 0,
   });
-
-  return new RebuildPageContainer({
-    containerTotalNum: 3,
-    listObject: [list],
-    textObject: [title, hint],
-  });
+  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
 }
 
-function buildActivePage(persona: Persona): RebuildPageContainer {
-  // Top row: claim on the left, REC + status on the right (stacked indicators).
+function buildActivePage(): RebuildPageContainer {
   const rec = new TextContainerProperty({
-    containerID: CONTAINER.recIndicator,
-    containerName: NAME.recIndicator,
-    xPosition: SCREEN_W - 92,
-    yPosition: 32,
-    width: 76,
-    height: 28,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: '● REC',
-    isEventCapture: 0,
+    containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
+    xPosition: SCREEN_W - 96, yPosition: 230, width: 80, height: 28,
+    borderWidth: 0, paddingLength: 4, content: '● REC', isEventCapture: 0,
   });
-
-  const status = new TextContainerProperty({
-    containerID: CONTAINER.status,
-    containerName: NAME.status,
-    xPosition: SCREEN_W - 92,
-    yPosition: 64,
-    width: 76,
-    height: 28,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: STATUS_LABEL.listening,
-    isEventCapture: 0,
-  });
-
-  // Question line (one sentence). Two-line wrap zone.
   const claim = new TextContainerProperty({
-    containerID: CONTAINER.claim,
-    containerName: NAME.claim,
-    xPosition: 16,
-    yPosition: 32,
-    width: SCREEN_W - 116, // room for the REC/status stack on the right
-    height: 60,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: '',
-    isEventCapture: 0,
+    containerID: CONTAINER.claim, containerName: NAME.claim, xPosition: 16, yPosition: 32,
+    width: SCREEN_W - 32, height: 68, borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
-
   const verdict = new TextContainerProperty({
-    containerID: CONTAINER.verdict,
-    containerName: NAME.verdict,
-    xPosition: 16,
-    yPosition: 104,
-    width: SCREEN_W - 32,
-    height: 36,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: '',
-    isEventCapture: 0,
+    containerID: CONTAINER.verdict, containerName: NAME.verdict, xPosition: 16, yPosition: 104,
+    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
-
-  // 2-3 short sentences.
   const reason = new TextContainerProperty({
-    containerID: CONTAINER.reason,
-    containerName: NAME.reason,
-    xPosition: 16,
-    yPosition: 148,
-    width: SCREEN_W - 32,
-    height: 64,
-    borderWidth: 0,
-    paddingLength: 4,
-    content: '',
-    isEventCapture: 0,
+    containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 148,
+    width: SCREEN_W - 32, height: 64, borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
-
-  // Bottom strip: full-width event-capturing list with the gesture hint.
   const eventList = new ListContainerProperty({
-    containerID: CONTAINER.activeList,
-    containerName: NAME.activeList,
-    xPosition: 16,
-    yPosition: 224,
-    width: SCREEN_W - 32,
-    height: 40,
-    borderWidth: 0,
-    paddingLength: 4,
+    containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 224,
+    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
-      itemCount: 1,
-      itemWidth: SCREEN_W - 48,
-      isItemSelectBorderEn: 0,
-      itemName: ['Tap: menu · Double-tap: fact-check'],
+      itemCount: 1, itemWidth: SCREEN_W - 120, isItemSelectBorderEn: 0,
+      itemName: ['Tap: menu · Double-tap: check'],
     }),
     isEventCapture: 1,
   });
-  void persona;
+  return new RebuildPageContainer({ containerTotalNum: 5, listObject: [eventList], textObject: [claim, verdict, reason, rec] });
+}
 
-  return new RebuildPageContainer({
-    containerTotalNum: 6,
-    listObject: [eventList],
-    textObject: [status, claim, verdict, reason, rec],
+function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
+    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
+    content: 'History', isEventCapture: 0,
   });
+  const itemNames = entries.length > 0
+    ? entries.map((e) => `[${e.badge}] ${clip(e.question, 60)}`)
+    : ['No history yet'];
+  const list = new ListContainerProperty({
+    containerID: CONTAINER.historyList, containerName: NAME.historyList, xPosition: 16, yPosition: 80,
+    width: SCREEN_W - 32, height: 128, borderWidth: 0, paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: itemNames,
+    }),
+    isEventCapture: 1,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.historyHint, containerName: NAME.historyHint, xPosition: 16, yPosition: 224,
+    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    content: entries.length > 0 ? 'Swipe ⇅ · Tap for detail' : 'Tap to go back',
+    isEventCapture: 0,
+  });
+  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
+}
+
+function buildHistoryDetailPage(entry: HistoryEntry): RebuildPageContainer {
+  const { top, middle, bottom } = formatLensResult(entry.result);
+  const claim = new TextContainerProperty({
+    containerID: CONTAINER.claim, containerName: NAME.claim, xPosition: 16, yPosition: 32,
+    width: SCREEN_W - 32, height: 68, borderWidth: 0, paddingLength: 4, content: top, isEventCapture: 0,
+  });
+  const verdict = new TextContainerProperty({
+    containerID: CONTAINER.verdict, containerName: NAME.verdict, xPosition: 16, yPosition: 104,
+    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4, content: middle, isEventCapture: 0,
+  });
+  const reason = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 148,
+    width: SCREEN_W - 32, height: 64, borderWidth: 0, paddingLength: 4, content: bottom, isEventCapture: 0,
+  });
+  const eventList = new ListContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 224,
+    width: SCREEN_W - 32, height: 40, borderWidth: 0, paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: 1, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 0,
+      itemName: ['Tap: back · Double-tap: new check'],
+    }),
+    isEventCapture: 1,
+  });
+  void entry;
+  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [eventList], textObject: [claim, verdict, reason] });
 }
 
 export function _resetHudBootstrapForTesting(): void {
   bootstrapped = false;
   currentPage = 'none';
   menuPersona = null;
+  cachedHistoryEntries = [];
 }
