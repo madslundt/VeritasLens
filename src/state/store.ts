@@ -25,6 +25,9 @@ const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_AUTO_SUMMARY_INTERVAL = 'veritaslens.autoSummaryInterval';
 
+const HISTORY_KEY = 'veritaslens.history';
+const HISTORY_BYTE_BUDGET = 200 * 1024;
+
 export const [appMode, setAppMode] = createSignal<AppMode>('settings');
 export const [appPhase, setAppPhase] = createSignal<AppPhase>('booting');
 export const [availableModels, setAvailableModels] = createSignal<string[]>([DEFAULT_GEMINI_MODEL]);
@@ -111,14 +114,44 @@ export async function saveAutoSummaryInterval(setLs: (k: string, v: string) => P
   return ok;
 }
 
-/** Push a completed analysis result into the in-memory session history. */
-export function pushHistoryEntry(entry: Omit<HistoryEntry, 'id' | 'timestamp'>): void {
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  setSessionHistory((prev) => [...prev, { id, timestamp: Date.now(), ...entry }]);
+export async function loadHistory(getLocalStorage: (k: string) => Promise<string>): Promise<void> {
+  try {
+    const raw = await getLocalStorage(HISTORY_KEY);
+    if (!raw) return;
+    const entries: HistoryEntry[] = JSON.parse(raw);
+    if (Array.isArray(entries)) setSessionHistory(entries);
+  } catch {
+    // corrupt or missing — start fresh
+  }
 }
 
-export function clearSessionHistory(): void {
+async function persistHistory(
+  setLs: (k: string, v: string) => Promise<boolean>,
+  entries: HistoryEntry[]
+): Promise<void> {
+  let trimmed = [...entries];
+  let json = JSON.stringify(trimmed);
+  while (json.length > HISTORY_BYTE_BUDGET && trimmed.length > 0) {
+    trimmed = trimmed.slice(1);
+    json = JSON.stringify(trimmed);
+  }
+  await setLs(HISTORY_KEY, json);
+}
+
+/** Push a completed analysis result into session history and persist it. */
+export function pushHistoryEntry(
+  entry: Omit<HistoryEntry, 'id' | 'timestamp'>,
+  setLs?: (k: string, v: string) => Promise<boolean>
+): void {
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const next: HistoryEntry[] = [...sessionHistory(), { id, timestamp: Date.now(), ...entry }];
+  setSessionHistory(next);
+  if (setLs) void persistHistory(setLs, next);
+}
+
+export function clearSessionHistory(setLs?: (k: string, v: string) => Promise<boolean>): void {
   setSessionHistory([]);
+  if (setLs) void setLs(HISTORY_KEY, '[]');
 }
 
 function coerceModel(raw: string | null | undefined): GeminiModel {

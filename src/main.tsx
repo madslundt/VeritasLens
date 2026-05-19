@@ -4,6 +4,7 @@ import { App } from './App';
 import { initBridge } from './runtime/bridge';
 import { startHudRuntime } from './runtime/lifecycle';
 import {
+  loadHistory,
   loadSettings,
   setAppMode,
   setAppPhase,
@@ -35,6 +36,7 @@ async function bootstrap(): Promise<void> {
     bridge.onDeviceStatusChanged((status) => setDeviceStatus(status));
 
     await loadSettings((k) => bridge.getLocalStorage(k));
+    await loadHistory((k) => bridge.getLocalStorage(k));
 
     setAvailableModels([settings().geminiModel]);
 

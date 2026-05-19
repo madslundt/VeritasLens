@@ -337,7 +337,7 @@ async function runAnalysis(): Promise<void> {
       question: extractQuestion(result),
       badge: extractBadge(result),
       result,
-    });
+    }, (k, v) => getBridge().setLocalStorage(k, v));
     await setLensResult(result);
     await setStatus('displaying');
     setAppPhase('displaying');
@@ -391,7 +391,7 @@ async function runAutoSummary(): Promise<void> {
       question: extractQuestion(result),
       badge: 'AUTO',
       result,
-    });
+    }, (k, v) => getBridge().setLocalStorage(k, v));
   } catch { /* silent failure — auto-summary is best-effort */ }
 }
 
