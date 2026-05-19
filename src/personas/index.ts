@@ -9,6 +9,7 @@ import { BIAS_DETECTOR_SCHEMA, buildBiasDetectorPrompt, parseBiasDetectorRespons
 import { TRANSLATION_SCHEMA, buildTranslationPrompt, parseTranslationResponse } from './translation';
 import { ELI5_SCHEMA, buildEli5Prompt, parseEli5Response } from './eli5';
 import { SESSION_SUMMARY_SCHEMA, buildSessionSummaryPrompt, parseSessionSummaryResponse } from './sessionSummary';
+import { AUTO_CLASSIFIER_SCHEMA, buildAutoPrompt, parseAutoResponse } from './auto';
 
 export type PersonaId = string;
 
@@ -19,19 +20,31 @@ export interface Persona {
   hint: string;
   /** Returns the fully-built, language-aware system prompt. */
   buildPrompt: (lang: LanguageCode) => string;
-  schema: Record<string, unknown>;
+  /** Gemini responseSchema — opaque to the runtime, forwarded to the API. */
+  schema: unknown;
   parse: (text: string) => LensResult;
   builtin: true;
 }
 
 const BUILTINS: Persona[] = [
   {
+    id: 'auto',
+    name: 'Auto',
+    description:
+      'Listens to your question and automatically picks the best lens (fact-check, trivia, logical fallacy, stats, bias, or ELI5). Adds a brief classification step (~300–500 ms) before analysis.',
+    hint: 'Tap and let VeritasLens choose',
+    buildPrompt: buildAutoPrompt,
+    schema: AUTO_CLASSIFIER_SCHEMA,
+    parse: parseAutoResponse,
+    builtin: true,
+  },
+  {
     id: 'fact-checker',
-    name: 'Fact Checker',
+    name: 'Fact Check',
     description: 'Labels the most check-worthy claim TRUE / FALSE / UNVERIFIED.',
     hint: 'Tap to fact-check',
     buildPrompt: buildFactCheckerPrompt,
-    schema: FACT_CHECKER_SCHEMA as unknown as Record<string, unknown>,
+    schema: FACT_CHECKER_SCHEMA,
     parse: parseFactCheckerResponse,
     builtin: true,
   },
@@ -41,17 +54,17 @@ const BUILTINS: Persona[] = [
     description: 'Answers trivia questions with a direct answer and brief description.',
     hint: 'Tap for the answer',
     buildPrompt: buildTriviaPrompt,
-    schema: TRIVIA_SCHEMA as unknown as Record<string, unknown>,
+    schema: TRIVIA_SCHEMA,
     parse: parseTriviaResponse,
     builtin: true,
   },
   {
     id: 'logical-fallacy',
-    name: 'Fallacy Detector',
+    name: 'Fallacy Check',
     description: 'Names any logical fallacy present in the argument.',
     hint: 'Tap to check the argument',
     buildPrompt: buildLogicalFallacyPrompt,
-    schema: LOGICAL_FALLACY_SCHEMA as unknown as Record<string, unknown>,
+    schema: LOGICAL_FALLACY_SCHEMA,
     parse: parseLogicalFallacyResponse,
     builtin: true,
   },
@@ -61,17 +74,17 @@ const BUILTINS: Persona[] = [
     description: 'Rates a numerical claim as PLAUSIBLE or SUSPICIOUS.',
     hint: 'Tap to check the numbers',
     buildPrompt: buildStatsCheckPrompt,
-    schema: STATS_CHECK_SCHEMA as unknown as Record<string, unknown>,
+    schema: STATS_CHECK_SCHEMA,
     parse: parseStatsCheckResponse,
     builtin: true,
   },
   {
     id: 'bias-detector',
-    name: 'Bias Detector',
+    name: 'Bias Check',
     description: 'Detects political, emotional, or factional bias in statements.',
     hint: 'Tap to detect bias',
     buildPrompt: buildBiasDetectorPrompt,
-    schema: BIAS_DETECTOR_SCHEMA as unknown as Record<string, unknown>,
+    schema: BIAS_DETECTOR_SCHEMA,
     parse: parseBiasDetectorResponse,
     builtin: true,
   },
@@ -81,27 +94,27 @@ const BUILTINS: Persona[] = [
     description: 'Translates spoken words into your configured response language.',
     hint: 'Tap to translate',
     buildPrompt: buildTranslationPrompt,
-    schema: TRANSLATION_SCHEMA as unknown as Record<string, unknown>,
+    schema: TRANSLATION_SCHEMA,
     parse: parseTranslationResponse,
     builtin: true,
   },
   {
     id: 'eli5',
-    name: 'ELI5',
+    name: 'Simplify',
     description: 'Explains jargon or complex statements in plain language.',
     hint: 'Tap to simplify',
     buildPrompt: buildEli5Prompt,
-    schema: ELI5_SCHEMA as unknown as Record<string, unknown>,
+    schema: ELI5_SCHEMA,
     parse: parseEli5Response,
     builtin: true,
   },
   {
     id: 'session-summary',
-    name: 'Session Summary',
+    name: 'Summary',
     description: 'Summarizes the conversation recorded so far. Requires extended buffer.',
     hint: 'Tap to summarize',
     buildPrompt: buildSessionSummaryPrompt,
-    schema: SESSION_SUMMARY_SCHEMA as unknown as Record<string, unknown>,
+    schema: SESSION_SUMMARY_SCHEMA,
     parse: parseSessionSummaryResponse,
     builtin: true,
   },

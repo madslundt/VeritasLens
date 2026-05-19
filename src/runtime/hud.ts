@@ -56,6 +56,7 @@ export const CONTAINER = {
   activeList: 24,
   recIndicator: 25,
   activeHint: 26,
+  clock: 27,
   // history pages
   historyList: 30,
   historyHint: 31,
@@ -73,6 +74,7 @@ const NAME = {
   activeList: 'vl-act-lst',
   recIndicator: 'vl-rec',
   activeHint: 'vl-act-hint',
+  clock: 'vl-clock',
   historyList: 'vl-hist-lst',
   historyHint: 'vl-hist-hint',
 } as const;
@@ -162,9 +164,9 @@ export async function showActivePage(persona: Persona): Promise<void> {
   currentPage = 'active';
 }
 
-export async function showMenuPage(): Promise<void> {
+export async function showMenuPage(time = ''): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showMenuPage().');
-  const ok = await getBridge().rebuildPageContainer(buildMenuPage());
+  const ok = await getBridge().rebuildPageContainer(buildMenuPage(time));
   if (!ok) throw new Error('rebuildPageContainer (menu) failed.');
   currentPage = 'menu';
 }
@@ -252,6 +254,7 @@ export async function setRecIndicator(on: boolean): Promise<void> {
   await upgradeText(CONTAINER.recIndicator, NAME.recIndicator, on ? '● REC' : '');
 }
 
+
 async function upgradeText(containerID: number, containerName: string, content: string): Promise<void> {
   const upgrade = new TextContainerUpgrade({
     containerID,
@@ -264,6 +267,14 @@ async function upgradeText(containerID: number, containerName: string, content: 
 }
 
 function formatLensResult(result: LensResult): { top: string; middle: string; bottom: string } {
+  const parts = formatLensResultBase(result);
+  if (result.autoSelected) {
+    return { ...parts, top: parts.top ? `Auto · ${parts.top}` : 'Auto' };
+  }
+  return parts;
+}
+
+function formatLensResultBase(result: LensResult): { top: string; middle: string; bottom: string } {
   switch (result.type) {
     case 'fact-check':
       return {
@@ -362,11 +373,16 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   return new Ctor({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
 }
 
-function buildMenuPage(): RebuildPageContainer {
+function buildMenuPage(time = ''): RebuildPageContainer {
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
-    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
+    width: 200, height: 36, borderWidth: 0, paddingLength: 4,
     content: 'Menu', isEventCapture: 0,
+  });
+  const clock = new TextContainerProperty({
+    containerID: CONTAINER.clock, containerName: NAME.clock,
+    xPosition: SCREEN_W - 112, yPosition: 10, width: 96, height: 28,
+    borderWidth: 0, paddingLength: 4, content: time, isEventCapture: 0,
   });
   const list = new ListContainerProperty({
     containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
@@ -382,7 +398,7 @@ function buildMenuPage(): RebuildPageContainer {
     width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
     content: 'Swipe ⇅ · Tap to confirm', isEventCapture: 0,
   });
-  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
+  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [list], textObject: [title, clock, hint] });
 }
 
 function buildActivePage(): RebuildPageContainer {
@@ -395,7 +411,7 @@ function buildActivePage(): RebuildPageContainer {
   });
   const status = new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: 16, yPosition: 4, width: 96, height: 26,
+    xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 26,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const claim = new TextContainerProperty({
@@ -477,17 +493,21 @@ function buildHistoryDetailPage(entry: HistoryEntry): RebuildPageContainer {
     xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
     borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
   });
-  void entry;
   return new RebuildPageContainer({ containerTotalNum: 4, listObject: [], textObject: [claim, verdict, reason, hint] });
 }
 
-export function _resetHudBootstrapForTesting(): void {
-  bootstrapped = false;
-  currentPage = 'none';
+/** Clear per-session HUD state so a fresh session doesn't inherit stale buffers. */
+export function resetHudSessionState(): void {
   menuPersona = null;
   cachedHistoryEntries = [];
   detailReasonFull = '';
   detailReasonOffset = 0;
   activeReasonFull = '';
   activeReasonOffset = 0;
+}
+
+export function _resetHudBootstrapForTesting(): void {
+  bootstrapped = false;
+  currentPage = 'none';
+  resetHudSessionState();
 }

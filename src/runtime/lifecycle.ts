@@ -6,6 +6,7 @@ import {
   currentHudPage,
   menuOptionAtIndex,
   personaAtIndex,
+  resetHudSessionState,
   restoreActivePage,
   restoreHistoryListPage,
   scrollActiveReason,
@@ -22,9 +23,11 @@ import {
 } from './hud';
 import { callLens } from '@/llm/gemini';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
+import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
 import {
   activePersona,
   lensResult as stateResultGet,
+  pushDebugEvent,
   pushHistoryEntry,
   sessionHistory,
   setActivePersona,
@@ -50,6 +53,7 @@ let lastPickerIndex = 0;
 let lastMenuIndex = 0;
 let lastHistoryIndex = 0;
 let currentSessionId = '';
+let sessionStartTime = 0;
 
 export function isHudRunning(): boolean { return running; }
 
@@ -126,7 +130,9 @@ function isLifecycleSysEvent(et: OsEventTypeList | undefined): boolean {
 }
 
 function handleEvent(event: EvenHubEvent): void {
-  if (event.listEvent || event.textEvent || event.sysEvent) console.info('[veritaslens] event', summarize(event));
+  if (import.meta.env.DEV && (event.listEvent || event.textEvent || event.sysEvent)) {
+    console.info('[veritaslens] event', summarize(event));
+  }
 
   if (event.sysEvent && isLifecycleSysEvent(event.sysEvent.eventType)) {
     switch (event.sysEvent.eventType) {
@@ -177,7 +183,7 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 async function handleActiveGesture(g: Gesture): Promise<void> {
   resetSleepTimer();
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    await showMenuPage();
+    await showMenuPage(formatTime());
   }
 }
 
@@ -234,10 +240,9 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
   setActivePersona(personaId);
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+  sessionStartTime = Date.now();
   lastMenuIndex = 0;
   await showActivePage(persona);
-  await setStatus('listening');
-  await setRecIndicator(true);
   buffer = new PcmRingBuffer({ durationSec: settings().bufferDuration, sampleRate: 16_000 });
   const micOk = await getBridge().audioControl(true);
   if (!micOk) {
@@ -257,12 +262,18 @@ async function leaveActiveSession(): Promise<void> {
   stopAutoSummaryTimer();
   buffer?.clear();
   buffer = null;
+  resetHudSessionState();
   await showPickerPage();
   setAppPhase('idle');
 }
 
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+
+function formatTime(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
 
 function startSpinner(): void {
   if (spinnerTimer) return;
@@ -294,6 +305,23 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   return parts.join('\n');
 }
 
+function buildContextBlock(personaName: string): string {
+  const now = new Date();
+  const date = now.toLocaleDateString('en', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const time = now.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit' });
+  const audioSecs = buffer?.secondsBuffered ?? 0;
+  const count = sessionHistory().length;
+  const mins = Math.floor((Date.now() - sessionStartTime) / 60_000);
+
+  return [
+    '# CONTEXT',
+    `Date: ${date}`,
+    `Time: ${time} (local)`,
+    `Audio: ${audioSecs}s buffered`,
+    `Session: ${mins}m active, ${count} ${count === 1 ? 'analysis' : 'analyses'}, ${personaName} lens`,
+  ].join('\n');
+}
+
 async function runAnalysis(): Promise<void> {
   const page = currentHudPage();
   if (page === 'history-list' || page === 'history-detail') await restoreActivePage();
@@ -314,26 +342,59 @@ async function runAnalysis(): Promise<void> {
 
   try {
     const wav = buffer.snapshotWav();
-    const prompt = buildPromptWithContext(persona, settings().responseLanguage);
+    const lang = settings().responseLanguage;
+    const onRetry = async (attempt: number): Promise<void> => {
+      stopSpinner();
+      await setStatus(`retry${attempt}`);
+    };
+
+    let analysisPersona: Persona = persona;
+    let autoSelected = false;
+
+    if (persona.id === 'auto') {
+      const classifierPrompt = buildPromptWithContext(persona, lang);
+      const classifierContext = buildContextBlock(persona.name);
+      const classifierRaw = await callLens({
+        apiKey,
+        wav,
+        prompt: `${classifierContext}\n\n${classifierPrompt}`,
+        schema: AUTO_CLASSIFIER_SCHEMA,
+        model: settings().geminiAutoModel,
+        signal: inflight.signal,
+        onRetry,
+      });
+      const { chosenLensId } = parseAutoClassifierResponse(classifierRaw);
+      const chosen = getPersona(chosenLensId);
+      if (!chosen) {
+        stopSpinner();
+        setErrorMessage(`Auto classifier returned unknown lens: ${chosenLensId}`);
+        await setStatus('error');
+        setAppPhase('error');
+        return;
+      }
+      analysisPersona = chosen;
+      autoSelected = true;
+    }
+
+    const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
+    const analysisContext = buildContextBlock(analysisPersona.name);
     const rawText = await callLens({
       apiKey,
       wav,
-      prompt,
-      schema: persona.schema,
+      prompt: `${analysisContext}\n\n${analysisPrompt}`,
+      schema: analysisPersona.schema,
       model: settings().geminiModel,
       signal: inflight.signal,
-      onRetry: async (attempt) => {
-        stopSpinner();
-        await setStatus(`retry${attempt}`);
-      },
+      onRetry,
     });
-    const result = persona.parse(rawText);
+    const result = analysisPersona.parse(rawText);
+    if (autoSelected) result.autoSelected = true;
     stopSpinner();
     setStateResult(result);
     pushHistoryEntry({
       sessionId: currentSessionId,
-      lensId: persona.id,
-      lensName: persona.name,
+      lensId: analysisPersona.id,
+      lensName: analysisPersona.name,
       question: extractQuestion(result),
       badge: extractBadge(result),
       result,
@@ -392,7 +453,15 @@ async function runAutoSummary(): Promise<void> {
       badge: 'AUTO',
       result,
     }, (k, v) => getBridge().setLocalStorage(k, v));
-  } catch { /* silent failure — auto-summary is best-effort */ }
+  } catch (err) {
+    // Auto-summary is best-effort, but failures should be observable in the
+    // debug log so the user can see why the timer is firing without producing
+    // entries (network down, quota, etc.).
+    pushDebugEvent({
+      label: 'auto-summary-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 function extractQuestion(result: LensResult): string {
@@ -450,8 +519,6 @@ async function enterSleep(): Promise<void> {
     setAppPhase('sleeping');
   } catch { /* ignore */ }
 }
-
-void activePersona;
 
 function summarize(event: EvenHubEvent): Record<string, unknown> {
   if (event.textEvent) return { kind: 'text', eventType: event.textEvent.eventType, container: event.textEvent.containerName };

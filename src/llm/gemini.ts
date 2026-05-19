@@ -26,8 +26,8 @@ export interface CallLensOptions {
   wav: Uint8Array;
   /** Fully-built, language-aware system prompt. */
   prompt: string;
-  /** Gemini responseSchema object. */
-  schema: Record<string, unknown>;
+  /** Gemini responseSchema object. Opaque — forwarded as-is to the API. */
+  schema: unknown;
   signal?: AbortSignal;
   model?: GeminiModel | string;
   /** Called before each retry (attempt = 1 or 2). */
@@ -44,11 +44,12 @@ const MAX_RETRIES = 2;
 export async function callLens(opts: CallLensOptions): Promise<string> {
   if (!opts.apiKey) throw new Error('Missing Gemini API key.');
 
+  const baseSchema = opts.schema as Record<string, unknown>;
   const augmentedSchema = {
-    ...opts.schema,
+    ...baseSchema,
     properties: {
       noSpeech: { type: 'boolean', description: 'Set to true if no clear human speech is detected.' },
-      ...(opts.schema['properties'] as Record<string, unknown> ?? {}),
+      ...((baseSchema['properties'] as Record<string, unknown> | undefined) ?? {}),
     },
   };
 
@@ -70,11 +71,12 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
   };
 
   let lastError: Error | undefined;
+  let nextDelayMs = 1000;
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     if (attempt > 0) {
       await opts.onRetry?.(attempt);
-      await retryDelay(1000, opts.signal);
+      await retryDelay(nextDelayMs, opts.signal);
     }
 
     const response = await fetch(
@@ -87,9 +89,13 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       },
     );
 
-    if (response.status === 503) {
+    if (response.status === 503 || response.status === 429) {
       const errText = await response.text();
-      lastError = new Error(`Gemini HTTP 503: ${truncate(errText, 200)}`);
+      const hinted =
+        parseRetryAfterMs(response.headers.get('retry-after')) ??
+        parseGoogleRetryDelayMs(errText);
+      nextDelayMs = hinted ?? (response.status === 429 ? 5000 : 1000);
+      lastError = new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 200)}`);
       continue;
     }
 
@@ -143,7 +149,7 @@ export async function runSelfTest(
     apiKey,
     wav,
     prompt,
-    schema: FACT_CHECKER_SCHEMA as unknown as Record<string, unknown>,
+    schema: FACT_CHECKER_SCHEMA,
     model,
   });
   return { latencyMs: Math.round(performance.now() - t0) };
@@ -154,9 +160,10 @@ interface ModelsListResponse {
 }
 
 /** Fetch available Gemini models that support generateContent, sorted newest-first. */
-export async function fetchAvailableModels(apiKey: string): Promise<string[]> {
+export async function fetchAvailableModels(apiKey: string, signal?: AbortSignal): Promise<string[]> {
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+    { signal },
   );
   if (!response.ok) return [];
   const data = (await response.json()) as ModelsListResponse;
@@ -173,4 +180,29 @@ export async function fetchAvailableModels(apiKey: string): Promise<string[]> {
 
 function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
+}
+
+const MAX_RETRY_DELAY_MS = 30_000;
+const RETRY_DELAY_PATTERN = /^(\d+(?:\.\d+)?)s$/;
+
+/** Parse an HTTP Retry-After header (seconds only — Gemini does not emit HTTP-date here). */
+export function parseRetryAfterMs(header: string | null | undefined): number | null {
+  if (!header) return null;
+  const secs = Number(header);
+  if (!Number.isFinite(secs) || secs < 0) return null;
+  return Math.min(secs * 1000, MAX_RETRY_DELAY_MS);
+}
+
+/** Parse Google's quota error body for `retryDelay: "42s"` hints. */
+export function parseGoogleRetryDelayMs(body: string): number | null {
+  try {
+    const parsed = JSON.parse(body) as { error?: { details?: Array<{ retryDelay?: string }> } };
+    const details = parsed.error?.details;
+    if (!Array.isArray(details)) return null;
+    for (const d of details) {
+      const hint = typeof d?.retryDelay === 'string' ? d.retryDelay.match(RETRY_DELAY_PATTERN) : null;
+      if (hint) return Math.min(Math.ceil(Number(hint[1]) * 1000), MAX_RETRY_DELAY_MS);
+    }
+  } catch { /* malformed body — ignore */ }
+  return null;
 }

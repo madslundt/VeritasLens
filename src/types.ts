@@ -1,7 +1,7 @@
 // src/types.ts
 
 /** Result union — every built-in lens returns one of these shapes. */
-export type LensResult =
+export type LensResult = (
   | { type: 'fact-check'; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; claim: string; reason: string }
   | { type: 'trivia'; question: string; answer: string; description: string }
   | { type: 'logical-fallacy'; fallacy: string; explanation: string }
@@ -9,7 +9,11 @@ export type LensResult =
   | { type: 'bias'; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string }
   | { type: 'translation'; translatedText: string }
   | { type: 'eli5'; explanation: string }
-  | { type: 'session-summary'; summary: string };
+  | { type: 'session-summary'; summary: string }
+) & {
+  /** Set when the Auto lens picked this analysis lens on the user's behalf. */
+  autoSelected?: boolean;
+};
 
 /** One entry in the in-memory session history. */
 export interface HistoryEntry {
@@ -37,8 +41,10 @@ export const GEMINI_MODELS = [
 
 export type GeminiModel = (typeof GEMINI_MODELS)[number];
 export const DEFAULT_GEMINI_MODEL: GeminiModel = 'gemini-2.0-flash';
+/** Model used by the Auto lens to classify which lens fits best. Lighter/faster by default. */
+export const DEFAULT_GEMINI_AUTO_MODEL: GeminiModel = 'gemini-2.0-flash-lite';
 
-export const LANGUAGES: Record<string, string> = {
+export const LANGUAGES = {
   en: 'English',
   da: 'Dansk',
   sv: 'Svenska',
@@ -50,7 +56,7 @@ export const LANGUAGES: Record<string, string> = {
   pt: 'Português',
   nl: 'Nederlands',
   pl: 'Polski',
-};
+} as const;
 
 export type LanguageCode = keyof typeof LANGUAGES;
 export const DEFAULT_LANGUAGE: LanguageCode = 'en';
@@ -67,6 +73,8 @@ export const DEFAULT_AUTO_SUMMARY_INTERVAL: AutoSummaryInterval = 2;
 export interface Settings {
   geminiApiKey: string;
   geminiModel: GeminiModel;
+  /** Model used by the Auto lens classifier (typically a lighter/cheaper model). */
+  geminiAutoModel: GeminiModel;
   responseLanguage: LanguageCode;
   bufferDuration: BufferDuration;
   autoSummaryEnabled: boolean;

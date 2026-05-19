@@ -184,3 +184,51 @@ describe('session-summary', () => {
     if (result.type === 'session-summary') expect(result.summary).toContain('project');
   });
 });
+
+import {
+  parseAutoClassifierResponse,
+  buildAutoPrompt,
+  AUTO_LENS_CANDIDATES,
+} from '../src/personas/auto';
+
+describe('auto-classifier', () => {
+  it('parses a valid classification', () => {
+    const result = parseAutoClassifierResponse(
+      JSON.stringify({ chosenLensId: 'stats-check', reason: 'Numerical claim' }),
+    );
+    expect(result.chosenLensId).toBe('stats-check');
+    expect(result.reason).toBe('Numerical claim');
+  });
+
+  it('falls back to fact-checker for unknown lens ids', () => {
+    const result = parseAutoClassifierResponse(JSON.stringify({ chosenLensId: 'not-a-lens' }));
+    expect(result.chosenLensId).toBe('fact-checker');
+  });
+
+  it('accepts every advertised candidate id', () => {
+    for (const id of AUTO_LENS_CANDIDATES) {
+      const result = parseAutoClassifierResponse(JSON.stringify({ chosenLensId: id }));
+      expect(result.chosenLensId).toBe(id);
+    }
+  });
+
+  it('buildAutoPrompt includes the language name', () => {
+    const prompt = buildAutoPrompt('da');
+    expect(prompt).toContain('Dansk');
+  });
+
+  it('excludes translation and session-summary from candidates', () => {
+    expect(AUTO_LENS_CANDIDATES).not.toContain('translation');
+    expect(AUTO_LENS_CANDIDATES).not.toContain('session-summary');
+    expect(AUTO_LENS_CANDIDATES).not.toContain('auto');
+  });
+
+  // noSpeech short-circuit is already correct: parseJsonResponse in _utils.ts
+  // throws NoSpeechError on `noSpeech: true`, which lifecycle.ts catches in its
+  // analysis catch block (sets status='listening', skips second callLens).
+  // This test locks that behaviour.
+  it('throws NoSpeechError when the classifier reports no speech', () => {
+    expect(() => parseAutoClassifierResponse(JSON.stringify({ noSpeech: true })))
+      .toThrow(/no clear human speech/i);
+  });
+});

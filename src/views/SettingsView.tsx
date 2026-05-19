@@ -1,5 +1,5 @@
 // src/views/SettingsView.tsx
-import { createEffect, createMemo, createSignal, For, Show, type Component } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component } from 'solid-js';
 import {
   availableModels,
   deviceStatus,
@@ -9,6 +9,7 @@ import {
   saveBufferDuration,
   saveGeminiKey,
   saveGeminiModel,
+  saveGeminiAutoModel,
   saveResponseLanguage,
   sessionHistory,
   setAvailableModels,
@@ -107,6 +108,7 @@ function formatSessionDate(ts: number): string {
 export const SettingsView: Component = () => {
   const [draftKey, setDraftKey] = createSignal(settings().geminiApiKey);
   const [draftModel, setDraftModel] = createSignal<GeminiModel>(settings().geminiModel);
+  const [draftAutoModel, setDraftAutoModel] = createSignal<GeminiModel>(settings().geminiAutoModel);
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
@@ -123,13 +125,20 @@ export const SettingsView: Component = () => {
   createEffect(() => {
     const key = draftKey();
     if (key.trim().length < 10) return;
-    setModelsLoading(true);
-    void import('@/llm/gemini').then(({ fetchAvailableModels }) =>
-      fetchAvailableModels(key)
-        .then((models) => { if (models.length > 0) setAvailableModels(models); })
-        .catch(() => { /* keep static fallback */ })
-        .finally(() => setModelsLoading(false)),
-    );
+    const ac = new AbortController();
+    const debounce = setTimeout(() => {
+      setModelsLoading(true);
+      void import('@/llm/gemini').then(({ fetchAvailableModels }) =>
+        fetchAvailableModels(key, ac.signal)
+          .then((models) => { if (!ac.signal.aborted && models.length > 0) setAvailableModels(models); })
+          .catch(() => { /* keep static fallback */ })
+          .finally(() => { if (!ac.signal.aborted) setModelsLoading(false); }),
+      );
+    }, 300);
+    onCleanup(() => {
+      clearTimeout(debounce);
+      ac.abort();
+    });
   });
 
   const isConfigured = createMemo(() => settings().geminiApiKey.trim().length >= 10);
@@ -154,6 +163,9 @@ export const SettingsView: Component = () => {
     sessionGroups().find((g) => g.sessionId === selectedSessionId())?.entries ?? [],
   );
 
+  let savedFadeTimer: ReturnType<typeof setTimeout> | null = null;
+  onCleanup(() => { if (savedFadeTimer) clearTimeout(savedFadeTimer); });
+
   const onSave = async () => {
     setSaveState('saving');
     try {
@@ -162,6 +174,7 @@ export const SettingsView: Component = () => {
       const results = await Promise.all([
         saveGeminiKey(setLs, draftKey().trim()),
         saveGeminiModel(setLs, draftModel()),
+        saveGeminiAutoModel(setLs, draftAutoModel()),
         saveResponseLanguage(setLs, draftLanguage()),
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
@@ -169,7 +182,8 @@ export const SettingsView: Component = () => {
       ]);
       if (results.every(Boolean)) {
         setSaveState('saved');
-        setTimeout(() => setSaveState('idle'), 1500);
+        if (savedFadeTimer) clearTimeout(savedFadeTimer);
+        savedFadeTimer = setTimeout(() => setSaveState('idle'), 1500);
         if (!isHudRunning()) await startHudRuntime();
         else await refreshHudPage();
       } else {
@@ -374,6 +388,19 @@ export const SettingsView: Component = () => {
               <Show when={!isConfigured() && !modelsLoading()}>
                 <span class="field-hint">Enter an API key above to load available models.</span>
               </Show>
+            </label>
+
+            <label class="field">
+              <span class="field-label">Auto-lens classifier model</span>
+              <select
+                value={draftAutoModel()}
+                onChange={(e) => setDraftAutoModel(e.currentTarget.value as GeminiModel)}
+              >
+                <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
+              </select>
+              <span class="field-hint">
+                The Auto lens makes an extra fast call to pick a lens. Use a lighter model (e.g. flash-lite) to stay under rate limits.
+              </span>
             </label>
 
             <label class="field">

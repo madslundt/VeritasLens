@@ -49,7 +49,7 @@ function installRawMessageWiretap(): void {
       // independent of the host's chosen wire shape.
       if (!isAudioMessage(msg)) {
         const method = (msg as { method?: string })?.method ?? 'unknown';
-        console.info('[veritaslens RAW]', msg);
+        if (import.meta.env.DEV) console.info('[veritaslens RAW]', msg);
         pushDebugEvent({
           label: method,
           detail: safeStringify(msg, 480),
