@@ -113,6 +113,60 @@ npx evenhub pack app.json ./dist -o veritaslens.ehpk --check
 
 ---
 
+## Release
+
+Follow these steps to produce a distributable `.ehpk` and submit it to the Even Hub store.
+
+### 1. Validate `app.json`
+
+Confirm every field is correct before packing:
+
+| Field | Expected value |
+|---|---|
+| `package_id` | `com.veritaslens.app` |
+| `edition` | `"202601"` |
+| `name` | `"VeritasLens"` (≤ 20 chars) |
+| `version` | Semver `x.y.z` — bump for each release |
+| `min_app_version` | `"2.0.0"` |
+| `min_sdk_version` | `"0.0.10"` |
+| `entrypoint` | `"index.html"` |
+| `permissions` | array of objects with `name` + `desc` (+ `whitelist` for `network`) |
+| `supported_languages` | `["en"]` |
+
+### 2. Build
+
+```bash
+npm run build
+```
+
+Verify `dist/index.html` exists before continuing.
+
+### 3. Pack
+
+```bash
+npx evenhub pack app.json dist -o veritaslens.ehpk
+```
+
+Add `--check` to verify the `package_id` is available on the store before packing:
+
+```bash
+npx evenhub pack app.json dist -o veritaslens.ehpk --check
+```
+
+### 4. Verify
+
+```bash
+ls -lh veritaslens.ehpk
+```
+
+Confirm the file is present and non-zero in size.
+
+### 5. Submit
+
+Upload `veritaslens.ehpk` to the **Even Hub developer portal** for review. The portal runs compatibility checks and publishes the app to G2 users after approval.
+
+---
+
 ## Privacy
 
 - Audio is held in a 30-second rolling **in-memory** buffer (`Uint8Array`). Eviction is FIFO and the buffer is released when the session ends.
