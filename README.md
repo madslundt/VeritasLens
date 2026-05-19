@@ -64,6 +64,7 @@ The right temple touchpad is the primary input. The host normalizes `CLICK_EVENT
 ```
 src/
 ├── main.tsx                # bootstrap; bridge init; auto-launch HUD
+├── main.css                # global styles
 ├── App.tsx                 # SettingsView shell
 ├── views/SettingsView.tsx  # config UI (lenses, key, model, language, history)
 ├── runtime/
