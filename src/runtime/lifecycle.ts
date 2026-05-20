@@ -3,7 +3,7 @@ import { getBridge } from './bridge';
 import { PcmRingBuffer } from './audioBuffer';
 import {
   ACTIVE_HINT_ANALYZING,
-  ACTIVE_HINT_DEFAULT,
+  applyDefaultActiveHint,
   bootstrapHud,
   currentHudPage,
   tryAdvanceActiveClaim,
@@ -251,7 +251,7 @@ async function handleBackMenuOption(): Promise<void> {
   if (hasPendingActiveResult()) {
     await restoreActivePage();
     await setStatus('displaying');
-    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    await applyDefaultActiveHint();
     setAppPhase('displaying');
     return;
   }
@@ -484,28 +484,35 @@ async function runAnalysis(): Promise<void> {
     }
     await setLensResult(result);
     await setStatus('displaying');
-    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    await applyDefaultActiveHint();
     setAppPhase('displaying');
   } catch (err) {
     stopSpinner();
     if ((err as Error)?.name === 'AbortError') {
       await setStatus('listening');
-      await setActiveHint(ACTIVE_HINT_DEFAULT);
+      await applyDefaultActiveHint();
       setAppPhase('listening');
       return;
     }
     if ((err as Error)?.name === 'NoSpeechError') {
       await setStatus('listening');
-      await setActiveHint(ACTIVE_HINT_DEFAULT);
+      await applyDefaultActiveHint();
       setAppPhase('listening');
       return;
     }
     setErrorMessage(err instanceof Error ? err.message : String(err));
     await setStatus('error');
-    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    await applyDefaultActiveHint();
     setAppPhase('error');
   } finally {
-    if (inflight === controller) analyzing = false;
+    // Identity check prevents clobbering a newer controller spawned by a
+    // back-to-back analysis. Nulling inflight here releases the AbortController
+    // and, through its closure, the WAV snapshot that can be up to ~19 MB at
+    // the maximum buffer duration.
+    if (inflight === controller) {
+      analyzing = false;
+      inflight = null;
+    }
   }
 }
 

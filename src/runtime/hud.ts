@@ -93,6 +93,7 @@ const STATUS_LABEL: Record<string, string> = {
 export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'none';
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
+export const ACTIVE_HINT_NEXT_CLAIM = 'Tap: next claim · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
 
 export const MENU_OPTIONS = [
@@ -336,6 +337,7 @@ export async function tryAdvanceActiveClaim(): Promise<boolean> {
     upgradeText(CONTAINER.verdict, NAME.verdict, middle),
     upgradeText(CONTAINER.reason, NAME.reason, bottom.slice(0, ACTIVE_PAGE_CHARS)),
   ]);
+  await applyDefaultActiveHint();
   return true;
 }
 
@@ -383,6 +385,18 @@ export async function setActiveHint(content: string): Promise<void> {
   // Discreet layouts have no hint row.
   if (activeLayout !== 'baseline') return;
   await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
+}
+
+/**
+ * Write the appropriate "default" baseline hint for the current state.
+ * Multi-claim results with more claims to walk → "next claim" wording;
+ * otherwise the original "menu" wording. Discreet layouts are no-ops.
+ */
+export async function applyDefaultActiveHint(): Promise<void> {
+  if (currentPage !== 'active' || activeLayout !== 'baseline') return;
+  const total = currentActiveResult ? claimCount(currentActiveResult) : 1;
+  const hasNext = total > 1 && activeClaimIndex < total - 1;
+  await upgradeText(CONTAINER.activeHint, NAME.activeHint, hasNext ? ACTIVE_HINT_NEXT_CLAIM : ACTIVE_HINT_DEFAULT);
 }
 
 /**

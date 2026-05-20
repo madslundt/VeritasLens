@@ -187,6 +187,82 @@ describe('loadHistory', () => {
     expect(sessionHistory()[0]!.id).toBe('a');
   });
 
+  it('wraps a pre-0.5 flat fact-check entry into the new claims shape', async () => {
+    const ls = fakeLocalStorage();
+    const oldEntry = {
+      id: 'a', timestamp: 1, sessionId: 's',
+      lensId: 'fact-checker', lensName: 'Fact Check',
+      question: 'old', badge: 'TRUE',
+      // pre-0.5 shape: top-level verdict/claim/reason, no `claims`, no `quote`
+      result: { type: 'fact-check', verdict: 'TRUE', claim: 'c0', reason: 'r0' },
+    };
+    ls.data.set('veritaslens.history', JSON.stringify([oldEntry]));
+    await loadHistory(ls.get);
+    const list = sessionHistory();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.quote).toBe('');
+    const r = list[0]!.result;
+    expect(r.type).toBe('fact-check');
+    if (r.type === 'fact-check') {
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0]!.verdict).toBe('TRUE');
+      expect(r.claims[0]!.claim).toBe('c0');
+      expect(r.claims[0]!.reason).toBe('r0');
+      expect(r.claims[0]!.quote).toBe('');
+    }
+  });
+
+  it('wraps a pre-0.5 flat trivia entry into the new claims shape', async () => {
+    const ls = fakeLocalStorage();
+    const oldEntry = {
+      id: 't', timestamp: 1, sessionId: 's',
+      lensId: 'trivia', lensName: 'Trivia',
+      question: 'Q', badge: 'ANSWER',
+      result: { type: 'trivia', question: 'Q?', answer: 'A', description: 'D' },
+    };
+    ls.data.set('veritaslens.history', JSON.stringify([oldEntry]));
+    await loadHistory(ls.get);
+    const r = sessionHistory()[0]!.result;
+    if (r.type === 'trivia') {
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0]!.answer).toBe('A');
+    }
+  });
+
+  it('wraps a pre-0.5 flat eli5 entry into the new claims shape', async () => {
+    const ls = fakeLocalStorage();
+    const oldEntry = {
+      id: 'e', timestamp: 1, sessionId: 's',
+      lensId: 'eli5', lensName: 'Simplify',
+      question: 'jargon', badge: 'ELI5',
+      result: { type: 'eli5', explanation: 'plain words' },
+    };
+    ls.data.set('veritaslens.history', JSON.stringify([oldEntry]));
+    await loadHistory(ls.get);
+    const r = sessionHistory()[0]!.result;
+    if (r.type === 'eli5') {
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0]!.explanation).toBe('plain words');
+    }
+  });
+
+  it('drops corrupt entries without poisoning the rest', async () => {
+    const ls = fakeLocalStorage();
+    const good = {
+      id: 'g', timestamp: 1, sessionId: 's',
+      lensId: 'trivia', lensName: 'Trivia',
+      question: 'Q', badge: 'ANSWER', quote: '',
+      result: { type: 'trivia', claims: [{ quote: '', question: 'Q', answer: 'A', description: 'D' }] },
+    };
+    const corrupt = { id: 'x' /* missing result */ };
+    const alsoBad = { id: 'y', result: { type: 'not-a-real-lens' } };
+    ls.data.set('veritaslens.history', JSON.stringify([corrupt, good, alsoBad]));
+    await loadHistory(ls.get);
+    const list = sessionHistory();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.id).toBe('g');
+  });
+
   it('leaves history empty on malformed JSON', async () => {
     const ls = fakeLocalStorage();
     ls.data.set('veritaslens.history', '{not json');
