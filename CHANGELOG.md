@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 — 2026-05-20
+- Multi-claim per tap (up to 5) for Fact, Stats, Fallacy, Bias, Trivia, and ELI5. One Gemini call now covers several distinct claims/questions/terms when present.
+- Per-claim verbatim source quote (≤140 chars) attached to every result. Most recent claim returned first.
+- Single-tap on the active HUD walks forward through claims; falls through to the menu on the last claim. Baseline hint reflects the next action (next claim vs menu).
+- Searchable history: settings WebView's History tab gains a `Search` input matching quote / question / verdict / lens name. Each claim becomes its own history row.
+- Quality guardrail in prompts: skip mid-sentences and anything not clearly understood — fewer high-confidence claims over padded lists.
+- One-time on-load migration wraps any pre-0.5 history entries into the new shape; corrupt entries dropped silently.
+- History byte budget bumped from 200 KB to 300 KB to fit the extra payload.
+- Internal cleanup: drop unused `_setPersonas` / `PERSONAS` legacy exports; null the in-flight `AbortController` once analysis completes so the WAV snapshot can be reclaimed sooner.
+
 ## 0.4.0 — 2026-05-20
 - Discreet HUD split: dot-only before answer, full-screen Q+A after.
 - Menu spinner: animated indicator while analysis runs.

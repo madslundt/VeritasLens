@@ -28,7 +28,7 @@ import {
 import { DEFAULT_BUFFER_DURATION, DEFAULT_GEMINI_AUTO_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_LANGUAGE } from '../src/types';
 import type { HistoryEntry } from '../src/types';
 
-const HISTORY_BYTE_BUDGET = 200 * 1024;
+const HISTORY_BYTE_BUDGET = 300 * 1024;
 
 function fakeLocalStorage(): {
   get: (k: string) => Promise<string>;
@@ -44,7 +44,7 @@ function fakeLocalStorage(): {
 }
 
 function fatEntry(i: number): Omit<HistoryEntry, 'id' | 'timestamp'> {
-  // ~1 KB per entry — enough that 250 entries breaches 200 KB budget.
+  // ~1 KB per entry — enough that ~400 entries breaches the 300 KB budget.
   const filler = 'x'.repeat(900);
   return {
     sessionId: `session-${i % 5}`,
@@ -52,7 +52,8 @@ function fatEntry(i: number): Omit<HistoryEntry, 'id' | 'timestamp'> {
     lensName: 'Fact Check',
     question: `claim ${i} ${filler}`,
     badge: 'TRUE',
-    result: { type: 'fact-check', verdict: 'TRUE', claim: `claim ${i}`, reason: filler },
+    quote: '',
+    result: { type: 'fact-check', claims: [{ quote: '', verdict: 'TRUE', claim: `claim ${i}`, reason: filler }] },
   };
 }
 
@@ -90,7 +91,7 @@ describe('persistHistory trim semantics', () => {
   // (Pass 1 / C2 will fix this).
   it('keeps the persisted JSON under HISTORY_BYTE_BUDGET when overflowing', async () => {
     const ls = fakeLocalStorage();
-    for (let i = 0; i < 250; i++) {
+    for (let i = 0; i < 400; i++) {
       pushHistoryEntry(fatEntry(i), ls.set);
     }
     // Allow the chained async persistHistory calls to settle.
@@ -100,7 +101,7 @@ describe('persistHistory trim semantics', () => {
     const parsed = JSON.parse(raw) as HistoryEntry[];
     // Trim is from the head, so the tail (latest entries) survives.
     expect(parsed.length).toBeGreaterThan(0);
-    expect(parsed.at(-1)!.question).toContain('claim 249');
+    expect(parsed.at(-1)!.question).toContain('claim 399');
   }, 30_000);
 });
 
@@ -177,12 +178,89 @@ describe('loadHistory', () => {
       lensName: 'Trivia',
       question: 'Q?',
       badge: 'ANSWER',
-      result: { type: 'trivia', question: 'Q?', answer: 'A', description: 'D' },
+      quote: '',
+      result: { type: 'trivia', claims: [{ quote: '', question: 'Q?', answer: 'A', description: 'D' }] },
     };
     ls.data.set('veritaslens.history', JSON.stringify([entry]));
     await loadHistory(ls.get);
     expect(sessionHistory()).toHaveLength(1);
     expect(sessionHistory()[0]!.id).toBe('a');
+  });
+
+  it('wraps a pre-0.5 flat fact-check entry into the new claims shape', async () => {
+    const ls = fakeLocalStorage();
+    const oldEntry = {
+      id: 'a', timestamp: 1, sessionId: 's',
+      lensId: 'fact-checker', lensName: 'Fact Check',
+      question: 'old', badge: 'TRUE',
+      // pre-0.5 shape: top-level verdict/claim/reason, no `claims`, no `quote`
+      result: { type: 'fact-check', verdict: 'TRUE', claim: 'c0', reason: 'r0' },
+    };
+    ls.data.set('veritaslens.history', JSON.stringify([oldEntry]));
+    await loadHistory(ls.get);
+    const list = sessionHistory();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.quote).toBe('');
+    const r = list[0]!.result;
+    expect(r.type).toBe('fact-check');
+    if (r.type === 'fact-check') {
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0]!.verdict).toBe('TRUE');
+      expect(r.claims[0]!.claim).toBe('c0');
+      expect(r.claims[0]!.reason).toBe('r0');
+      expect(r.claims[0]!.quote).toBe('');
+    }
+  });
+
+  it('wraps a pre-0.5 flat trivia entry into the new claims shape', async () => {
+    const ls = fakeLocalStorage();
+    const oldEntry = {
+      id: 't', timestamp: 1, sessionId: 's',
+      lensId: 'trivia', lensName: 'Trivia',
+      question: 'Q', badge: 'ANSWER',
+      result: { type: 'trivia', question: 'Q?', answer: 'A', description: 'D' },
+    };
+    ls.data.set('veritaslens.history', JSON.stringify([oldEntry]));
+    await loadHistory(ls.get);
+    const r = sessionHistory()[0]!.result;
+    if (r.type === 'trivia') {
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0]!.answer).toBe('A');
+    }
+  });
+
+  it('wraps a pre-0.5 flat eli5 entry into the new claims shape', async () => {
+    const ls = fakeLocalStorage();
+    const oldEntry = {
+      id: 'e', timestamp: 1, sessionId: 's',
+      lensId: 'eli5', lensName: 'Simplify',
+      question: 'jargon', badge: 'ELI5',
+      result: { type: 'eli5', explanation: 'plain words' },
+    };
+    ls.data.set('veritaslens.history', JSON.stringify([oldEntry]));
+    await loadHistory(ls.get);
+    const r = sessionHistory()[0]!.result;
+    if (r.type === 'eli5') {
+      expect(r.claims).toHaveLength(1);
+      expect(r.claims[0]!.explanation).toBe('plain words');
+    }
+  });
+
+  it('drops corrupt entries without poisoning the rest', async () => {
+    const ls = fakeLocalStorage();
+    const good = {
+      id: 'g', timestamp: 1, sessionId: 's',
+      lensId: 'trivia', lensName: 'Trivia',
+      question: 'Q', badge: 'ANSWER', quote: '',
+      result: { type: 'trivia', claims: [{ quote: '', question: 'Q', answer: 'A', description: 'D' }] },
+    };
+    const corrupt = { id: 'x' /* missing result */ };
+    const alsoBad = { id: 'y', result: { type: 'not-a-real-lens' } };
+    ls.data.set('veritaslens.history', JSON.stringify([corrupt, good, alsoBad]));
+    await loadHistory(ls.get);
+    const list = sessionHistory();
+    expect(list).toHaveLength(1);
+    expect(list[0]!.id).toBe('g');
   });
 
   it('leaves history empty on malformed JSON', async () => {

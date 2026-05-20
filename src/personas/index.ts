@@ -120,7 +120,7 @@ const BUILTINS: Persona[] = [
   },
 ];
 
-const [personasSignal, setPersonasSignal] = createSignal<Persona[]>(BUILTINS);
+const [personasSignal] = createSignal<Persona[]>(BUILTINS);
 
 export const personas = personasSignal;
 
@@ -140,9 +140,3 @@ export function getPickerPersonas(bufferDuration: number): Persona[] {
   return personasSignal().filter((p) => p.id !== 'session-summary' || bufferDuration > 30);
 }
 
-export function _setPersonas(next: Persona[]): void {
-  setPersonasSignal(next);
-}
-
-/** Legacy alias retained so existing imports compile. */
-export const PERSONAS = personasSignal;

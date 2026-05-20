@@ -62,30 +62,61 @@ function badgeClass(badge: string): string {
 function formatResultText(result: LensResult): string {
   switch (result.type) {
     case 'fact-check': {
-      const icon = result.verdict === 'TRUE' ? '✓' : result.verdict === 'FALSE' ? '✗' : '?';
-      return `${icon} ${result.verdict}\n\n${result.reason}`;
+      return result.claims.map((c, i) => {
+        const icon = c.verdict === 'TRUE' ? '✓' : c.verdict === 'FALSE' ? '✗' : '?';
+        const head = result.claims.length > 1 ? `Claim ${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        return `${head}${quoteLine}${icon} ${c.verdict} — ${c.claim}\n${c.reason}`;
+      }).join('\n\n');
     }
-    case 'trivia':
-      return `${result.answer}\n\n${result.description}`;
-    case 'logical-fallacy':
-      return `${result.fallacy}\n\n${result.explanation}`;
+    case 'trivia': {
+      return result.claims.map((c, i) => {
+        const head = result.claims.length > 1 ? `Q${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        return `${head}${quoteLine}${c.question}\n${c.answer}\n${c.description}`;
+      }).join('\n\n');
+    }
+    case 'logical-fallacy': {
+      return result.claims.map((c, i) => {
+        const head = result.claims.length > 1 ? `Fallacy ${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        return `${head}${quoteLine}${c.fallacy}\n${c.explanation}`;
+      }).join('\n\n');
+    }
     case 'stats-check': {
-      const icon = result.verdict === 'PLAUSIBLE' ? '✓' : '✗';
-      return `${icon} ${result.verdict}\n\n${result.reason}`;
+      return result.claims.map((c, i) => {
+        const icon = c.verdict === 'PLAUSIBLE' ? '✓' : '✗';
+        const head = result.claims.length > 1 ? `Stat ${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        return `${head}${quoteLine}${icon} ${c.verdict} — ${c.stat}\n${c.reason}`;
+      }).join('\n\n');
     }
     case 'bias': {
-      const icon = result.verdict === 'NEUTRAL' ? '✓' : '✗';
-      const firstLine = result.direction
-        ? `${icon} ${result.verdict} · ${result.direction}`
-        : `${icon} ${result.verdict}`;
-      return `${firstLine}\n\n${result.reason}`;
+      return result.claims.map((c, i) => {
+        const icon = c.verdict === 'NEUTRAL' ? '✓' : '✗';
+        const head = result.claims.length > 1 ? `Claim ${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        const firstLine = c.direction
+          ? `${icon} ${c.verdict} · ${c.direction}`
+          : `${icon} ${c.verdict}`;
+        return `${head}${quoteLine}${firstLine}\n${c.reason}`;
+      }).join('\n\n');
     }
-    case 'translation':
-      return result.translatedText;
-    case 'eli5':
-      return result.explanation;
-    case 'session-summary':
-      return result.summary;
+    case 'translation': {
+      const q = result.quote ? `“${result.quote}”\n\n` : '';
+      return `${q}${result.translatedText}`;
+    }
+    case 'eli5': {
+      return result.claims.map((c, i) => {
+        const head = result.claims.length > 1 ? `${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        return `${head}${quoteLine}${c.explanation}`;
+      }).join('\n\n');
+    }
+    case 'session-summary': {
+      const q = result.quote ? `“${result.quote}”\n\n` : '';
+      return `${q}${result.summary}`;
+    }
   }
 }
 
@@ -123,6 +154,7 @@ export const SettingsView: Component = () => {
   // Session log navigation
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
   const [expandedEntryId, setExpandedEntryId] = createSignal<string | null>(null);
+  const [searchQuery, setSearchQuery] = createSignal('');
 
   createEffect(() => {
     const key = draftKey();
@@ -164,6 +196,22 @@ export const SettingsView: Component = () => {
   const selectedSessionEntries = createMemo(() =>
     sessionGroups().find((g) => g.sessionId === selectedSessionId())?.entries ?? [],
   );
+
+  // Search returns most-recent-first matches across the entire history.
+  // Each entry is indexed by question + quote + badge + lensName, joined
+  // and lowercased. Empty query collapses back to the session list view.
+  const searchMatches = createMemo<HistoryEntry[]>(() => {
+    const q = searchQuery().trim().toLowerCase();
+    if (q.length === 0) return [];
+    const hits: HistoryEntry[] = [];
+    const history = sessionHistory();
+    for (let i = history.length - 1; i >= 0; i--) {
+      const e = history[i]!;
+      const haystack = `${e.question} ${e.quote} ${e.badge} ${e.lensName}`.toLowerCase();
+      if (haystack.includes(q)) hits.push(e);
+    }
+    return hits;
+  });
 
   let savedFadeTimer: ReturnType<typeof setTimeout> | null = null;
   onCleanup(() => { if (savedFadeTimer) clearTimeout(savedFadeTimer); });
@@ -254,6 +302,42 @@ export const SettingsView: Component = () => {
       </div>
     );
   };
+
+  // Flat search-results view — rendered when the search query is non-empty.
+  // Each row expands inline to show the full result, same as the session view.
+  const SearchResultsView = (props: { matches: HistoryEntry[] }) => (
+    <div class="search-results">
+      <Show
+        when={props.matches.length > 0}
+        fallback={<p class="muted">No matches for “{searchQuery()}”.</p>}
+      >
+        <ul class="history-list">
+          <For each={props.matches}>
+            {(entry) => (
+              <li class="history-row">
+                <button
+                  type="button"
+                  class="history-question"
+                  onClick={() => setExpandedEntryId((prev) => (prev === entry.id ? null : entry.id))}
+                >
+                  <span class={`history-icon ${badgeClass(entry.badge)}`}>{badgeIcon(entry.badge)}</span>
+                  <span class="history-time">{formatSessionDate(entry.timestamp)}</span>
+                  <span class="history-q">{entry.quote || entry.question}</span>
+                </button>
+                <Show when={expandedEntryId() === entry.id}>
+                  <div class="history-detail">
+                    <p class="history-detail-lens">{entry.lensName}</p>
+                    <p class="history-detail-question">{entry.question}</p>
+                    <pre>{formatResultText(entry.result)}</pre>
+                  </div>
+                </Show>
+              </li>
+            )}
+          </For>
+        </ul>
+      </Show>
+    </div>
+  );
 
   // Session list view
   const SessionListView = () => (
@@ -516,10 +600,25 @@ export const SettingsView: Component = () => {
 
       <Show when={activeTab() === 'history'}>
         <section class="session-log">
-          <Show when={selectedSessionId() !== null} fallback={<SessionListView />}>
-            <SessionDetailView />
+          <input
+            class="history-search-input"
+            type="text"
+            placeholder="Search"
+            value={searchQuery()}
+            onInput={(e) => setSearchQuery(e.currentTarget.value)}
+          />
+          <Show
+            when={searchQuery().trim().length > 0}
+            fallback={
+              <Show when={selectedSessionId() !== null} fallback={<SessionListView />}>
+                <SessionDetailView />
+              </Show>
+            }
+          >
+            <SearchResultsView matches={searchMatches()} />
           </Show>
         </section>
+
       </Show>
     </main>
   );

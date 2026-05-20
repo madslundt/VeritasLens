@@ -3,9 +3,10 @@ import { getBridge } from './bridge';
 import { PcmRingBuffer } from './audioBuffer';
 import {
   ACTIVE_HINT_ANALYZING,
-  ACTIVE_HINT_DEFAULT,
+  applyDefaultActiveHint,
   bootstrapHud,
   currentHudPage,
+  tryAdvanceActiveClaim,
   getActiveLayout,
   hasPendingActiveResult,
   menuOptionAtIndex,
@@ -205,6 +206,10 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 
 async function handleActiveGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    // For multi-claim results, single-tap walks forward through the claims.
+    // On the last claim it falls through to opening the menu (and for
+    // single-claim or answer-shaped results it goes straight to the menu).
+    if (await tryAdvanceActiveClaim()) return;
     await showMenuPage();
     return;
   }
@@ -246,7 +251,7 @@ async function handleBackMenuOption(): Promise<void> {
   if (hasPendingActiveResult()) {
     await restoreActivePage();
     await setStatus('displaying');
-    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    await applyDefaultActiveHint();
     setAppPhase('displaying');
     return;
   }
@@ -466,38 +471,48 @@ async function runAnalysis(): Promise<void> {
     if (autoSelected) result.autoSelected = true;
     stopSpinner();
     setStateResult(result);
-    pushHistoryEntry({
-      sessionId: currentSessionId,
-      lensId: analysisPersona.id,
-      lensName: analysisPersona.name,
-      question: extractQuestion(result),
-      badge: extractBadge(result),
-      result,
-    }, (k, v) => getBridge().setLocalStorage(k, v));
+    for (const single of splitResultByClaim(result)) {
+      pushHistoryEntry({
+        sessionId: currentSessionId,
+        lensId: analysisPersona.id,
+        lensName: analysisPersona.name,
+        question: extractQuestion(single),
+        badge: extractBadge(single),
+        quote: extractQuote(single),
+        result: single,
+      }, (k, v) => getBridge().setLocalStorage(k, v));
+    }
     await setLensResult(result);
     await setStatus('displaying');
-    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    await applyDefaultActiveHint();
     setAppPhase('displaying');
   } catch (err) {
     stopSpinner();
     if ((err as Error)?.name === 'AbortError') {
       await setStatus('listening');
-      await setActiveHint(ACTIVE_HINT_DEFAULT);
+      await applyDefaultActiveHint();
       setAppPhase('listening');
       return;
     }
     if ((err as Error)?.name === 'NoSpeechError') {
       await setStatus('listening');
-      await setActiveHint(ACTIVE_HINT_DEFAULT);
+      await applyDefaultActiveHint();
       setAppPhase('listening');
       return;
     }
     setErrorMessage(err instanceof Error ? err.message : String(err));
     await setStatus('error');
-    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    await applyDefaultActiveHint();
     setAppPhase('error');
   } finally {
-    if (inflight === controller) analyzing = false;
+    // Identity check prevents clobbering a newer controller spawned by a
+    // back-to-back analysis. Nulling inflight here releases the AbortController
+    // and, through its closure, the WAV snapshot that can be up to ~19 MB at
+    // the maximum buffer duration.
+    if (inflight === controller) {
+      analyzing = false;
+      inflight = null;
+    }
   }
 }
 
@@ -531,14 +546,17 @@ async function runAutoSummary(): Promise<void> {
       model: settings().geminiModel,
     });
     const result = persona.parse(rawText);
-    pushHistoryEntry({
-      sessionId: currentSessionId,
-      lensId: persona.id,
-      lensName: persona.name,
-      question: extractQuestion(result),
-      badge: 'AUTO',
-      result,
-    }, (k, v) => getBridge().setLocalStorage(k, v));
+    for (const single of splitResultByClaim(result)) {
+      pushHistoryEntry({
+        sessionId: currentSessionId,
+        lensId: persona.id,
+        lensName: persona.name,
+        question: extractQuestion(single),
+        badge: 'AUTO',
+        quote: extractQuote(single),
+        result: single,
+      }, (k, v) => getBridge().setLocalStorage(k, v));
+    }
   } catch (err) {
     // Auto-summary is best-effort, but failures should be observable in the
     // debug log so the user can see why the timer is firing without producing
@@ -552,27 +570,92 @@ async function runAutoSummary(): Promise<void> {
 
 function extractQuestion(result: LensResult): string {
   switch (result.type) {
-    case 'fact-check': return result.claim;
-    case 'trivia': return result.question;
-    case 'logical-fallacy': return result.fallacy;
-    case 'stats-check': return result.stat;
-    case 'bias': return result.direction || result.verdict;
+    case 'fact-check': return result.claims[0]?.claim ?? '';
+    case 'trivia': return result.claims[0]?.question ?? '';
+    case 'logical-fallacy': return result.claims[0]?.fallacy ?? '';
+    case 'stats-check': return result.claims[0]?.stat ?? '';
+    case 'bias': {
+      const c = result.claims[0];
+      return c ? (c.direction || c.verdict) : '';
+    }
     case 'translation': return result.translatedText.slice(0, 80);
-    case 'eli5': return result.explanation.slice(0, 80);
+    case 'eli5': return (result.claims[0]?.explanation ?? '').slice(0, 80);
     case 'session-summary': return result.summary.slice(0, 80);
   }
 }
 
 function extractBadge(result: LensResult): string {
   switch (result.type) {
-    case 'fact-check': return result.verdict;
+    case 'fact-check': return result.claims[0]?.verdict ?? 'UNVERIFIED';
     case 'trivia': return 'ANSWER';
-    case 'logical-fallacy': return result.fallacy.slice(0, 12).toUpperCase();
-    case 'stats-check': return result.verdict;
-    case 'bias': return result.verdict;
+    case 'logical-fallacy': return (result.claims[0]?.fallacy ?? '').slice(0, 12).toUpperCase();
+    case 'stats-check': return result.claims[0]?.verdict ?? 'SUSPICIOUS';
+    case 'bias': return result.claims[0]?.verdict ?? 'NEUTRAL';
     case 'translation': return 'TRANSL.';
     case 'eli5': return 'ELI5';
     case 'session-summary': return 'SUMMARY';
+  }
+}
+
+/**
+ * Splits a multi-claim result into individual single-claim variants so each
+ * claim becomes its own history entry. Answer-shaped results (and already-
+ * single-claim claim-shaped results) pass through unchanged. The HUD's
+ * active page still uses the original multi-claim result — splitting happens
+ * only at history-storage time.
+ */
+export function splitResultByClaim(result: LensResult): LensResult[] {
+  switch (result.type) {
+    case 'fact-check':
+    case 'logical-fallacy':
+    case 'stats-check':
+    case 'bias':
+    case 'trivia':
+    case 'eli5': {
+      if (result.claims.length <= 1) return [result];
+      // Type-narrowing per variant is needed because each `claims` array is
+      // typed against its own per-claim shape; we rebuild the same variant
+      // per claim instead of using a generic spread.
+      switch (result.type) {
+        case 'fact-check':
+          return result.claims.map((c) => ({ type: 'fact-check', claims: [c], autoSelected: result.autoSelected }));
+        case 'stats-check':
+          return result.claims.map((c) => ({ type: 'stats-check', claims: [c], autoSelected: result.autoSelected }));
+        case 'logical-fallacy':
+          return result.claims.map((c) => ({ type: 'logical-fallacy', claims: [c], autoSelected: result.autoSelected }));
+        case 'bias':
+          return result.claims.map((c) => ({ type: 'bias', claims: [c], autoSelected: result.autoSelected }));
+        case 'trivia':
+          return result.claims.map((c) => ({ type: 'trivia', claims: [c], autoSelected: result.autoSelected }));
+        case 'eli5':
+          return result.claims.map((c) => ({ type: 'eli5', claims: [c], autoSelected: result.autoSelected }));
+      }
+    }
+    /* falls through */
+    case 'translation':
+    case 'session-summary':
+      return [result];
+  }
+}
+
+/**
+ * Returns the verbatim source quote(s) from a result, joined with " · " when
+ * multiple claims are present. Powers history search in the settings WebView.
+ * Exhaustive switch — adding a new LensResult variant fails the build until
+ * this is updated.
+ */
+export function extractQuote(result: LensResult): string {
+  switch (result.type) {
+    case 'fact-check':
+    case 'logical-fallacy':
+    case 'stats-check':
+    case 'bias':
+    case 'trivia':
+    case 'eli5':
+      return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
+    case 'session-summary':
+    case 'translation':
+      return result.quote ?? '';
   }
 }
 
