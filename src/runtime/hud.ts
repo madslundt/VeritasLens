@@ -340,7 +340,7 @@ function buildUnconfiguredPage(mode: 'create' | 'rebuild'): CreateStartUpPageCon
   const msg = new TextContainerProperty({
     containerID: CONTAINER.pickerHint, containerName: 'vl-msg', xPosition: 16, yPosition: 96,
     width: SCREEN_W - 32, height: 88, borderWidth: 0, paddingLength: 4,
-    content: 'Configure on your phone to begin. Add your Gemini API key from the app menu.',
+    content: 'Configure on your phone to begin. Add your Gemini API key from the app menu. Double-tap to exit.',
     isEventCapture: 0,
   });
   const sink = new ListContainerProperty({
@@ -375,7 +375,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   const hint = new TextContainerProperty({
     containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
     width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
-    content: currentPersonas.length > 1 ? 'Swipe ⇅ · Tap to start' : 'Tap to start',
+    content: currentPersonas.length > 1 ? 'Swipe ⇅ · Tap: start · Double-tap: exit' : 'Tap: start · Double-tap: exit',
     isEventCapture: 0,
   });
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;

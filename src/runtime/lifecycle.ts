@@ -158,14 +158,22 @@ function handleEvent(event: EvenHubEvent): void {
   const gesture = extractGesture(event);
   if (!gesture) return;
 
-  // Double-tap is universal: starts analysis, or cancels an in-flight one.
+  const page = currentHudPage();
+
+  // Double-tap handling. From the root pages (picker, unconfigured) it asks
+  // the host to surface its exit confirmation dialog — required by Even Hub
+  // review so users always have a way out, even before an API key is set.
+  // Everywhere else it starts analysis, or cancels an in-flight one.
   if (gesture.type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+    if (page === 'picker' || page === 'unconfigured') {
+      void getBridge().shutDownPageContainer(1);
+      return;
+    }
     if (analyzing) { inflight?.abort(); return; }
     void runAnalysis();
     return;
   }
 
-  const page = currentHudPage();
   if (page === 'picker') void handlePickerEvent(gesture);
   else if (page === 'active') void handleActiveGesture(gesture);
   else if (page === 'menu') void handleMenuGesture(gesture);
