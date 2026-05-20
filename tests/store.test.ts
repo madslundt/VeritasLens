@@ -28,7 +28,7 @@ import {
 import { DEFAULT_BUFFER_DURATION, DEFAULT_GEMINI_AUTO_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_LANGUAGE } from '../src/types';
 import type { HistoryEntry } from '../src/types';
 
-const HISTORY_BYTE_BUDGET = 200 * 1024;
+const HISTORY_BYTE_BUDGET = 300 * 1024;
 
 function fakeLocalStorage(): {
   get: (k: string) => Promise<string>;
@@ -44,7 +44,7 @@ function fakeLocalStorage(): {
 }
 
 function fatEntry(i: number): Omit<HistoryEntry, 'id' | 'timestamp'> {
-  // ~1 KB per entry — enough that 250 entries breaches 200 KB budget.
+  // ~1 KB per entry — enough that ~400 entries breaches the 300 KB budget.
   const filler = 'x'.repeat(900);
   return {
     sessionId: `session-${i % 5}`,
@@ -52,7 +52,8 @@ function fatEntry(i: number): Omit<HistoryEntry, 'id' | 'timestamp'> {
     lensName: 'Fact Check',
     question: `claim ${i} ${filler}`,
     badge: 'TRUE',
-    result: { type: 'fact-check', verdict: 'TRUE', claim: `claim ${i}`, reason: filler },
+    quote: '',
+    result: { type: 'fact-check', claims: [{ quote: '', verdict: 'TRUE', claim: `claim ${i}`, reason: filler }] },
   };
 }
 
@@ -90,7 +91,7 @@ describe('persistHistory trim semantics', () => {
   // (Pass 1 / C2 will fix this).
   it('keeps the persisted JSON under HISTORY_BYTE_BUDGET when overflowing', async () => {
     const ls = fakeLocalStorage();
-    for (let i = 0; i < 250; i++) {
+    for (let i = 0; i < 400; i++) {
       pushHistoryEntry(fatEntry(i), ls.set);
     }
     // Allow the chained async persistHistory calls to settle.
@@ -100,7 +101,7 @@ describe('persistHistory trim semantics', () => {
     const parsed = JSON.parse(raw) as HistoryEntry[];
     // Trim is from the head, so the tail (latest entries) survives.
     expect(parsed.length).toBeGreaterThan(0);
-    expect(parsed.at(-1)!.question).toContain('claim 249');
+    expect(parsed.at(-1)!.question).toContain('claim 399');
   }, 30_000);
 });
 
@@ -177,6 +178,7 @@ describe('loadHistory', () => {
       lensName: 'Trivia',
       question: 'Q?',
       badge: 'ANSWER',
+      quote: '',
       result: { type: 'trivia', question: 'Q?', answer: 'A', description: 'D' },
     };
     ls.data.set('veritaslens.history', JSON.stringify([entry]));

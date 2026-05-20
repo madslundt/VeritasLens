@@ -1,15 +1,25 @@
 // src/types.ts
 
+/**
+ * Per-claim shapes for the "claim-shaped" lenses (fact / stats / fallacy /
+ * bias). Each carries a verbatim `quote` snippet from the audio so a single
+ * tap can cover up to two distinct claims and history stays searchable.
+ */
+export interface FactClaim { quote: string; claim: string; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; reason: string; }
+export interface StatsClaim { quote: string; verdict: 'PLAUSIBLE' | 'SUSPICIOUS'; stat: string; reason: string; }
+export interface FallacyClaim { quote: string; fallacy: string; explanation: string; }
+export interface BiasClaim { quote: string; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string; }
+
 /** Result union — every built-in lens returns one of these shapes. */
 export type LensResult = (
-  | { type: 'fact-check'; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; claim: string; reason: string }
-  | { type: 'trivia'; question: string; answer: string; description: string }
-  | { type: 'logical-fallacy'; fallacy: string; explanation: string }
-  | { type: 'stats-check'; verdict: 'PLAUSIBLE' | 'SUSPICIOUS'; stat: string; reason: string }
-  | { type: 'bias'; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string }
-  | { type: 'translation'; translatedText: string }
-  | { type: 'eli5'; explanation: string }
-  | { type: 'session-summary'; summary: string }
+  | { type: 'fact-check'; claims: FactClaim[] }
+  | { type: 'trivia'; question: string; answer: string; description: string; quote?: string }
+  | { type: 'logical-fallacy'; claims: FallacyClaim[] }
+  | { type: 'stats-check'; claims: StatsClaim[] }
+  | { type: 'bias'; claims: BiasClaim[] }
+  | { type: 'translation'; translatedText: string; quote?: string }
+  | { type: 'eli5'; explanation: string; quote?: string }
+  | { type: 'session-summary'; summary: string; quote?: string }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
   autoSelected?: boolean;
@@ -26,6 +36,8 @@ export interface HistoryEntry {
   question: string;
   /** Compact verdict badge (TRUE / PLAUSIBLE / BIASED / ANSWER / etc.). */
   badge: string;
+  /** Verbatim source quote(s) joined with " · ". Used to make history searchable. */
+  quote: string;
   result: LensResult;
 }
 

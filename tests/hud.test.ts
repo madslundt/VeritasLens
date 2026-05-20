@@ -169,8 +169,8 @@ describe('page lifecycle', () => {
     const entry: HistoryEntry = {
       id: 'h1', timestamp: 1, sessionId: 's',
       lensId: 'fact-checker', lensName: 'Fact Check', question: 'q',
-      badge: 'TRUE',
-      result: { type: 'fact-check', verdict: 'TRUE', claim: 'c', reason: longReason },
+      badge: 'TRUE', quote: '',
+      result: { type: 'fact-check', claims: [{ quote: '', verdict: 'TRUE', claim: 'c', reason: longReason }] },
     };
     await showHistoryDetailPage(entry);
     expect(currentHudPage()).toBe('history-detail');
@@ -188,8 +188,8 @@ describe('page lifecycle', () => {
     const entry: HistoryEntry = {
       id: 'h1', timestamp: 1, sessionId: 's',
       lensId: 'fact-checker', lensName: 'Fact Check', question: 'q',
-      badge: 'TRUE',
-      result: { type: 'fact-check', verdict: 'TRUE', claim: 'c', reason: 'short' },
+      badge: 'TRUE', quote: '',
+      result: { type: 'fact-check', claims: [{ quote: '', verdict: 'TRUE', claim: 'c', reason: 'short' }] },
     };
     await showHistoryDetailPage(entry);
     bridge.textContainerUpgrade.mockClear();
@@ -206,8 +206,8 @@ describe('setLensResult', () => {
     bridge.textContainerUpgrade.mockClear();
 
     const result: LensResult = {
-      type: 'fact-check', verdict: 'TRUE', claim: 'The Earth is round.',
-      reason: 'Established by science.',
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'The Earth is round.', reason: 'Established by science.' }],
     };
     await setLensResult(result);
     // 3 upgrades: claim, verdict, reason
@@ -227,7 +227,9 @@ describe('setLensResult', () => {
     bridge.textContainerUpgrade.mockClear();
 
     const result: LensResult = {
-      type: 'fact-check', verdict: 'TRUE', claim: 'X', reason: 'Y', autoSelected: true,
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'X', reason: 'Y' }],
+      autoSelected: true,
     };
     await setLensResult(result);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
@@ -265,7 +267,7 @@ describe('showHistoryListPage', () => {
     await bootstrapHud('picker');
     const entries: HistoryEntry[] = [{
       id: 'h', timestamp: 1, sessionId: 's',
-      lensId: 'trivia', lensName: 'Trivia', question: 'q', badge: 'ANSWER',
+      lensId: 'trivia', lensName: 'Trivia', question: 'q', badge: 'ANSWER', quote: '',
       result: { type: 'trivia', question: 'q', answer: 'a', description: 'd' },
     }];
     await showHistoryListPage(entries);
@@ -440,7 +442,8 @@ describe('resetHudSessionState', () => {
     // so scrollActiveReason has something to move through.
     const longReason = 'r'.repeat(800);
     await setLensResult({
-      type: 'fact-check', verdict: 'TRUE', claim: 'c', reason: longReason,
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'c', reason: longReason }],
     });
 
     // Sanity check: scroll moves the buffer (textContainerUpgrade fires).
@@ -482,7 +485,8 @@ describe('pending result on menu', () => {
     expect(hasPendingActiveResult()).toBe(false);
 
     await setLensResult({
-      type: 'fact-check', verdict: 'TRUE', claim: 'C', reason: 'R',
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: 'R' }],
     });
 
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
@@ -496,7 +500,8 @@ describe('pending result on menu', () => {
     await showActivePage(persona);
     await showMenuPage();
     await setLensResult({
-      type: 'fact-check', verdict: 'FALSE', claim: 'The Sun rises in the west.', reason: 'It rises in the east.',
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'FALSE', claim: 'The Sun rises in the west.', reason: 'It rises in the east.' }],
     });
     expect(hasPendingActiveResult()).toBe(true);
 
@@ -568,6 +573,96 @@ describe('pending result on menu', () => {
 
     resetHudSessionState();
     expect(hasPendingActiveResult()).toBe(false);
+  });
+});
+
+describe('multi-claim active page', () => {
+  type TextBag = { payload: { containerName: string; content: string } };
+
+  function lastUpgradeByName(name: string): string | undefined {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
+    }
+    return undefined;
+  }
+
+  it('renders the 1/2 indicator on the verdict line when 2 claims are present', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'fact-check',
+      claims: [
+        { quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' },
+        { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
+      ],
+    });
+    expect(lastUpgradeByName('vl-verdict')).toBe('1/2 · + TRUE');
+    expect(lastUpgradeByName('vl-claim')).toBe('C1');
+    expect(lastUpgradeByName('vl-reason')).toBe('R1');
+  });
+
+  it('omits the indicator when only one claim is present', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' }],
+    });
+    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
+  });
+
+  it('scrollActiveReason advances to claim 2 and rewrites claim/verdict/reason', async () => {
+    const { scrollActiveReason } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    await setLensResult({
+      type: 'fact-check',
+      claims: [
+        { quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' },
+        { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
+      ],
+    });
+
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-verdict')).toBe('2/2 · - FALSE');
+    expect(lastUpgradeByName('vl-claim')).toBe('C2');
+    expect(lastUpgradeByName('vl-reason')).toBe('R2');
+
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(-1);
+    expect(lastUpgradeByName('vl-verdict')).toBe('1/2 · + TRUE');
+    expect(lastUpgradeByName('vl-claim')).toBe('C1');
+  });
+
+  it('scrollActiveReason past the last claim falls back to reason pagination', async () => {
+    const { scrollActiveReason } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longReason = 'r'.repeat(800);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [
+        { quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' },
+        { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: longReason },
+      ],
+    });
+
+    // Advance to claim 2.
+    await scrollActiveReason(1);
+    // Advancing again should now paginate claim 2's reason rather than no-op.
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    const reason = lastUpgradeByName('vl-reason');
+    expect(reason).toBeDefined();
+    expect(reason!.startsWith('r')).toBe(true);
   });
 });
 

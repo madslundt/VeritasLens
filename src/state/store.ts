@@ -29,7 +29,7 @@ const SETTINGS_KEY_AUTO_SUMMARY_INTERVAL = 'veritaslens.autoSummaryInterval';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 
 const HISTORY_KEY = 'veritaslens.history';
-const HISTORY_BYTE_BUDGET = 200 * 1024;
+const HISTORY_BYTE_BUDGET = 300 * 1024;
 const HISTORY_MAX_ENTRIES = 500;
 
 export const [appMode, setAppMode] = createSignal<AppMode>('settings');
@@ -123,11 +123,80 @@ export async function loadHistory(getLocalStorage: (k: string) => Promise<string
   try {
     const raw = await getLocalStorage(HISTORY_KEY);
     if (!raw) return;
-    const entries: HistoryEntry[] = JSON.parse(raw);
-    if (Array.isArray(entries)) setSessionHistory(entries);
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    const migrated: HistoryEntry[] = [];
+    for (const entry of parsed) {
+      const ok = migrateEntry(entry);
+      if (ok) migrated.push(ok);
+    }
+    setSessionHistory(migrated);
   } catch {
     // corrupt or missing — start fresh
   }
+}
+
+/**
+ * Migrate a persisted history entry to the multi-claim shape. Older builds
+ * stored claim-shaped lens results flat (e.g. fact-check had top-level
+ * verdict/claim/reason); wrap them into a single-element `claims` array with
+ * an empty `quote`. Answer-shaped results gain an optional `quote` field —
+ * fill missing values with ''. Entries that can't be migrated are dropped.
+ */
+function migrateEntry(raw: unknown): HistoryEntry | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const e = raw as Record<string, unknown>;
+  const result = e['result'];
+  if (!result || typeof result !== 'object') return null;
+  const r = result as Record<string, unknown>;
+  const type = r['type'];
+  if (typeof type !== 'string') return null;
+
+  const wrap = (item: Record<string, unknown>): unknown[] => [{ quote: '', ...item }];
+
+  let migratedResult: Record<string, unknown> | null = null;
+  switch (type) {
+    case 'fact-check':
+      migratedResult = Array.isArray(r['claims'])
+        ? r
+        : { type, claims: wrap({ verdict: r['verdict'], claim: r['claim'], reason: r['reason'] }), autoSelected: r['autoSelected'] };
+      break;
+    case 'stats-check':
+      migratedResult = Array.isArray(r['claims'])
+        ? r
+        : { type, claims: wrap({ verdict: r['verdict'], stat: r['stat'], reason: r['reason'] }), autoSelected: r['autoSelected'] };
+      break;
+    case 'logical-fallacy':
+      migratedResult = Array.isArray(r['claims'])
+        ? r
+        : { type, claims: wrap({ fallacy: r['fallacy'], explanation: r['explanation'] }), autoSelected: r['autoSelected'] };
+      break;
+    case 'bias':
+      migratedResult = Array.isArray(r['claims'])
+        ? r
+        : { type, claims: wrap({ verdict: r['verdict'], direction: r['direction'], reason: r['reason'] }), autoSelected: r['autoSelected'] };
+      break;
+    case 'trivia':
+    case 'translation':
+    case 'eli5':
+    case 'session-summary':
+      migratedResult = { quote: '', ...r };
+      break;
+    default:
+      return null;
+  }
+
+  return {
+    id: String(e['id'] ?? `${Date.now()}-mig`),
+    sessionId: String(e['sessionId'] ?? ''),
+    timestamp: typeof e['timestamp'] === 'number' ? e['timestamp'] : Date.now(),
+    lensId: String(e['lensId'] ?? ''),
+    lensName: String(e['lensName'] ?? ''),
+    question: String(e['question'] ?? ''),
+    badge: String(e['badge'] ?? ''),
+    quote: typeof e['quote'] === 'string' ? e['quote'] : '',
+    result: migratedResult as HistoryEntry['result'],
+  };
 }
 
 async function persistHistory(

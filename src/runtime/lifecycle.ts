@@ -472,6 +472,7 @@ async function runAnalysis(): Promise<void> {
       lensName: analysisPersona.name,
       question: extractQuestion(result),
       badge: extractBadge(result),
+      quote: extractQuote(result),
       result,
     }, (k, v) => getBridge().setLocalStorage(k, v));
     await setLensResult(result);
@@ -537,6 +538,7 @@ async function runAutoSummary(): Promise<void> {
       lensName: persona.name,
       question: extractQuestion(result),
       badge: 'AUTO',
+      quote: extractQuote(result),
       result,
     }, (k, v) => getBridge().setLocalStorage(k, v));
   } catch (err) {
@@ -552,11 +554,14 @@ async function runAutoSummary(): Promise<void> {
 
 function extractQuestion(result: LensResult): string {
   switch (result.type) {
-    case 'fact-check': return result.claim;
+    case 'fact-check': return result.claims[0]?.claim ?? '';
     case 'trivia': return result.question;
-    case 'logical-fallacy': return result.fallacy;
-    case 'stats-check': return result.stat;
-    case 'bias': return result.direction || result.verdict;
+    case 'logical-fallacy': return result.claims[0]?.fallacy ?? '';
+    case 'stats-check': return result.claims[0]?.stat ?? '';
+    case 'bias': {
+      const c = result.claims[0];
+      return c ? (c.direction || c.verdict) : '';
+    }
     case 'translation': return result.translatedText.slice(0, 80);
     case 'eli5': return result.explanation.slice(0, 80);
     case 'session-summary': return result.summary.slice(0, 80);
@@ -565,14 +570,36 @@ function extractQuestion(result: LensResult): string {
 
 function extractBadge(result: LensResult): string {
   switch (result.type) {
-    case 'fact-check': return result.verdict;
+    case 'fact-check': return result.claims[0]?.verdict ?? 'UNVERIFIED';
     case 'trivia': return 'ANSWER';
-    case 'logical-fallacy': return result.fallacy.slice(0, 12).toUpperCase();
-    case 'stats-check': return result.verdict;
-    case 'bias': return result.verdict;
+    case 'logical-fallacy': return (result.claims[0]?.fallacy ?? '').slice(0, 12).toUpperCase();
+    case 'stats-check': return result.claims[0]?.verdict ?? 'SUSPICIOUS';
+    case 'bias': return result.claims[0]?.verdict ?? 'NEUTRAL';
     case 'translation': return 'TRANSL.';
     case 'eli5': return 'ELI5';
     case 'session-summary': return 'SUMMARY';
+  }
+}
+
+/**
+ * Returns the verbatim source quote(s) from a result, joined with " · " when
+ * multiple claims are present. Powers history search in the settings WebView.
+ * Exhaustive switch — adding a new LensResult variant fails the build until
+ * this is updated.
+ */
+export function extractQuote(result: LensResult): string {
+  switch (result.type) {
+    case 'fact-check':
+    case 'logical-fallacy':
+    case 'stats-check':
+    case 'bias':
+      return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
+    case 'trivia':
+    case 'eli5':
+    case 'session-summary':
+      return result.quote ?? '';
+    case 'translation':
+      return result.quote ?? '';
   }
 }
 

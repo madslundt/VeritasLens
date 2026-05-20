@@ -1,19 +1,19 @@
 // src/personas/factChecker.ts
-import type { LensResult, LanguageCode } from '@/types';
+import type { FactClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
 
 export const FACT_CHECKER_PROMPT = `You are VeritasLens, a real-time fact-check assistant for smart glasses.
 
 The user just provided a short audio clip of recent conversation. Listen carefully and:
 
-1. Identify the SINGLE most check-worthy factual claim in the audio. If multiple, pick the most consequential or most verifiable.
-2. Classify the claim as one of:
+1. Identify up to TWO of the most check-worthy factual claims in the audio, ordered by check-worthiness. Prefer one claim unless a second is clearly distinct and worth verifying on its own. Never return more than two.
+2. For each claim, classify it as one of:
    - "TRUE"  : Widely supported by reliable knowledge.
    - "FALSE" : Contradicted by reliable knowledge.
    - "UNVERIFIED" : Cannot confidently classify (opinion, future event, niche fact, ambiguous wording, no check-worthy claim at all).
-3. Produce a short claim summary as ONE concise sentence (no more than 110 characters). Phrase it as a statement, not a question.
-4. Produce an explanation of 2-3 short sentences (no more than 240 characters total) that justifies the verdict with specific reasoning.
+3. For each claim, include a short verbatim quote (≤140 chars) from the audio that the verdict is responding to.
+4. For each claim, produce a one-sentence claim summary (≤110 chars), and a 2-3 sentence justification (≤240 chars).
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.
 Do not invent facts. Prefer "UNVERIFIED" over guessing.`;
@@ -22,30 +22,49 @@ export function buildFactCheckerPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
   return (
     `${FACT_CHECKER_PROMPT}\n\n` +
-    `LANGUAGE: Write the \`claim\` and \`reason\` fields in ${langName}. ` +
-    `The \`verdict\` field MUST stay as one of the literal strings "TRUE", "FALSE", or "UNVERIFIED" regardless of language.`
+    `LANGUAGE: Write each claim's \`claim\` and \`reason\` fields in ${langName}. ` +
+    `Each claim's \`quote\` field must stay in the original spoken language. ` +
+    `Each claim's \`verdict\` MUST stay as one of "TRUE", "FALSE", or "UNVERIFIED" regardless of language.`
   );
 }
 
-export const FACT_CHECKER_SCHEMA = {
+const CLAIM_ITEM_SCHEMA = {
   type: 'object',
   properties: {
+    quote: { type: 'string', description: 'Verbatim audio snippet for this claim (max 140 chars).' },
     verdict: { type: 'string', enum: ['TRUE', 'FALSE', 'UNVERIFIED'] },
     claim: { type: 'string', description: 'One concise sentence summarizing the claim (max 110 chars).' },
     reason: { type: 'string', description: '2-3 short sentences justifying the verdict (max 240 chars).' },
   },
-  required: ['verdict', 'claim', 'reason'],
+  required: ['quote', 'verdict', 'claim', 'reason'],
+} as const;
+
+export const FACT_CHECKER_SCHEMA = {
+  type: 'object',
+  properties: {
+    claims: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 2,
+      items: CLAIM_ITEM_SCHEMA,
+    },
+  },
+  required: ['claims'],
 } as const;
 
 export function parseFactCheckerResponse(text: string): LensResult {
   const raw = parseJsonResponse(text);
-  const verdict = normalizeFactVerdict(raw['verdict']);
-  return {
-    type: 'fact-check',
-    verdict,
-    claim: trimTo(typeof raw['claim'] === 'string' ? raw['claim'] : '', 110),
-    reason: trimTo(typeof raw['reason'] === 'string' ? raw['reason'] : '', 240),
-  };
+  const items = readClaimsArray(raw);
+  const claims: FactClaim[] = items.map((c) => ({
+    quote: coerceQuote(c['quote']),
+    verdict: normalizeFactVerdict(c['verdict']),
+    claim: trimTo(typeof c['claim'] === 'string' ? c['claim'] : '', 110),
+    reason: trimTo(typeof c['reason'] === 'string' ? c['reason'] : '', 240),
+  }));
+  if (claims.length === 0) {
+    claims.push({ quote: '', verdict: 'UNVERIFIED', claim: '', reason: '' });
+  }
+  return { type: 'fact-check', claims };
 }
 
 function normalizeFactVerdict(value: unknown): 'TRUE' | 'FALSE' | 'UNVERIFIED' {

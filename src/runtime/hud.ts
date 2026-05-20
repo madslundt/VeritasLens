@@ -109,6 +109,14 @@ let detailReasonFull = '';
 let detailReasonOffset = 0;
 let activeReasonFull = '';
 let activeReasonOffset = 0;
+/**
+ * For multi-claim results (fact / stats / fallacy / bias), tracks which claim
+ * is currently rendered on the active page (0 or 1). Reset on every
+ * setLensResult; scroll-down advances, scroll-up reverses. Single-claim
+ * results leave this at 0 and fall back to reason pagination as before.
+ */
+let activeClaimIndex = 0;
+let currentActiveResult: LensResult | null = null;
 // Stash for results that arrive while the user is off the active page (e.g.
 // they opened the menu while analysis was in flight). Consumed when the
 // active page is next rebuilt, so the answer they were waiting for is
@@ -263,6 +271,10 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     if (result) pendingActiveResult = result;
     return;
   }
+  // Reset the claim cursor on every new result so the user always sees claim
+  // 1 first; scroll-down can then walk to claim 2 when present.
+  activeClaimIndex = 0;
+  currentActiveResult = result;
   // Discreet swaps between two page layouts depending on whether an answer is
   // on screen: dot-only while listening/thinking, full-screen question+answer
   // once a result arrives. Promote/demote here so callers don't have to.
@@ -305,6 +317,28 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
 
 export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
   if (currentPage !== 'active') return;
+  // Multi-claim swap takes precedence over reason pagination. Scroll-down
+  // walks claim 1 → claim 2; scroll-up reverses. When the requested move
+  // would fall outside the claim range, fall through to reason pagination so
+  // a long single claim's reason can still be scrolled.
+  if (currentActiveResult) {
+    const total = claimCount(currentActiveResult);
+    if (total > 1) {
+      const next = activeClaimIndex + dir;
+      if (next >= 0 && next < total) {
+        activeClaimIndex = next;
+        const { top, middle, bottom } = formatLensResult(currentActiveResult, activeClaimIndex);
+        activeReasonFull = bottom;
+        activeReasonOffset = 0;
+        await Promise.all([
+          upgradeText(CONTAINER.claim, NAME.claim, top),
+          upgradeText(CONTAINER.verdict, NAME.verdict, middle),
+          upgradeText(CONTAINER.reason, NAME.reason, bottom.slice(0, ACTIVE_PAGE_CHARS)),
+        ]);
+        return;
+      }
+    }
+  }
   const maxOffset = Math.max(0, activeReasonFull.length - ACTIVE_PAGE_CHARS);
   const newOffset = Math.max(0, Math.min(maxOffset, activeReasonOffset + dir * ACTIVE_PAGE_CHARS));
   if (newOffset === activeReasonOffset) return;
@@ -350,38 +384,66 @@ async function upgradeText(containerID: number, containerName: string, content: 
   await getBridge().textContainerUpgrade(upgrade);
 }
 
-function formatLensResult(result: LensResult): { top: string; middle: string; bottom: string } {
-  const parts = formatLensResultBase(result);
+/** Number of claims renderable per result. 1 for answer-shaped lenses. */
+function claimCount(result: LensResult): number {
+  switch (result.type) {
+    case 'fact-check':
+    case 'logical-fallacy':
+    case 'stats-check':
+    case 'bias':
+      return Math.max(1, result.claims.length);
+    default:
+      return 1;
+  }
+}
+
+function formatLensResult(result: LensResult, claimIdx: number = 0): { top: string; middle: string; bottom: string } {
+  const parts = formatLensResultBase(result, claimIdx);
+  const count = claimCount(result);
+  // Inline 1/2 · 2/2 indicator on the middle (verdict) line for multi-claim
+  // results. Keeps the discreet HUD density unchanged — no extra container.
+  if (count > 1) {
+    const tag = `${claimIdx + 1}/${count}`;
+    parts.middle = parts.middle ? `${tag} · ${parts.middle}` : tag;
+  }
   if (result.autoSelected) {
     return { ...parts, top: parts.top ? `Auto · ${parts.top}` : 'Auto' };
   }
   return parts;
 }
 
-function formatLensResultBase(result: LensResult): { top: string; middle: string; bottom: string } {
+function formatLensResultBase(result: LensResult, claimIdx: number): { top: string; middle: string; bottom: string } {
   switch (result.type) {
-    case 'fact-check':
+    case 'fact-check': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
       return {
-        top: clip(result.claim, 140),
-        middle: result.verdict === 'TRUE' ? '+ TRUE' : result.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED',
-        bottom: clip(result.reason, 240),
+        top: clip(c.claim, 140),
+        middle: c.verdict === 'TRUE' ? '+ TRUE' : c.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED',
+        bottom: clip(c.reason, 240),
       };
+    }
     case 'trivia':
       return { top: clip(result.question, 140), middle: clip(result.answer, 60), bottom: clip(result.description, 240) };
-    case 'logical-fallacy':
-      return { top: result.fallacy.toUpperCase(), middle: '', bottom: clip(result.explanation, 240) };
-    case 'stats-check':
+    case 'logical-fallacy': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
+      return { top: c.fallacy.toUpperCase(), middle: '', bottom: clip(c.explanation, 240) };
+    }
+    case 'stats-check': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
       return {
-        top: clip(result.stat, 140),
-        middle: result.verdict === 'PLAUSIBLE' ? '+ PLAUSIBLE' : '- SUSPICIOUS',
-        bottom: clip(result.reason, 240),
+        top: clip(c.stat, 140),
+        middle: c.verdict === 'PLAUSIBLE' ? '+ PLAUSIBLE' : '- SUSPICIOUS',
+        bottom: clip(c.reason, 240),
       };
-    case 'bias':
+    }
+    case 'bias': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
       return {
-        top: result.direction ? clip(result.direction, 140) : '',
-        middle: result.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED',
-        bottom: clip(result.reason, 240),
+        top: c.direction ? clip(c.direction, 140) : '',
+        middle: c.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED',
+        bottom: clip(c.reason, 240),
       };
+    }
     case 'translation':
       return { top: clip(result.translatedText, 140), middle: '', bottom: '' };
     case 'eli5':
@@ -690,6 +752,8 @@ export function resetHudSessionState(): void {
   detailReasonOffset = 0;
   activeReasonFull = '';
   activeReasonOffset = 0;
+  activeClaimIndex = 0;
+  currentActiveResult = null;
   activeLayout = 'baseline';
   pendingActiveResult = null;
   pendingMenuSpinnerFrame = '';
