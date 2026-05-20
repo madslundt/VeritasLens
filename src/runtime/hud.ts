@@ -401,12 +401,18 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
 }
 
 function buildMenuPage(): RebuildPageContainer {
-  // Title is sized tight around "Menu" so LVGL's end-of-label caret sits
-  // outside the container clip and isn't visible as a stray cursor line.
+  // Title sized tight around "Menu" so LVGL's end-of-label caret sits outside
+  // the container clip. Clock sized tight around "HH:MM" for the same reason.
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: 64, height: 32, borderWidth: 0, paddingLength: 0,
     content: 'Menu', isEventCapture: 0,
+  });
+  const clock = new TextContainerProperty({
+    containerID: CONTAINER.clock, containerName: NAME.clock,
+    xPosition: SCREEN_W - 64, yPosition: 8, width: 56, height: 32,
+    borderWidth: 0, paddingLength: 0,
+    content: formatClockTime(), isEventCapture: 0,
   });
   const list = new ListContainerProperty({
     containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
@@ -417,7 +423,12 @@ function buildMenuPage(): RebuildPageContainer {
     }),
     isEventCapture: 1,
   });
-  return new RebuildPageContainer({ containerTotalNum: 2, listObject: [list], textObject: [title] });
+  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, clock] });
+}
+
+function formatClockTime(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 function buildActivePage(): RebuildPageContainer {
