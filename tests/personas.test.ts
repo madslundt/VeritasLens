@@ -127,28 +127,45 @@ describe('fact-checker', () => {
 import { parseTriviaResponse, buildTriviaPrompt } from '../src/personas/trivia';
 
 describe('trivia', () => {
-  it('parses a valid trivia response', () => {
+  it('parses a single-claim response', () => {
     const result = parseTriviaResponse(
-      JSON.stringify({ quote: 'Quelle est la capitale de la France?', question: 'What is the capital of France?', answer: 'Paris', description: 'Capital of France since the 10th century.' }),
+      JSON.stringify({ claims: [{ quote: 'Quelle est la capitale de la France?', question: 'What is the capital of France?', answer: 'Paris', description: 'Capital of France since the 10th century.' }] }),
     );
     expect(result.type).toBe('trivia');
     if (result.type === 'trivia') {
-      expect(result.question).toBe('What is the capital of France?');
-      expect(result.answer).toBe('Paris');
-      expect(result.description).toContain('France');
-      expect(result.quote).toContain('Quelle');
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.question).toBe('What is the capital of France?');
+      expect(result.claims[0]!.answer).toBe('Paris');
+      expect(result.claims[0]!.description).toContain('France');
+      expect(result.claims[0]!.quote).toContain('Quelle');
     }
   });
 
-  it('returns empty quote when the field is absent', () => {
-    const result = parseTriviaResponse(JSON.stringify({ question: 'Q?', answer: 'A', description: 'D' }));
-    if (result.type === 'trivia') expect(result.quote).toBe('');
+  it('parses multiple questions in one response', () => {
+    const result = parseTriviaResponse(JSON.stringify({
+      claims: [
+        { quote: 'q1', question: 'Q1?', answer: 'A1', description: 'D1' },
+        { quote: 'q2', question: 'Q2?', answer: 'A2', description: 'D2' },
+      ],
+    }));
+    if (result.type === 'trivia') {
+      expect(result.claims).toHaveLength(2);
+      expect(result.claims[1]!.answer).toBe('A2');
+    }
   });
 
   it('truncates long answers to 60 chars', () => {
     const long = 'A'.repeat(100);
-    const result = parseTriviaResponse(JSON.stringify({ question: 'Q?', answer: long, description: 'ok' }));
-    if (result.type === 'trivia') expect(result.answer.length).toBeLessThanOrEqual(60);
+    const result = parseTriviaResponse(JSON.stringify({ claims: [{ quote: '', question: 'Q?', answer: long, description: 'ok' }] }));
+    if (result.type === 'trivia') expect(result.claims[0]!.answer.length).toBeLessThanOrEqual(60);
+  });
+
+  it('synthesizes an empty claim when the response has no claims array', () => {
+    const result = parseTriviaResponse(JSON.stringify({}));
+    if (result.type === 'trivia') {
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.answer).toBe('');
+    }
   });
 
   it('buildTriviaPrompt includes the language name', () => {
@@ -255,12 +272,26 @@ describe('translation', () => {
 import { parseEli5Response, buildEli5Prompt } from '../src/personas/eli5';
 
 describe('eli5', () => {
-  it('parses a valid ELI5 response with a quote', () => {
-    const result = parseEli5Response(JSON.stringify({ quote: 'GDP contracted', explanation: 'It means the economy is shrinking.' }));
+  it('parses a single-claim response', () => {
+    const result = parseEli5Response(JSON.stringify({ claims: [{ quote: 'GDP contracted', explanation: 'It means the economy is shrinking.' }] }));
     expect(result.type).toBe('eli5');
     if (result.type === 'eli5') {
-      expect(result.explanation).toContain('economy');
-      expect(result.quote).toBe('GDP contracted');
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.explanation).toContain('economy');
+      expect(result.claims[0]!.quote).toBe('GDP contracted');
+    }
+  });
+
+  it('parses multiple jargon terms in one response', () => {
+    const result = parseEli5Response(JSON.stringify({
+      claims: [
+        { quote: 'quantum tunneling', explanation: 'Particles can pass through barriers that would normally block them.' },
+        { quote: 'monetary policy', explanation: 'How central banks adjust interest rates to manage the economy.' },
+      ],
+    }));
+    if (result.type === 'eli5') {
+      expect(result.claims).toHaveLength(2);
+      expect(result.claims[0]!.explanation).toContain('barriers');
     }
   });
 

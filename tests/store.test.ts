@@ -179,7 +179,7 @@ describe('loadHistory', () => {
       question: 'Q?',
       badge: 'ANSWER',
       quote: '',
-      result: { type: 'trivia', question: 'Q?', answer: 'A', description: 'D' },
+      result: { type: 'trivia', claims: [{ quote: '', question: 'Q?', answer: 'A', description: 'D' }] },
     };
     ls.data.set('veritaslens.history', JSON.stringify([entry]));
     await loadHistory(ls.get);

@@ -1,24 +1,26 @@
 // src/types.ts
 
 /**
- * Per-claim shapes for the "claim-shaped" lenses (fact / stats / fallacy /
- * bias). Each carries a verbatim `quote` snippet from the audio so a single
- * tap can cover up to two distinct claims and history stays searchable.
+ * Per-claim shapes for the claim-shaped lenses. Each carries a verbatim
+ * `quote` snippet from the audio so a single tap can cover up to MAX_CLAIMS
+ * distinct items and history stays searchable.
  */
 export interface FactClaim { quote: string; claim: string; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; reason: string; }
 export interface StatsClaim { quote: string; verdict: 'PLAUSIBLE' | 'SUSPICIOUS'; stat: string; reason: string; }
 export interface FallacyClaim { quote: string; fallacy: string; explanation: string; }
 export interface BiasClaim { quote: string; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string; }
+export interface TriviaClaim { quote: string; question: string; answer: string; description: string; }
+export interface Eli5Claim { quote: string; explanation: string; }
 
 /** Result union — every built-in lens returns one of these shapes. */
 export type LensResult = (
   | { type: 'fact-check'; claims: FactClaim[] }
-  | { type: 'trivia'; question: string; answer: string; description: string; quote?: string }
+  | { type: 'trivia'; claims: TriviaClaim[] }
   | { type: 'logical-fallacy'; claims: FallacyClaim[] }
   | { type: 'stats-check'; claims: StatsClaim[] }
   | { type: 'bias'; claims: BiasClaim[] }
   | { type: 'translation'; translatedText: string; quote?: string }
-  | { type: 'eli5'; explanation: string; quote?: string }
+  | { type: 'eli5'; claims: Eli5Claim[] }
   | { type: 'session-summary'; summary: string; quote?: string }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */

@@ -217,7 +217,7 @@ describe('setLensResult', () => {
   it('is a no-op when the current page is neither active nor history-detail', async () => {
     await bootstrapHud('picker');
     bridge.textContainerUpgrade.mockClear();
-    await setLensResult({ type: 'eli5', explanation: 'foo' });
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'foo' }] });
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
 
@@ -268,7 +268,7 @@ describe('showHistoryListPage', () => {
     const entries: HistoryEntry[] = [{
       id: 'h', timestamp: 1, sessionId: 's',
       lensId: 'trivia', lensName: 'Trivia', question: 'q', badge: 'ANSWER', quote: '',
-      result: { type: 'trivia', question: 'q', answer: 'a', description: 'd' },
+      result: { type: 'trivia', claims: [{ quote: '', question: 'q', answer: 'a', description: 'd' }] },
     }];
     await showHistoryListPage(entries);
     expect(currentHudPage()).toBe('history-list');
@@ -396,7 +396,7 @@ describe('discreet mode', () => {
 
     bridge.textContainerUpgrade.mockClear();
     bridge.rebuildPageContainer.mockClear();
-    await setLensResult({ type: 'eli5', explanation: 'x' });
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'x' }] });
     // The promotion rebuilds the page with the pure layout (4 containers).
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
     const payload = lastRebuildPayload();
@@ -410,7 +410,7 @@ describe('discreet mode', () => {
     setActiveLayout('discreet-minimal');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
-    await setLensResult({ type: 'eli5', explanation: 'x' }); // promote
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'x' }] }); // promote
 
     bridge.textContainerUpgrade.mockClear();
     bridge.rebuildPageContainer.mockClear();
@@ -526,7 +526,7 @@ describe('pending result on menu', () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
-    await setLensResult({ type: 'eli5', explanation: 'hello' });
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'hello' }] });
     expect(hasPendingActiveResult()).toBe(false);
 
     // Re-entering the active page should not replay anything.
@@ -544,7 +544,7 @@ describe('pending result on menu', () => {
     await showActivePage(getPersona('fact-checker')!);
     await showMenuPage();
 
-    await setLensResult({ type: 'eli5', explanation: 'because reasons' });
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'because reasons' }] });
     expect(hasPendingActiveResult()).toBe(true);
 
     bridge.textContainerUpgrade.mockClear();
@@ -568,7 +568,7 @@ describe('pending result on menu', () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     await showMenuPage();
-    await setLensResult({ type: 'eli5', explanation: 'x' });
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'x' }] });
     expect(hasPendingActiveResult()).toBe(true);
 
     resetHudSessionState();

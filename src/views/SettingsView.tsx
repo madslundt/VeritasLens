@@ -70,8 +70,11 @@ function formatResultText(result: LensResult): string {
       }).join('\n\n');
     }
     case 'trivia': {
-      const q = result.quote ? `“${result.quote}”\n\n` : '';
-      return `${q}${result.answer}\n\n${result.description}`;
+      return result.claims.map((c, i) => {
+        const head = result.claims.length > 1 ? `Q${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        return `${head}${quoteLine}${c.question}\n${c.answer}\n${c.description}`;
+      }).join('\n\n');
     }
     case 'logical-fallacy': {
       return result.claims.map((c, i) => {
@@ -104,8 +107,11 @@ function formatResultText(result: LensResult): string {
       return `${q}${result.translatedText}`;
     }
     case 'eli5': {
-      const q = result.quote ? `“${result.quote}”\n\n` : '';
-      return `${q}${result.explanation}`;
+      return result.claims.map((c, i) => {
+        const head = result.claims.length > 1 ? `${i + 1}/${result.claims.length}\n` : '';
+        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
+        return `${head}${quoteLine}${c.explanation}`;
+      }).join('\n\n');
     }
     case 'session-summary': {
       const q = result.quote ? `“${result.quote}”\n\n` : '';

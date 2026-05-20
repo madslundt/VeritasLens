@@ -564,7 +564,7 @@ async function runAutoSummary(): Promise<void> {
 function extractQuestion(result: LensResult): string {
   switch (result.type) {
     case 'fact-check': return result.claims[0]?.claim ?? '';
-    case 'trivia': return result.question;
+    case 'trivia': return result.claims[0]?.question ?? '';
     case 'logical-fallacy': return result.claims[0]?.fallacy ?? '';
     case 'stats-check': return result.claims[0]?.stat ?? '';
     case 'bias': {
@@ -572,7 +572,7 @@ function extractQuestion(result: LensResult): string {
       return c ? (c.direction || c.verdict) : '';
     }
     case 'translation': return result.translatedText.slice(0, 80);
-    case 'eli5': return result.explanation.slice(0, 80);
+    case 'eli5': return (result.claims[0]?.explanation ?? '').slice(0, 80);
     case 'session-summary': return result.summary.slice(0, 80);
   }
 }
@@ -602,7 +602,9 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
     case 'fact-check':
     case 'logical-fallacy':
     case 'stats-check':
-    case 'bias': {
+    case 'bias':
+    case 'trivia':
+    case 'eli5': {
       if (result.claims.length <= 1) return [result];
       // Type-narrowing per variant is needed because each `claims` array is
       // typed against its own per-claim shape; we rebuild the same variant
@@ -616,12 +618,14 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
           return result.claims.map((c) => ({ type: 'logical-fallacy', claims: [c], autoSelected: result.autoSelected }));
         case 'bias':
           return result.claims.map((c) => ({ type: 'bias', claims: [c], autoSelected: result.autoSelected }));
+        case 'trivia':
+          return result.claims.map((c) => ({ type: 'trivia', claims: [c], autoSelected: result.autoSelected }));
+        case 'eli5':
+          return result.claims.map((c) => ({ type: 'eli5', claims: [c], autoSelected: result.autoSelected }));
       }
     }
     /* falls through */
-    case 'trivia':
     case 'translation':
-    case 'eli5':
     case 'session-summary':
       return [result];
   }
@@ -639,11 +643,10 @@ export function extractQuote(result: LensResult): string {
     case 'logical-fallacy':
     case 'stats-check':
     case 'bias':
-      return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'trivia':
     case 'eli5':
+      return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'session-summary':
-      return result.quote ?? '';
     case 'translation':
       return result.quote ?? '';
   }

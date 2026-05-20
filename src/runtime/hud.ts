@@ -415,6 +415,8 @@ function claimCount(result: LensResult): number {
     case 'logical-fallacy':
     case 'stats-check':
     case 'bias':
+    case 'trivia':
+    case 'eli5':
       return Math.max(1, result.claims.length);
     default:
       return 1;
@@ -447,8 +449,10 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
         bottom: clip(c.reason, 240),
       };
     }
-    case 'trivia':
-      return { top: clip(result.question, 140), middle: clip(result.answer, 60), bottom: clip(result.description, 240) };
+    case 'trivia': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
+      return { top: clip(c.question, 140), middle: clip(c.answer, 60), bottom: clip(c.description, 240) };
+    }
     case 'logical-fallacy': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       return { top: c.fallacy.toUpperCase(), middle: '', bottom: clip(c.explanation, 240) };
@@ -471,8 +475,10 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
     }
     case 'translation':
       return { top: clip(result.translatedText, 140), middle: '', bottom: '' };
-    case 'eli5':
-      return { top: '', middle: '', bottom: clip(result.explanation, 240) };
+    case 'eli5': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
+      return { top: '', middle: '', bottom: clip(c.explanation, 240) };
+    }
     case 'session-summary':
       return { top: '', middle: '', bottom: clip(result.summary, 240) };
   }

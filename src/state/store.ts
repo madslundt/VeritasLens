@@ -177,8 +177,16 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
         : { type, claims: wrap({ verdict: r['verdict'], direction: r['direction'], reason: r['reason'] }), autoSelected: r['autoSelected'] };
       break;
     case 'trivia':
-    case 'translation':
+      migratedResult = Array.isArray(r['claims'])
+        ? r
+        : { type, claims: wrap({ question: r['question'], answer: r['answer'], description: r['description'] }), autoSelected: r['autoSelected'] };
+      break;
     case 'eli5':
+      migratedResult = Array.isArray(r['claims'])
+        ? r
+        : { type, claims: wrap({ explanation: r['explanation'] }), autoSelected: r['autoSelected'] };
+      break;
+    case 'translation':
     case 'session-summary':
       migratedResult = { quote: '', ...r };
       break;
