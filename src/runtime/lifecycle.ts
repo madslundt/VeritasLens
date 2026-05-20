@@ -6,6 +6,7 @@ import {
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   currentHudPage,
+  cycleActiveClaim,
   getActiveLayout,
   hasPendingActiveResult,
   menuOptionAtIndex,
@@ -225,6 +226,7 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
     const option = menuOptionAtIndex(lastMenuIndex);
     switch (option) {
       case 'back': await handleBackMenuOption(); break;
+      case 'next-claim': await restoreActivePage(); await cycleActiveClaim(); lastMenuIndex = 0; break;
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
       case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
       case 'exit': await leaveActiveSession(); break;

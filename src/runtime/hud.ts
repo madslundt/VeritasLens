@@ -97,11 +97,21 @@ export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
 
 export const MENU_OPTIONS = [
   { id: 'back', label: '← Back' },
+  { id: 'next-claim', label: 'Next claim ↻' },
   { id: 'fact-check', label: 'Check' },
   { id: 'history', label: 'History' },
   { id: 'exit', label: 'Exit' },
 ] as const;
 export type MenuOptionId = (typeof MENU_OPTIONS)[number]['id'];
+
+/**
+ * The menu options actually rendered right now. "Next claim ↻" is hidden
+ * unless a multi-claim result is on screen — it would be a no-op otherwise.
+ */
+export function getDisplayedMenuOptions(): readonly (typeof MENU_OPTIONS)[number][] {
+  const multi = !!currentActiveResult && claimCount(currentActiveResult) > 1;
+  return MENU_OPTIONS.filter((o) => o.id !== 'next-claim' || multi);
+}
 
 const DETAIL_PAGE_CHARS = 200;
 const ACTIVE_PAGE_CHARS = 200;
@@ -155,10 +165,11 @@ export function personaAtIndex(idx: number | undefined | null): Persona | null {
   return list[safe] ?? list[0] ?? null;
 }
 
-/** Map list index → menu option id. */
+/** Map list index → menu option id, against the *displayed* options. */
 export function menuOptionAtIndex(idx: number | undefined | null): MenuOptionId {
+  const opts = getDisplayedMenuOptions();
   const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
-  return MENU_OPTIONS[safe]?.id ?? 'back';
+  return opts[safe]?.id ?? 'back';
 }
 
 export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'picker'): Promise<void> {
@@ -312,6 +323,27 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     upgradeText(CONTAINER.claim, NAME.claim, top),
     upgradeText(CONTAINER.verdict, NAME.verdict, middle),
     upgradeText(CONTAINER.reason, NAME.reason, reasonContent),
+  ]);
+}
+
+/**
+ * Cycle the active page to the next claim (wraps around). Used by the
+ * "Next claim ↻" menu option as a tap-driven alternative to swipe — the
+ * swipe path depends on hardware-level scroll events which don't always
+ * fire on the discreet event sink.
+ */
+export async function cycleActiveClaim(): Promise<void> {
+  if (currentPage !== 'active' || !currentActiveResult) return;
+  const total = claimCount(currentActiveResult);
+  if (total <= 1) return;
+  activeClaimIndex = (activeClaimIndex + 1) % total;
+  const { top, middle, bottom } = formatLensResult(currentActiveResult, activeClaimIndex);
+  activeReasonFull = bottom;
+  activeReasonOffset = 0;
+  await Promise.all([
+    upgradeText(CONTAINER.claim, NAME.claim, top),
+    upgradeText(CONTAINER.verdict, NAME.verdict, middle),
+    upgradeText(CONTAINER.reason, NAME.reason, bottom.slice(0, ACTIVE_PAGE_CHARS)),
   ]);
 }
 
@@ -542,12 +574,13 @@ function buildMenuPage(): RebuildPageContainer {
     borderWidth: 0, paddingLength: 0,
     content: formatClockTime(), isEventCapture: 0,
   });
+  const displayed = getDisplayedMenuOptions();
   const list = new ListContainerProperty({
     containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
     width: SCREEN_W - 32, height: SCREEN_H - 48, borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
-      itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
-      itemName: MENU_OPTIONS.map((o) => o.label),
+      itemCount: displayed.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: displayed.map((o) => o.label),
     }),
     isEventCapture: 1,
   });
