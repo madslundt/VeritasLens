@@ -7,6 +7,7 @@ import {
   bootstrapHud,
   currentHudPage,
   getActiveLayout,
+  hasPendingActiveResult,
   menuOptionAtIndex,
   personaAtIndex,
   resetHudSessionState,
@@ -17,6 +18,7 @@ import {
   setActiveHint,
   setActiveLayout,
   setLensResult,
+  setMenuSpinner,
   setRecIndicator,
   setStatus,
   showActivePage,
@@ -27,7 +29,7 @@ import {
   showPickerPage,
   showUnconfiguredPage,
 } from './hud';
-import { callLens } from '@/llm/gemini';
+import { callLens, MAX_RETRIES } from '@/llm/gemini';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
 import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
 import {
@@ -236,6 +238,18 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
  * dot-only layout; in baseline it means the standard REC + hint view.
  */
 async function handleBackMenuOption(): Promise<void> {
+  // If a result arrived while the menu was open, surface it instead of
+  // clearing — the user opened the menu before the answer was revealed and
+  // expects to see it on return. When no pending result exists the menu was
+  // opened after the answer was already on screen (or no analysis ran), and
+  // Back should return to a clean recording view as before.
+  if (hasPendingActiveResult()) {
+    await restoreActivePage();
+    await setStatus('displaying');
+    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    setAppPhase('displaying');
+    return;
+  }
   setStateResult(null);
   setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
   await restoreActivePage();
@@ -281,6 +295,15 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
 }
 
 async function leaveActiveSession(): Promise<void> {
+  // Cancel any analysis still in flight so the answer doesn't arrive into a
+  // session that no longer exists (which would set lensResult / pendingActive
+  // long after the user has left). resetHudSessionState below clears the
+  // pending stash, but the abort prevents a late callLens success from
+  // reintroducing it via setLensResult.
+  inflight?.abort();
+  inflight = null;
+  analyzing = false;
+  stopSpinner();
   try { await getBridge().audioControl(false); } catch { /* ignore */ }
   stopAutoSummaryTimer();
   buffer?.clear();
@@ -292,16 +315,28 @@ async function leaveActiveSession(): Promise<void> {
 
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+let spinnerPrefix = '';
 
 function startSpinner(): void {
   if (spinnerTimer) return;
   let i = 0;
-  spinnerTimer = setInterval(() => { i = (i + 1) % SPINNER_FRAMES.length; void setStatus(` ${SPINNER_FRAMES[i]}  `); }, 180);
+  // Push an initial frame immediately so the menu/status slot doesn't stay
+  // blank for up to one tick after analysis begins.
+  void setStatus(spinnerPrefix ? `${spinnerPrefix}${SPINNER_FRAMES[i]}` : ` ${SPINNER_FRAMES[i]}  `);
+  void setMenuSpinner(SPINNER_FRAMES[i]!);
+  spinnerTimer = setInterval(() => {
+    i = (i + 1) % SPINNER_FRAMES.length;
+    const frame = SPINNER_FRAMES[i];
+    void setStatus(spinnerPrefix ? `${spinnerPrefix}${frame}` : ` ${frame}  `);
+    void setMenuSpinner(frame!);
+  }, 180);
 }
 
 function stopSpinner(): void {
   if (spinnerTimer) clearInterval(spinnerTimer);
   spinnerTimer = null;
+  spinnerPrefix = '';
+  void setMenuSpinner('');
 }
 
 function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
@@ -344,13 +379,7 @@ async function runAnalysis(): Promise<void> {
   const page = currentHudPage();
   if (page === 'history-list' || page === 'history-detail') await restoreActivePage();
   if (currentHudPage() !== 'active') return;
-  // In discreet mode promote to the layout that includes claim/verdict/reason
-  // so setStatus / setLensResult have containers to write into. The dot
-  // indicator stays; REC and the bottom hint remain hidden.
-  if (settings().discreet && getActiveLayout() !== 'discreet-result') {
-    setActiveLayout('discreet-result');
-    await restoreActivePage();
-  }
+
   if (!buffer || buffer.bytesBuffered === 0) { await setStatus('listening'); return; }
 
   const apiKey = settings().geminiApiKey;
@@ -358,6 +387,21 @@ async function runAnalysis(): Promise<void> {
 
   const persona = getPersona(activePersona());
   if (!persona) return;
+
+  // Clear the previous answer and rebuild the active page before starting a
+  // new check. Without this, a double-tap from the result screen leaves '...'
+  // stuck and the spinner never animates — the SDK does not refresh containers
+  // that are already populated with the prior result. The Menu → Check path
+  // already worked because it does its own restoreActivePage before calling
+  // runAnalysis; the bug only surfaced via the direct double-tap path.
+  // In discreet mode drop back to the dot-only layout so the user has
+  // something on screen during thinking; setLensResult will promote to
+  // discreet-result once the answer arrives.
+  setStateResult(null);
+  if (settings().discreet && getActiveLayout() !== 'discreet-minimal') {
+    setActiveLayout('discreet-minimal');
+  }
+  await restoreActivePage();
 
   inflight?.abort();
   const controller = new AbortController();
@@ -372,8 +416,11 @@ async function runAnalysis(): Promise<void> {
     const wav = buffer.snapshotWav();
     const lang = settings().responseLanguage;
     const onRetry = async (attempt: number): Promise<void> => {
-      stopSpinner();
-      await setStatus(`retry${attempt}`);
+      // Keep the spinner running and switch its prefix to the retry label so
+      // the indicator animates as e.g. R1/2|, R1/2/, R1/2- through the retry
+      // wait and the next request, instead of freezing on a static label.
+      spinnerPrefix = `R${attempt}/${MAX_RETRIES}`;
+      if (!spinnerTimer) startSpinner();
     };
 
     let analysisPersona: Persona = persona;

@@ -30,11 +30,11 @@ export interface CallLensOptions {
   schema: unknown;
   signal?: AbortSignal;
   model?: GeminiModel | string;
-  /** Called before each retry (attempt = 1 or 2). */
+  /** Called before each retry (attempt = 1..MAX_RETRIES). */
   onRetry?: (attempt: number) => void | Promise<void>;
 }
 
-const MAX_RETRIES = 2;
+export const MAX_RETRIES = 3;
 
 /**
  * Send audio + prompt to Gemini and return the raw JSON text from the response.

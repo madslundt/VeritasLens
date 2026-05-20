@@ -57,6 +57,7 @@ export const CONTAINER = {
   recIndicator: 25,
   activeHint: 26,
   clock: 27,
+  menuSpinner: 28,
   // history pages
   historyList: 30,
   historyHint: 31,
@@ -75,6 +76,7 @@ const NAME = {
   recIndicator: 'vl-rec',
   activeHint: 'vl-act-hint',
   clock: 'vl-clock',
+  menuSpinner: 'vl-menu-spin',
   historyList: 'vl-hist-lst',
   historyHint: 'vl-hist-hint',
 } as const;
@@ -86,8 +88,6 @@ const STATUS_LABEL: Record<string, string> = {
   displaying: '✓',
   sleeping: 'ZZZ',
   error: 'ERR',
-  retry1: 'Retry 1/2',
-  retry2: 'Retry 2/2',
 };
 
 export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'none';
@@ -109,6 +109,15 @@ let detailReasonFull = '';
 let detailReasonOffset = 0;
 let activeReasonFull = '';
 let activeReasonOffset = 0;
+// Stash for results that arrive while the user is off the active page (e.g.
+// they opened the menu while analysis was in flight). Consumed when the
+// active page is next rebuilt, so the answer they were waiting for is
+// surfaced on return instead of being silently dropped.
+let pendingActiveResult: LensResult | null = null;
+// Last menu-spinner frame written by setMenuSpinner. Used to seed
+// buildMenuPage so the spinner is visible immediately when the user opens the
+// menu mid-analysis (rather than waiting up to one ticker interval).
+let pendingMenuSpinnerFrame = '';
 
 let bootstrapped = false;
 let currentPage: HudPage = 'none';
@@ -127,6 +136,9 @@ export function setActiveLayout(layout: ActiveLayout): void { activeLayout = lay
 export function getHistoryListEntries(): HistoryEntry[] { return cachedHistoryEntries; }
 
 export function currentHudPage(): HudPage { return currentPage; }
+
+/** True iff a result arrived while the user was off the active page. */
+export function hasPendingActiveResult(): boolean { return pendingActiveResult !== null; }
 
 /** Look up the persona at the given index from the host event payload. */
 export function personaAtIndex(idx: number | undefined | null): Persona | null {
@@ -173,9 +185,20 @@ export async function showPickerPage(): Promise<void> {
 export async function showActivePage(persona: Persona): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showActivePage().');
   menuPersona = persona;
+  // If a result arrived while the user was off the active page (e.g. they
+  // opened the menu during analysis), promote the discreet layout so the
+  // rebuild lays down claim/verdict/reason containers ready to receive it.
+  if (pendingActiveResult && activeLayout === 'discreet-minimal') {
+    activeLayout = 'discreet-result';
+  }
   const ok = await getBridge().rebuildPageContainer(buildActivePage());
   if (!ok) throw new Error('rebuildPageContainer (active) failed.');
   currentPage = 'active';
+  if (pendingActiveResult) {
+    const replay = pendingActiveResult;
+    pendingActiveResult = null;
+    await setLensResult(replay);
+  }
 }
 
 export async function showMenuPage(): Promise<void> {
@@ -223,16 +246,39 @@ export async function restoreActivePage(): Promise<void> {
 
 export async function setStatus(label: keyof typeof STATUS_LABEL | string): Promise<void> {
   if (currentPage !== 'active') return;
-  // The minimal discreet layout omits the status container entirely.
-  if (activeLayout === 'discreet-minimal') return;
-  const content = STATUS_LABEL[label] ?? `[${label.slice(0, 14)}]`;
-  await upgradeText(CONTAINER.status, NAME.status, content);
+  // Discreet-result is the pure full-screen answer view — no status chrome.
+  if (activeLayout === 'discreet-result') return;
+  const content = STATUS_LABEL[label] ?? label;
+  // On discreet-minimal the status slot doubles as the recording dot — when
+  // status clears (e.g. 'listening'), restore '•' so the user always sees a
+  // recording indicator. Baseline keeps the slot empty as before.
+  const text = activeLayout === 'discreet-minimal' && content === '' ? '•' : content;
+  await upgradeText(CONTAINER.status, NAME.status, text);
 }
 
 export async function setLensResult(result: LensResult | null): Promise<void> {
-  if (currentPage !== 'active' && currentPage !== 'history-detail') return;
-  // Minimal discreet layout has no claim/verdict/reason containers.
-  if (currentPage === 'active' && activeLayout === 'discreet-minimal') return;
+  if (currentPage !== 'active' && currentPage !== 'history-detail') {
+    // User is off the active page (typically on the menu after opening it
+    // mid-analysis). Stash the answer so the next showActivePage replays it.
+    if (result) pendingActiveResult = result;
+    return;
+  }
+  // Discreet swaps between two page layouts depending on whether an answer is
+  // on screen: dot-only while listening/thinking, full-screen question+answer
+  // once a result arrives. Promote/demote here so callers don't have to.
+  if (currentPage === 'active' && activeLayout === 'discreet-minimal') {
+    if (!result) return; // nothing to show — keep the dot
+    setActiveLayout('discreet-result');
+    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    if (!ok) throw new Error('rebuildPageContainer (discreet-result) failed.');
+  } else if (currentPage === 'active' && activeLayout === 'discreet-result' && !result) {
+    setActiveLayout('discreet-minimal');
+    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    if (!ok) throw new Error('rebuildPageContainer (discreet-minimal) failed.');
+    activeReasonFull = '';
+    activeReasonOffset = 0;
+    return;
+  }
   if (!result) {
     activeReasonFull = '';
     activeReasonOffset = 0;
@@ -279,6 +325,17 @@ export async function setActiveHint(content: string): Promise<void> {
   // Discreet layouts have no hint row.
   if (activeLayout !== 'baseline') return;
   await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
+}
+
+/**
+ * Update the small spinner slot left of the clock on the menu page.
+ * Always records the frame so a subsequent menu rebuild reflects the current
+ * spinner state; only writes to the device when the menu is on screen.
+ */
+export async function setMenuSpinner(content: string): Promise<void> {
+  pendingMenuSpinnerFrame = content;
+  if (currentPage !== 'menu') return;
+  await upgradeText(CONTAINER.menuSpinner, NAME.menuSpinner, content);
 }
 
 
@@ -408,6 +465,14 @@ function buildMenuPage(): RebuildPageContainer {
     width: 64, height: 32, borderWidth: 0, paddingLength: 0,
     content: 'Menu', isEventCapture: 0,
   });
+  // Spinner sits immediately left of the clock; populated by setMenuSpinner
+  // while an analysis is in flight, empty otherwise.
+  const spinner = new TextContainerProperty({
+    containerID: CONTAINER.menuSpinner, containerName: NAME.menuSpinner,
+    xPosition: SCREEN_W - 96, yPosition: 8, width: 24, height: 32,
+    borderWidth: 0, paddingLength: 0,
+    content: pendingMenuSpinnerFrame, isEventCapture: 0,
+  });
   const clock = new TextContainerProperty({
     containerID: CONTAINER.clock, containerName: NAME.clock,
     xPosition: SCREEN_W - 64, yPosition: 8, width: 56, height: 32,
@@ -423,7 +488,7 @@ function buildMenuPage(): RebuildPageContainer {
     }),
     isEventCapture: 1,
   });
-  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, clock] });
+  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [list], textObject: [title, spinner, clock] });
 }
 
 function formatClockTime(): string {
@@ -481,43 +546,43 @@ function buildBaselineActivePage(): RebuildPageContainer {
  */
 function buildDiscreetMinimalPage(): RebuildPageContainer {
   const sink = makeInvisibleListSink();
-  const recDot = makeRecDot();
+  // Single top-right slot that doubles as recording-dot (resting) and
+  // status indicator (spinner / "..." / "R1/2"). One container = one
+  // LVGL label-cursor caret position; merging the two avoids the second
+  // caret in the opposite corner.
+  const status = makeDiscreetStatus();
   return new RebuildPageContainer({
-    containerTotalNum: 2, listObject: [sink], textObject: [recDot],
+    containerTotalNum: 2, listObject: [sink], textObject: [status],
   });
 }
 
 /**
- * Discreet result layout — status + claim/verdict/reason + recording dot.
- * No bottom-row REC label and no affordance hint, so a bystander sees only
- * the result text while it's on screen.
+ * Discreet result layout — full-screen question/answer, matching the
+ * history-detail view. No dot, no status, no hint: once an answer is on
+ * screen it fills the available space. The dot only exists in
+ * discreet-minimal, which is what the user sees before the answer arrives.
+ * The list sink at the bottom-right captures tap (→ menu) and scroll events.
  */
 function buildDiscreetResultPage(): RebuildPageContainer {
   const sink = makeInvisibleListSink();
-  const recDot = makeRecDot();
-  const status = new TextContainerProperty({
-    containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 26,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 34, width: SCREEN_W - 32, height: 54,
+    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 90, width: SCREEN_W - 32, height: 26,
+    xPosition: 16, yPosition: 102, width: SCREEN_W - 32, height: 26,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const reason = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 118, width: SCREEN_W - 32, height: 166,
+    xPosition: 16, yPosition: 130, width: SCREEN_W - 32, height: 126,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   return new RebuildPageContainer({
-    containerTotalNum: 6, listObject: [sink],
-    textObject: [recDot, status, claim, verdict, reason],
+    containerTotalNum: 4, listObject: [sink],
+    textObject: [claim, verdict, reason],
   });
 }
 
@@ -551,13 +616,16 @@ function makeInvisibleListSink(): ListContainerProperty {
   });
 }
 
-function makeRecDot(): TextContainerProperty {
-  // Container sized to the glyph: LVGL otherwise renders a thin label caret
-  // in the empty space to the right of the bullet on the simulator.
+/** Top-right combined recording / status slot for discreet-minimal.
+ * Shows '•' as the resting recording indicator; setStatus overwrites it with
+ * the spinner / "..." / "R1/2" during analysis and restores the dot when
+ * status clears. Keeping a single container also keeps the LVGL label-cursor
+ * caret confined to one corner. */
+function makeDiscreetStatus(): TextContainerProperty {
   return new TextContainerProperty({
-    containerID: CONTAINER.clock, containerName: NAME.clock,
-    xPosition: 8, yPosition: 8, width: 10, height: 18,
-    borderWidth: 0, paddingLength: 0, content: '•', isEventCapture: 0,
+    containerID: CONTAINER.status, containerName: NAME.status,
+    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 26,
+    borderWidth: 0, paddingLength: 4, content: '•', isEventCapture: 0,
   });
 }
 
@@ -623,6 +691,8 @@ export function resetHudSessionState(): void {
   activeReasonFull = '';
   activeReasonOffset = 0;
   activeLayout = 'baseline';
+  pendingActiveResult = null;
+  pendingMenuSpinnerFrame = '';
 }
 
 export function _resetHudBootstrapForTesting(): void {

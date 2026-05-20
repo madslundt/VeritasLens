@@ -56,6 +56,7 @@ import {
   _resetHudBootstrapForTesting,
   bootstrapHud,
   currentHudPage,
+  hasPendingActiveResult,
   MENU_OPTIONS,
   menuOptionAtIndex,
   personaAtIndex,
@@ -64,6 +65,7 @@ import {
   scrollHistoryDetail,
   setActiveLayout,
   setLensResult,
+  setMenuSpinner,
   setRecIndicator,
   showActivePage,
   showHistoryDetailPage,
@@ -306,7 +308,7 @@ describe('discreet mode', () => {
     expect(findText(payload, 'vl-clock')).toBeUndefined();
   });
 
-  it('discreet-minimal layout has only the rec dot + an invisible list event sink', async () => {
+  it('discreet-minimal layout has a single top-right slot showing the rec dot + event sink', async () => {
     await saveDiscreet(fakeSetLs, true);
     setActiveLayout('discreet-minimal');
     await bootstrapHud('picker');
@@ -315,12 +317,13 @@ describe('discreet mode', () => {
     const payload = lastRebuildPayload();
     expect(payload.textObject).toHaveLength(1);
     expect(payload.listObject).toHaveLength(1);
-    expect(findText(payload, 'vl-clock')?.content).toBe('•');
+    expect(findText(payload, 'vl-status')?.content).toBe('•');
+    expect(findText(payload, 'vl-clock')).toBeUndefined();
     expect(findText(payload, 'vl-rec')).toBeUndefined();
     expect(findText(payload, 'vl-act-hint')).toBeUndefined();
   });
 
-  it('discreet-result layout drops REC + hint but keeps claim/verdict/reason + dot', async () => {
+  it('discreet-result layout is pure question/answer (no dot, status, rec, or hint)', async () => {
     await saveDiscreet(fakeSetLs, true);
     setActiveLayout('discreet-result');
     await bootstrapHud('picker');
@@ -329,10 +332,12 @@ describe('discreet mode', () => {
     const payload = lastRebuildPayload();
     expect(findText(payload, 'vl-rec')).toBeUndefined();
     expect(findText(payload, 'vl-act-hint')).toBeUndefined();
-    expect(findText(payload, 'vl-clock')?.content).toBe('•');
+    expect(findText(payload, 'vl-clock')).toBeUndefined();
+    expect(findText(payload, 'vl-status')).toBeUndefined();
     expect(findText(payload, 'vl-claim')).toBeDefined();
     expect(findText(payload, 'vl-verdict')).toBeDefined();
     expect(findText(payload, 'vl-reason')).toBeDefined();
+    expect(payload.textObject).toHaveLength(3);
   });
 
   it('setRecIndicator is a no-op while a discreet layout is active', async () => {
@@ -345,13 +350,75 @@ describe('discreet mode', () => {
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
 
-  it('setLensResult is a no-op in discreet-minimal (containers absent)', async () => {
+  it('setStatus on discreet-minimal writes to the shared top-right slot', async () => {
     setActiveLayout('discreet-minimal');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
     bridge.textContainerUpgrade.mockClear();
+    const { setStatus } = await import('../src/runtime/hud');
+    await setStatus('thinking');
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0].payload.containerName).toBe('vl-status');
+    expect(calls[0]![0].payload.content).toBe('...');
+  });
+
+  it('setStatus on discreet-result is a no-op (pure answer view, no status chrome)', async () => {
+    setActiveLayout('discreet-result');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    const { setStatus } = await import('../src/runtime/hud');
+    await setStatus('displaying');
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('setLensResult(null) in discreet-minimal stays on dot-only (no upgrades, no rebuild)', async () => {
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    await setLensResult(null);
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+
+  it('setLensResult promotes discreet-minimal → discreet-result when a result arrives', async () => {
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
     await setLensResult({ type: 'eli5', explanation: 'x' });
+    // The promotion rebuilds the page with the pure layout (4 containers).
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    const payload = lastRebuildPayload();
+    expect(payload.containerTotalNum).toBe(4);
+    expect(findText(payload, 'vl-clock')).toBeUndefined();
+    // 3 upgrades: claim, verdict, reason.
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
+  });
+
+  it('setLensResult(null) on discreet-result demotes back to discreet-minimal', async () => {
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult({ type: 'eli5', explanation: 'x' }); // promote
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    await setLensResult(null);
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    const payload = lastRebuildPayload();
+    expect(findText(payload, 'vl-status')?.content).toBe('•');
+    expect(findText(payload, 'vl-claim')).toBeUndefined();
+    // Demotion path skips the text upgrades — the dot-only layout has no
+    // claim/verdict/reason containers to write into.
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
 
@@ -401,5 +468,164 @@ describe('resetHudSessionState', () => {
     const { restoreActivePage } = await import('../src/runtime/hud');
     await restoreActivePage();
     expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+});
+
+describe('pending result on menu', () => {
+  it('setLensResult while on the menu stashes the result without writing the HUD', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await showMenuPage();
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    expect(hasPendingActiveResult()).toBe(false);
+
+    await setLensResult({
+      type: 'fact-check', verdict: 'TRUE', claim: 'C', reason: 'R',
+    });
+
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+    expect(hasPendingActiveResult()).toBe(true);
+  });
+
+  it('returning to the active page consumes the pending result and renders it', async () => {
+    await bootstrapHud('picker');
+    const persona = getPersona('fact-checker')!;
+    await showActivePage(persona);
+    await showMenuPage();
+    await setLensResult({
+      type: 'fact-check', verdict: 'FALSE', claim: 'The Sun rises in the west.', reason: 'It rises in the east.',
+    });
+    expect(hasPendingActiveResult()).toBe(true);
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+
+    const { restoreActivePage } = await import('../src/runtime/hud');
+    await restoreActivePage();
+
+    expect(currentHudPage()).toBe('active');
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    // 3 upgrades for claim, verdict, reason.
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    const reason = calls.find((c) => c[0].payload.containerName === 'vl-reason');
+    expect(reason).toBeDefined();
+    expect(reason![0].payload.content).toContain('east');
+    expect(hasPendingActiveResult()).toBe(false);
+  });
+
+  it('setLensResult while on the active page renders directly and does not set pending', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    await setLensResult({ type: 'eli5', explanation: 'hello' });
+    expect(hasPendingActiveResult()).toBe(false);
+
+    // Re-entering the active page should not replay anything.
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    await showActivePage(getPersona('fact-checker')!);
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('a pending result promotes discreet-minimal to discreet-result on return', async () => {
+    await saveDiscreet(fakeSetLs, true);
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await showMenuPage();
+
+    await setLensResult({ type: 'eli5', explanation: 'because reasons' });
+    expect(hasPendingActiveResult()).toBe(true);
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+
+    const { restoreActivePage } = await import('../src/runtime/hud');
+    await restoreActivePage();
+
+    // The active-page rebuild lays down the discreet-result layout (3
+    // containers: claim, verdict, reason) and the replay writes into them.
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { containerTotalNum: number; textObject: Array<{ payload: { containerName: string } }> } }]>;
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    const lastRebuild = calls.at(-1)![0].payload;
+    expect(lastRebuild.containerTotalNum).toBe(4);
+    expect(lastRebuild.textObject.some((t) => t.payload.containerName === 'vl-reason')).toBe(true);
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
+    expect(hasPendingActiveResult()).toBe(false);
+  });
+
+  it('resetHudSessionState clears a pending result', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await showMenuPage();
+    await setLensResult({ type: 'eli5', explanation: 'x' });
+    expect(hasPendingActiveResult()).toBe(true);
+
+    resetHudSessionState();
+    expect(hasPendingActiveResult()).toBe(false);
+  });
+});
+
+describe('menu spinner', () => {
+  type TextBag = { payload: { containerName: string; content: string } };
+  type RebuildBag = { payload: { textObject: TextBag[] } };
+
+  function lastRebuildTexts(): TextBag['payload'][] {
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    return calls.at(-1)![0].payload.textObject.map((t) => t.payload);
+  }
+
+  it('buildMenuPage includes a spinner container next to the clock', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await showMenuPage();
+
+    const names = lastRebuildTexts().map((t) => t.containerName);
+    expect(names).toContain('vl-menu-spin');
+    expect(names).toContain('vl-clock');
+  });
+
+  it('setMenuSpinner writes to the spinner slot when on the menu page', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await showMenuPage();
+
+    bridge.textContainerUpgrade.mockClear();
+    await setMenuSpinner('|');
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0].payload.containerName).toBe('vl-menu-spin');
+    expect(calls[0]![0].payload.content).toBe('|');
+  });
+
+  it('setMenuSpinner is a no-op write off the menu page but still records the frame', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setMenuSpinner('/');
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+
+    // The recorded frame is used to seed buildMenuPage on the next showMenuPage,
+    // so the spinner appears immediately on rebuild instead of waiting a tick.
+    await showMenuPage();
+    const spinner = lastRebuildTexts().find((t) => t.containerName === 'vl-menu-spin');
+    expect(spinner?.content).toBe('/');
+  });
+
+  it('setMenuSpinner("") clears the recorded frame so a fresh menu starts blank', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setMenuSpinner('-');
+    await setMenuSpinner('');
+
+    await showMenuPage();
+    const spinner = lastRebuildTexts().find((t) => t.containerName === 'vl-menu-spin');
+    expect(spinner?.content).toBe('');
   });
 });

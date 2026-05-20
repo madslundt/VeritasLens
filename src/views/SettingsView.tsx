@@ -214,6 +214,7 @@ export const SettingsView: Component = () => {
   // Session detail view
   const SessionDetailView = () => {
     const entries = selectedSessionEntries();
+    const orderedEntries = [...entries].reverse();
     return (
       <div class="session-detail">
         <div class="field-header">
@@ -225,7 +226,7 @@ export const SettingsView: Component = () => {
           </span>
         </div>
         <ul class="history-list">
-          <For each={entries}>
+          <For each={orderedEntries}>
             {(entry) => (
               <li class="history-row">
                 <button
@@ -234,13 +235,14 @@ export const SettingsView: Component = () => {
                   onClick={() => setExpandedEntryId((prev) => (prev === entry.id ? null : entry.id))}
                 >
                   <span class={`history-icon ${badgeClass(entry.badge)}`}>{badgeIcon(entry.badge)}</span>
-                  <span class={`history-badge ${badgeClass(entry.badge)}`}>{entry.badge}</span>
                   <span class="history-time">{formatTime(entry.timestamp)}</span>
-                  <span class="history-lens">{entry.lensName}</span>
                   <span class="history-q">{entry.question}</span>
                 </button>
                 <Show when={expandedEntryId() === entry.id}>
                   <div class="history-detail">
+                    <Show when={entry.result.autoSelected}>
+                      <p class="history-detail-lens">{entry.lensName}</p>
+                    </Show>
                     <p class="history-detail-question">{entry.question}</p>
                     <pre>{formatResultText(entry.result)}</pre>
                   </div>

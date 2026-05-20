@@ -105,8 +105,9 @@ describe('callLens', () => {
     await expect(callLens({ ...baseOpts })).rejects.toThrow(/no text candidate/);
   });
 
-  it('retries up to 2 times on 503 then succeeds on the 3rd attempt', async () => {
+  it('retries up to MAX_RETRIES times on 503 then succeeds on the final attempt', async () => {
     const fetchMock = vi.fn()
+      .mockResolvedValueOnce(textResponse('busy', 503, { 'retry-after': '0' }))
       .mockResolvedValueOnce(textResponse('busy', 503, { 'retry-after': '0' }))
       .mockResolvedValueOnce(textResponse('busy', 503, { 'retry-after': '0' }))
       .mockResolvedValueOnce(jsonResponse(OK_RESPONSE));
@@ -114,10 +115,11 @@ describe('callLens', () => {
     const onRetry = vi.fn();
     const text = await callLens({ ...baseOpts, onRetry });
     expect(text).toContain('TRUE');
-    expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(onRetry).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(onRetry).toHaveBeenCalledTimes(3);
     expect(onRetry).toHaveBeenNthCalledWith(1, 1);
     expect(onRetry).toHaveBeenNthCalledWith(2, 2);
+    expect(onRetry).toHaveBeenNthCalledWith(3, 3);
   });
 
   it('throws after exhausting retries on persistent 503', async () => {
