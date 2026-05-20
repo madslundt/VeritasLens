@@ -464,6 +464,13 @@ async function runAnalysis(): Promise<void> {
     });
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
+    // Log the raw response so the settings WebView's debug log can show what
+    // Gemini actually returned — useful for diagnosing whether multi-claim
+    // schemas are being honoured.
+    pushDebugEvent({
+      label: `raw:${analysisPersona.id}`,
+      detail: rawText.length > 1200 ? `${rawText.slice(0, 1200)}…` : rawText,
+    });
     stopSpinner();
     setStateResult(result);
     pushHistoryEntry({

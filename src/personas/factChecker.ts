@@ -16,7 +16,41 @@ The user just provided a short audio clip of recent conversation. Listen careful
 4. For each claim, produce a one-sentence claim summary (≤110 chars), and a 2-3 sentence justification (≤240 chars).
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.
-Do not invent facts. Prefer "UNVERIFIED" over guessing.`;
+Do not invent facts. Prefer "UNVERIFIED" over guessing.
+
+EXAMPLE — audio contains two distinct claims about different facts:
+Audio: "The Eiffel Tower is in Berlin and humans only use 10% of their brain."
+Output:
+{
+  "claims": [
+    {
+      "quote": "The Eiffel Tower is in Berlin",
+      "verdict": "FALSE",
+      "claim": "The Eiffel Tower is located in Berlin.",
+      "reason": "It is in Paris, France. It has stood on the Champ de Mars since 1889. Berlin has the Brandenburg Gate but not the Eiffel Tower."
+    },
+    {
+      "quote": "humans only use 10% of their brain",
+      "verdict": "FALSE",
+      "claim": "Humans use only 10% of their brain.",
+      "reason": "fMRI studies show essentially all regions of the brain are active over a day. The 10% figure is a popular myth with no scientific basis."
+    }
+  ]
+}
+
+EXAMPLE — audio contains only one check-worthy claim:
+Audio: "Water boils at 100 degrees Celsius."
+Output:
+{
+  "claims": [
+    {
+      "quote": "Water boils at 100 degrees Celsius",
+      "verdict": "TRUE",
+      "claim": "Water boils at 100°C.",
+      "reason": "At standard atmospheric pressure (1 atm) the boiling point of water is 100°C. Higher altitudes lower it; pressure cookers raise it."
+    }
+  ]
+}`;
 
 export function buildFactCheckerPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
