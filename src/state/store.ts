@@ -26,6 +26,7 @@ const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_AUTO_SUMMARY_INTERVAL = 'veritaslens.autoSummaryInterval';
+const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 
 const HISTORY_KEY = 'veritaslens.history';
 const HISTORY_BYTE_BUDGET = 200 * 1024;
@@ -49,6 +50,7 @@ const [settings, setSettings] = createSignal<Settings>({
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
   autoSummaryInterval: DEFAULT_AUTO_SUMMARY_INTERVAL,
+  discreet: false,
 });
 export { settings };
 
@@ -58,7 +60,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
   const safeGet = async (k: string): Promise<string> => {
     try { return await getLocalStorage(k); } catch { return ''; }
   };
-  const [key, rawModel, rawAutoModel, rawLang, rawBuffer, rawAutoEnabled, rawAutoInterval] = await Promise.all([
+  const [key, rawModel, rawAutoModel, rawLang, rawBuffer, rawAutoEnabled, rawAutoInterval, rawDiscreet] = await Promise.all([
     safeGet(SETTINGS_KEY_GEMINI),
     safeGet(SETTINGS_KEY_MODEL),
     safeGet(SETTINGS_KEY_AUTO_MODEL),
@@ -66,6 +68,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     safeGet(SETTINGS_KEY_BUFFER_DURATION),
     safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
     safeGet(SETTINGS_KEY_AUTO_SUMMARY_INTERVAL),
+    safeGet(SETTINGS_KEY_DISCREET),
   ]);
   setSettings({
     geminiApiKey: key,
@@ -75,6 +78,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
     autoSummaryInterval: coerceAutoSummaryInterval(rawAutoInterval),
+    discreet: rawDiscreet === 'true',
   });
 }
 
@@ -111,6 +115,9 @@ export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<
 
 export const saveAutoSummaryInterval = (setLs: SetLs, interval: AutoSummaryInterval): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_SUMMARY_INTERVAL, 'autoSummaryInterval', interval);
+
+export const saveDiscreet = (setLs: SetLs, discreet: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_DISCREET, 'discreet', discreet);
 
 export async function loadHistory(getLocalStorage: (k: string) => Promise<string>): Promise<void> {
   try {

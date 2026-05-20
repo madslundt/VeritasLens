@@ -7,6 +7,7 @@ import {
   saveAutoSummaryEnabled,
   saveAutoSummaryInterval,
   saveBufferDuration,
+  saveDiscreet,
   saveGeminiKey,
   saveGeminiModel,
   saveGeminiAutoModel,
@@ -113,6 +114,7 @@ export const SettingsView: Component = () => {
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftAutoInterval, setDraftAutoInterval] = createSignal<AutoSummaryInterval>(settings().autoSummaryInterval);
+  const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [testState, setTestState] = createSignal<'idle' | 'running' | 'ok' | 'fail'>('idle');
   const [testMessage, setTestMessage] = createSignal('');
@@ -179,6 +181,7 @@ export const SettingsView: Component = () => {
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
         saveAutoSummaryInterval(setLs, draftAutoInterval()),
+        saveDiscreet(setLs, draftDiscreet()),
       ]);
       if (results.every(Boolean)) {
         setSaveState('saved');
@@ -427,6 +430,24 @@ export const SettingsView: Component = () => {
                 Longer buffers give Gemini more context but use more tokens per request.
               </span>
             </label>
+
+            <div class="field">
+              <span class="field-label">Discreet HUD</span>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftDiscreet()}
+                  onChange={(e) => setDraftDiscreet(e.currentTarget.checked)}
+                />
+                <span>Hide REC indicator and hint while listening</span>
+              </label>
+              <span class="field-hint">
+                Shows only a small recording dot on the glasses while a lens is active.
+                Double-tap reveals the answer (without the REC label or the tap hint at the
+                bottom). The answer stays on screen until you open the menu and tap Hide.
+                Takes effect on the next lens session.
+              </span>
+            </div>
 
             <div class="field">
               <span class="field-label">Auto-summary</span>

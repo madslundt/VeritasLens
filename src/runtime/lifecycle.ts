@@ -6,6 +6,7 @@ import {
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   currentHudPage,
+  getActiveLayout,
   menuOptionAtIndex,
   personaAtIndex,
   resetHudSessionState,
@@ -14,6 +15,7 @@ import {
   scrollActiveReason,
   scrollHistoryDetail,
   setActiveHint,
+  setActiveLayout,
   setLensResult,
   setRecIndicator,
   setStatus,
@@ -30,7 +32,6 @@ import { getPersona, type Persona, type PersonaId } from '@/personas';
 import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
 import {
   activePersona,
-  lensResult as stateResultGet,
   pushDebugEvent,
   pushHistoryEntry,
   sessionHistory,
@@ -191,7 +192,17 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 
 async function handleActiveGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    await showMenuPage(formatTime());
+    await showMenuPage();
+    return;
+  }
+  // Discreet layouts use a list container as the event sink, so vertical swipes
+  // arrive here as listEvent SCROLL_TOP/BOTTOM rather than via the textEvent
+  // path that the baseline text-container sink uses. Forward them to the same
+  // reason-pagination logic so a long reason is still scrollable in discreet-result.
+  if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
+    await scrollActiveReason(-1);
+  } else if (g.type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+    await scrollActiveReason(1);
   }
 }
 
@@ -200,12 +211,24 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const option = menuOptionAtIndex(lastMenuIndex);
     switch (option) {
+      case 'back': await handleBackMenuOption(); break;
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
       case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
-      case 'cancel': await restoreActiveWithResult(); break;
       case 'exit': await leaveActiveSession(); break;
     }
   }
+}
+
+/**
+ * Back closes the menu and returns to the listening state, clearing any
+ * answer that was on screen. In discreet mode that means returning to the
+ * dot-only layout; in baseline it means the standard REC + hint view.
+ */
+async function handleBackMenuOption(): Promise<void> {
+  setStateResult(null);
+  setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
+  await restoreActivePage();
+  setAppPhase('listening');
 }
 
 async function handleHistoryListGesture(g: Gesture): Promise<void> {
@@ -224,19 +247,6 @@ async function handleHistoryDetailGesture(g: Gesture): Promise<void> {
   }
 }
 
-async function restoreActiveWithResult(): Promise<void> {
-  await restoreActivePage();
-  const current = stateResultGet();
-  if (current) {
-    await setLensResult(current);
-    await setStatus('displaying');
-    setAppPhase('displaying');
-  } else {
-    await setStatus('listening');
-    setAppPhase('listening');
-  }
-}
-
 async function enterActiveSession(personaId: PersonaId): Promise<void> {
   const persona = getPersona(personaId);
   if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
@@ -244,6 +254,7 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   sessionStartTime = Date.now();
   lastMenuIndex = 0;
+  setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
   await showActivePage(persona);
   buffer = new PcmRingBuffer({ durationSec: settings().bufferDuration, sampleRate: 16_000 });
   const micOk = await getBridge().audioControl(true);
@@ -270,11 +281,6 @@ async function leaveActiveSession(): Promise<void> {
 
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 let spinnerTimer: ReturnType<typeof setInterval> | null = null;
-
-function formatTime(): string {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-}
 
 function startSpinner(): void {
   if (spinnerTimer) return;
@@ -327,6 +333,13 @@ async function runAnalysis(): Promise<void> {
   const page = currentHudPage();
   if (page === 'history-list' || page === 'history-detail') await restoreActivePage();
   if (currentHudPage() !== 'active') return;
+  // In discreet mode promote to the layout that includes claim/verdict/reason
+  // so setStatus / setLensResult have containers to write into. The dot
+  // indicator stays; REC and the bottom hint remain hidden.
+  if (settings().discreet && getActiveLayout() !== 'discreet-result') {
+    setActiveLayout('discreet-result');
+    await restoreActivePage();
+  }
   if (!buffer || buffer.bytesBuffered === 0) { await setStatus('listening'); return; }
 
   const apiKey = settings().geminiApiKey;
@@ -442,6 +455,7 @@ function stopAutoSummaryTimer(): void {
   if (autoSummaryTimer) clearInterval(autoSummaryTimer);
   autoSummaryTimer = null;
 }
+
 
 async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;

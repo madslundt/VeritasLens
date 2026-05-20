@@ -96,9 +96,9 @@ export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
 
 export const MENU_OPTIONS = [
+  { id: 'back', label: '← Back' },
   { id: 'fact-check', label: 'Check' },
   { id: 'history', label: 'History' },
-  { id: 'cancel', label: 'Cancel' },
   { id: 'exit', label: 'Exit' },
 ] as const;
 export type MenuOptionId = (typeof MENU_OPTIONS)[number]['id'];
@@ -114,6 +114,16 @@ let bootstrapped = false;
 let currentPage: HudPage = 'none';
 let menuPersona: Persona | null = null;
 let cachedHistoryEntries: HistoryEntry[] = [];
+/**
+ * Sub-mode for the active page. Driven by the lifecycle, read by buildActivePage.
+ *   - 'baseline'         : current default; REC + hint + full layout
+ *   - 'discreet-minimal' : single recording dot only (no claim/REC/hint)
+ *   - 'discreet-result'  : status + claim/verdict/reason + dot, no REC/hint
+ */
+export type ActiveLayout = 'baseline' | 'discreet-minimal' | 'discreet-result';
+let activeLayout: ActiveLayout = 'baseline';
+export function getActiveLayout(): ActiveLayout { return activeLayout; }
+export function setActiveLayout(layout: ActiveLayout): void { activeLayout = layout; }
 export function getHistoryListEntries(): HistoryEntry[] { return cachedHistoryEntries; }
 
 export function currentHudPage(): HudPage { return currentPage; }
@@ -128,7 +138,7 @@ export function personaAtIndex(idx: number | undefined | null): Persona | null {
 /** Map list index → menu option id. */
 export function menuOptionAtIndex(idx: number | undefined | null): MenuOptionId {
   const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
-  return MENU_OPTIONS[safe]?.id ?? 'fact-check';
+  return MENU_OPTIONS[safe]?.id ?? 'back';
 }
 
 export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'picker'): Promise<void> {
@@ -168,9 +178,9 @@ export async function showActivePage(persona: Persona): Promise<void> {
   currentPage = 'active';
 }
 
-export async function showMenuPage(time = ''): Promise<void> {
+export async function showMenuPage(): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showMenuPage().');
-  const ok = await getBridge().rebuildPageContainer(buildMenuPage(time));
+  const ok = await getBridge().rebuildPageContainer(buildMenuPage());
   if (!ok) throw new Error('rebuildPageContainer (menu) failed.');
   currentPage = 'menu';
 }
@@ -213,12 +223,16 @@ export async function restoreActivePage(): Promise<void> {
 
 export async function setStatus(label: keyof typeof STATUS_LABEL | string): Promise<void> {
   if (currentPage !== 'active') return;
+  // The minimal discreet layout omits the status container entirely.
+  if (activeLayout === 'discreet-minimal') return;
   const content = STATUS_LABEL[label] ?? `[${label.slice(0, 14)}]`;
   await upgradeText(CONTAINER.status, NAME.status, content);
 }
 
 export async function setLensResult(result: LensResult | null): Promise<void> {
   if (currentPage !== 'active' && currentPage !== 'history-detail') return;
+  // Minimal discreet layout has no claim/verdict/reason containers.
+  if (currentPage === 'active' && activeLayout === 'discreet-minimal') return;
   if (!result) {
     activeReasonFull = '';
     activeReasonOffset = 0;
@@ -255,11 +269,15 @@ export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
 /** Toggle the recording indicator in the bottom-right of the active page. */
 export async function setRecIndicator(on: boolean): Promise<void> {
   if (currentPage !== 'active') return;
+  // Discreet layouts have no REC container; suppress unconditionally.
+  if (activeLayout !== 'baseline') return;
   await upgradeText(CONTAINER.recIndicator, NAME.recIndicator, on ? '● REC' : '');
 }
 
 export async function setActiveHint(content: string): Promise<void> {
   if (currentPage !== 'active') return;
+  // Discreet layouts have no hint row.
+  if (activeLayout !== 'baseline') return;
   await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
 }
 
@@ -382,42 +400,34 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   return new Ctor({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
 }
 
-function buildMenuPage(time = ''): RebuildPageContainer {
+function buildMenuPage(): RebuildPageContainer {
+  // Title is sized tight around "Menu" so LVGL's end-of-label caret sits
+  // outside the container clip and isn't visible as a stray cursor line.
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
-    width: 200, height: 36, borderWidth: 0, paddingLength: 4,
+    width: 64, height: 32, borderWidth: 0, paddingLength: 0,
     content: 'Menu', isEventCapture: 0,
-  });
-  const clock = new TextContainerProperty({
-    containerID: CONTAINER.clock, containerName: NAME.clock,
-    xPosition: SCREEN_W - 112, yPosition: 10, width: 96, height: 28,
-    borderWidth: 0, paddingLength: 4, content: time, isEventCapture: 0,
   });
   const list = new ListContainerProperty({
     containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
-    width: SCREEN_W - 32, height: 200, borderWidth: 0, paddingLength: 4,
+    width: SCREEN_W - 32, height: SCREEN_H - 48, borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
       itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: MENU_OPTIONS.map((o) => o.label),
     }),
     isEventCapture: 1,
   });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
-    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
-    content: 'Swipe ⇅ · Tap to confirm', isEventCapture: 0,
-  });
-  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [list], textObject: [title, clock, hint] });
+  return new RebuildPageContainer({ containerTotalNum: 2, listObject: [list], textObject: [title] });
 }
 
 function buildActivePage(): RebuildPageContainer {
-  // Full-screen invisible capturer — sits behind all content so SDK has nothing
-  // to scroll visually, but still fires textEvents (swipe) and sysEvents (tap).
-  const eventCapture = new TextContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList,
-    xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
-    borderWidth: 0, paddingLength: 0, content: ' ', isEventCapture: 1,
-  });
+  if (activeLayout === 'discreet-minimal') return buildDiscreetMinimalPage();
+  if (activeLayout === 'discreet-result') return buildDiscreetResultPage();
+  return buildBaselineActivePage();
+}
+
+function buildBaselineActivePage(): RebuildPageContainer {
+  const eventCapture = makeFullScreenEventSink();
   const status = new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
     xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 26,
@@ -446,10 +456,98 @@ function buildActivePage(): RebuildPageContainer {
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
     xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
-    borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT,
-    isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
   });
-  return new RebuildPageContainer({ containerTotalNum: 7, listObject: [], textObject: [eventCapture, status, claim, verdict, reason, rec, hint] });
+  return new RebuildPageContainer({
+    containerTotalNum: 7, listObject: [],
+    textObject: [eventCapture, status, claim, verdict, reason, rec, hint],
+  });
+}
+
+/**
+ * Discreet idle layout — a single recording dot in the top-left and an
+ * invisible full-screen list as the event sink. Nothing else on the HUD.
+ */
+function buildDiscreetMinimalPage(): RebuildPageContainer {
+  const sink = makeInvisibleListSink();
+  const recDot = makeRecDot();
+  return new RebuildPageContainer({
+    containerTotalNum: 2, listObject: [sink], textObject: [recDot],
+  });
+}
+
+/**
+ * Discreet result layout — status + claim/verdict/reason + recording dot.
+ * No bottom-row REC label and no affordance hint, so a bystander sees only
+ * the result text while it's on screen.
+ */
+function buildDiscreetResultPage(): RebuildPageContainer {
+  const sink = makeInvisibleListSink();
+  const recDot = makeRecDot();
+  const status = new TextContainerProperty({
+    containerID: CONTAINER.status, containerName: NAME.status,
+    xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 26,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const claim = new TextContainerProperty({
+    containerID: CONTAINER.claim, containerName: NAME.claim,
+    xPosition: 16, yPosition: 34, width: SCREEN_W - 32, height: 54,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const verdict = new TextContainerProperty({
+    containerID: CONTAINER.verdict, containerName: NAME.verdict,
+    xPosition: 16, yPosition: 90, width: SCREEN_W - 32, height: 26,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const reason = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 118, width: SCREEN_W - 32, height: 166,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: 6, listObject: [sink],
+    textObject: [recDot, status, claim, verdict, reason],
+  });
+}
+
+function makeFullScreenEventSink(): TextContainerProperty {
+  // Full-screen invisible capturer — sits behind all content so SDK has nothing
+  // to scroll visually, but still fires textEvents (swipe) and sysEvents (tap).
+  return new TextContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList,
+    xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
+    borderWidth: 0, paddingLength: 0, content: ' ', isEventCapture: 1,
+  });
+}
+
+/**
+ * Discreet event sink — a tiny list parked at the bottom-right corner. Touch
+ * input comes from the temple touchpad regardless of where the sink renders,
+ * so we just need *some* container to be the event capturer; we don't need it
+ * to cover the screen. Keeping it small and out of the way avoids the list's
+ * item-cursor leaking next to the recording dot.
+ */
+function makeInvisibleListSink(): ListContainerProperty {
+  return new ListContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList,
+    xPosition: SCREEN_W - 2, yPosition: SCREEN_H - 2, width: 2, height: 2,
+    borderWidth: 0, paddingLength: 0,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: 1, itemWidth: 2, isItemSelectBorderEn: 0,
+      itemName: [''],
+    }),
+    isEventCapture: 1,
+  });
+}
+
+function makeRecDot(): TextContainerProperty {
+  // Container sized to the glyph: LVGL otherwise renders a thin label caret
+  // in the empty space to the right of the bullet on the simulator.
+  return new TextContainerProperty({
+    containerID: CONTAINER.clock, containerName: NAME.clock,
+    xPosition: 8, yPosition: 8, width: 10, height: 18,
+    borderWidth: 0, paddingLength: 0, content: '•', isEventCapture: 0,
+  });
 }
 
 function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
@@ -513,6 +611,7 @@ export function resetHudSessionState(): void {
   detailReasonOffset = 0;
   activeReasonFull = '';
   activeReasonOffset = 0;
+  activeLayout = 'baseline';
 }
 
 export function _resetHudBootstrapForTesting(): void {

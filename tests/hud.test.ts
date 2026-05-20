@@ -6,7 +6,7 @@
 // until Pass 1 exposes resetHudSessionState() (currently named
 // _resetHudBootstrapForTesting).
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // The SDK ships ES classes whose constructors we instantiate from hud.ts.
 // They serialize fine when we just stash the args; replace with thin stubs.
@@ -62,6 +62,7 @@ import {
   resetHudSessionState,
   scrollActiveReason,
   scrollHistoryDetail,
+  setActiveLayout,
   setLensResult,
   setRecIndicator,
   showActivePage,
@@ -71,8 +72,18 @@ import {
   showPickerPage,
   showUnconfiguredPage,
 } from '../src/runtime/hud';
+import { saveDiscreet, setLensResult as setStateLensResult, settings } from '../src/state/store';
 import { getPersona, getPickerPersonas } from '../src/personas';
 import type { HistoryEntry, LensResult } from '../src/types';
+
+const fakeSetLs = (_k: string, _v: string): Promise<boolean> => Promise.resolve(true);
+
+afterEach(async () => {
+  // Always reset discreet + layout + result so test order does not bleed state.
+  await saveDiscreet(fakeSetLs, false);
+  setActiveLayout('baseline');
+  setStateLensResult(null);
+});
 
 beforeEach(() => {
   _resetHudBootstrapForTesting();
@@ -109,10 +120,10 @@ describe('menuOptionAtIndex', () => {
     }
   });
 
-  it('falls back to "fact-check" for invalid indices', () => {
-    expect(menuOptionAtIndex(99)).toBe('fact-check');
-    expect(menuOptionAtIndex(undefined)).toBe('fact-check');
-    expect(menuOptionAtIndex(-1)).toBe('fact-check');
+  it('falls back to "back" for invalid indices', () => {
+    expect(menuOptionAtIndex(99)).toBe('back');
+    expect(menuOptionAtIndex(undefined)).toBe('back');
+    expect(menuOptionAtIndex(-1)).toBe('back');
   });
 });
 
@@ -143,7 +154,7 @@ describe('page lifecycle', () => {
     await showActivePage(persona);
     expect(currentHudPage()).toBe('active');
 
-    await showMenuPage('12:34');
+    await showMenuPage();
     expect(currentHudPage()).toBe('menu');
   });
 
@@ -257,6 +268,98 @@ describe('showHistoryListPage', () => {
     }];
     await showHistoryListPage(entries);
     expect(currentHudPage()).toBe('history-list');
+  });
+});
+
+describe('discreet mode', () => {
+  type TextBag = { payload: { containerName: string; content: string } };
+  type RebuildBag = { payload: { containerTotalNum: number; textObject: TextBag[]; listObject: unknown[] } };
+
+  function lastRebuildPayload(): RebuildBag['payload'] {
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    return calls.at(-1)![0].payload;
+  }
+
+  function findText(payload: RebuildBag['payload'], name: string): TextBag['payload'] | undefined {
+    return payload.textObject.find((t) => t.payload.containerName === name)?.payload;
+  }
+
+  it('MENU_OPTIONS leads with "← Back" and has no Hide entry', () => {
+    expect(MENU_OPTIONS[0]?.id).toBe('back');
+    expect(MENU_OPTIONS[0]?.label).toBe('← Back');
+    expect(MENU_OPTIONS.find((o) => (o.id as string) === 'hide')).toBeUndefined();
+  });
+
+  it('menuOptionAtIndex maps index 0 back to "back"', () => {
+    expect(menuOptionAtIndex(0)).toBe('back');
+  });
+
+  it('baseline layout renders REC + hint and omits the rec dot', async () => {
+    await saveDiscreet(fakeSetLs, false);
+    setActiveLayout('baseline');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const payload = lastRebuildPayload();
+    expect(findText(payload, 'vl-rec')?.content).toBe('● REC');
+    expect(findText(payload, 'vl-act-hint')?.content).toBe('Tap: menu · Double-tap: check');
+    expect(findText(payload, 'vl-clock')).toBeUndefined();
+  });
+
+  it('discreet-minimal layout has only the rec dot + an invisible list event sink', async () => {
+    await saveDiscreet(fakeSetLs, true);
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const payload = lastRebuildPayload();
+    expect(payload.textObject).toHaveLength(1);
+    expect(payload.listObject).toHaveLength(1);
+    expect(findText(payload, 'vl-clock')?.content).toBe('•');
+    expect(findText(payload, 'vl-rec')).toBeUndefined();
+    expect(findText(payload, 'vl-act-hint')).toBeUndefined();
+  });
+
+  it('discreet-result layout drops REC + hint but keeps claim/verdict/reason + dot', async () => {
+    await saveDiscreet(fakeSetLs, true);
+    setActiveLayout('discreet-result');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const payload = lastRebuildPayload();
+    expect(findText(payload, 'vl-rec')).toBeUndefined();
+    expect(findText(payload, 'vl-act-hint')).toBeUndefined();
+    expect(findText(payload, 'vl-clock')?.content).toBe('•');
+    expect(findText(payload, 'vl-claim')).toBeDefined();
+    expect(findText(payload, 'vl-verdict')).toBeDefined();
+    expect(findText(payload, 'vl-reason')).toBeDefined();
+  });
+
+  it('setRecIndicator is a no-op while a discreet layout is active', async () => {
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setRecIndicator(true);
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('setLensResult is a no-op in discreet-minimal (containers absent)', async () => {
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({ type: 'eli5', explanation: 'x' });
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('settings().discreet reflects saveDiscreet result', async () => {
+    await saveDiscreet(fakeSetLs, true);
+    expect(settings().discreet).toBe(true);
+    await saveDiscreet(fakeSetLs, false);
+    expect(settings().discreet).toBe(false);
   });
 });
 

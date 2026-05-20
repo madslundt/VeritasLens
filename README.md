@@ -25,6 +25,7 @@ A real-time **contextual intelligence layer** for [Even Realities G2](https://ww
 - **Configurable buffer.** Choose 30 seconds, 2 minutes, 5 minutes, or 10 minutes of rolling PCM. Longer buffers give Gemini more context at the cost of more tokens per request.
 - **Auto-summary.** Optionally enable background summaries on a 1, 2, or 5 minute interval. Results appear in History only — no interruption to the HUD.
 - **Continuous recording.** The PCM ring buffer keeps filling during compute, display, and menu states so the next analysis can pick up whatever was said in between. A `● REC` indicator shows when the mic is hot.
+- **Discreet HUD (optional).** Enabled from Settings. While listening, the on-glasses display shows only a small recording dot — no `● REC` label, no affordance hint. Double-tap reveals an analysis result; the result stays on screen until you open the menu and tap `← Back`. Mic capture is unchanged; this is a display-only mode.
 - **Zero-persistence audio.** PCM is held in a single in-memory `Uint8Array` ring buffer. Nothing is written to disk, ever.
 - **BYOK (Bring Your Own Key).** Your Gemini API key never leaves the device except as part of the `generateContent` request *you* initiate.
 
@@ -38,6 +39,8 @@ A real-time **contextual intelligence layer** for [Even Realities G2](https://ww
 | Double tap      | Trigger analysis    | Trigger analysis            | Trigger analysis              | Trigger analysis           |
 | Swipe up        | —                   | Scroll reason text up       | Cycle highlight up            | Cycle highlight up         |
 | Swipe down      | —                   | Scroll reason text down     | Cycle highlight down          | Cycle highlight down       |
+
+Menu options (in order): `← Back` (dismiss any visible answer and return to listening), `Check` (run analysis now), `History` (open the session log), `Exit` (end the session).
 
 On the History Detail page: tap returns to the history list; swipe up/down scrolls the detail text.
 

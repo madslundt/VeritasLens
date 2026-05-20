@@ -79,6 +79,13 @@ export interface Settings {
   bufferDuration: BufferDuration;
   autoSummaryEnabled: boolean;
   autoSummaryInterval: AutoSummaryInterval;
+  /**
+   * When true, the active HUD hides the REC indicator and affordance hint and
+   * shows only a small recording dot until the user double-taps for an
+   * analysis. Results stay on screen until explicitly dismissed via the menu's
+   * Back item, which also returns the layout to the dot-only view.
+   */
+  discreet: boolean;
 }
 
 /** Runtime app state. */
