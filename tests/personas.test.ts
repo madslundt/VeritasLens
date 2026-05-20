@@ -246,29 +246,6 @@ describe('bias-detector', () => {
   });
 });
 
-import { parseTranslationResponse, buildTranslationPrompt } from '../src/personas/translation';
-
-describe('translation', () => {
-  it('parses a valid translation response', () => {
-    const result = parseTranslationResponse(JSON.stringify({ quote: 'Hello world', translatedText: 'Bonjour le monde' }));
-    expect(result.type).toBe('translation');
-    if (result.type === 'translation') {
-      expect(result.translatedText).toBe('Bonjour le monde');
-      expect(result.quote).toBe('Hello world');
-    }
-  });
-
-  it('tolerates a missing quote field', () => {
-    const result = parseTranslationResponse(JSON.stringify({ translatedText: 'Hola' }));
-    if (result.type === 'translation') expect(result.quote).toBe('');
-  });
-
-  it('buildTranslationPrompt embeds the target language', () => {
-    const prompt = buildTranslationPrompt('fr');
-    expect(prompt).toContain('Français');
-  });
-});
-
 import { parseEli5Response, buildEli5Prompt } from '../src/personas/eli5';
 
 describe('eli5', () => {
@@ -345,8 +322,7 @@ describe('auto-classifier', () => {
     expect(prompt).toContain('Dansk');
   });
 
-  it('excludes translation and session-summary from candidates', () => {
-    expect(AUTO_LENS_CANDIDATES).not.toContain('translation');
+  it('excludes session-summary and auto from candidates', () => {
     expect(AUTO_LENS_CANDIDATES).not.toContain('session-summary');
     expect(AUTO_LENS_CANDIDATES).not.toContain('auto');
   });

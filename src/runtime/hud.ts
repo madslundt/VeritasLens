@@ -93,7 +93,6 @@ const STATUS_LABEL: Record<string, string> = {
 export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'none';
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
-export const ACTIVE_HINT_NEXT_CLAIM = 'Tap: next claim · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
 
 export const MENU_OPTIONS = [
@@ -316,31 +315,6 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
   ]);
 }
 
-/**
- * Try to advance the active page to the next claim. Returns true iff a
- * swap actually happened. Returns false on the last claim, on single-claim
- * results, and when off the active page — letting the caller fall back to
- * the default tap action (open the menu).
- */
-export async function tryAdvanceActiveClaim(): Promise<boolean> {
-  if (currentPage !== 'active' || !currentActiveResult) return false;
-  const total = claimCount(currentActiveResult);
-  if (total <= 1) return false;
-  const next = activeClaimIndex + 1;
-  if (next >= total) return false;
-  activeClaimIndex = next;
-  const { top, middle, bottom } = formatLensResult(currentActiveResult, activeClaimIndex);
-  activeReasonFull = bottom;
-  activeReasonOffset = 0;
-  await Promise.all([
-    upgradeText(CONTAINER.claim, NAME.claim, top),
-    upgradeText(CONTAINER.verdict, NAME.verdict, middle),
-    upgradeText(CONTAINER.reason, NAME.reason, bottom.slice(0, ACTIVE_PAGE_CHARS)),
-  ]);
-  await applyDefaultActiveHint();
-  return true;
-}
-
 export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
   if (currentPage !== 'active') return;
   // Multi-claim swap takes precedence over reason pagination. Scroll-down
@@ -385,18 +359,6 @@ export async function setActiveHint(content: string): Promise<void> {
   // Discreet layouts have no hint row.
   if (activeLayout !== 'baseline') return;
   await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
-}
-
-/**
- * Write the appropriate "default" baseline hint for the current state.
- * Multi-claim results with more claims to walk → "next claim" wording;
- * otherwise the original "menu" wording. Discreet layouts are no-ops.
- */
-export async function applyDefaultActiveHint(): Promise<void> {
-  if (currentPage !== 'active' || activeLayout !== 'baseline') return;
-  const total = currentActiveResult ? claimCount(currentActiveResult) : 1;
-  const hasNext = total > 1 && activeClaimIndex < total - 1;
-  await upgradeText(CONTAINER.activeHint, NAME.activeHint, hasNext ? ACTIVE_HINT_NEXT_CLAIM : ACTIVE_HINT_DEFAULT);
 }
 
 /**
@@ -487,8 +449,6 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
         bottom: clip(c.reason, 240),
       };
     }
-    case 'translation':
-      return { top: clip(result.translatedText, 140), middle: '', bottom: '' };
     case 'eli5': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       return { top: '', middle: '', bottom: clip(c.explanation, 240) };
@@ -648,30 +608,34 @@ function buildBaselineActivePage(): RebuildPageContainer {
 }
 
 /**
- * Discreet idle layout — a single recording dot in the top-left and an
- * invisible full-screen list as the event sink. Nothing else on the HUD.
+ * Discreet idle layout — a recording dot in the top-right plus an invisible
+ * full-screen *text* sink for events. Same sink pattern as baseline: text
+ * containers with isEventCapture=1 reliably fire textEvent SCROLL on swipe
+ * and sysEvent CLICK on tap on this hardware. A list sink in discreet
+ * silently swallowed swipes and emitted taps with a different eventType,
+ * which broke claim-walking in discreet mode.
  */
 function buildDiscreetMinimalPage(): RebuildPageContainer {
-  const sink = makeInvisibleListSink();
-  // Single top-right slot that doubles as recording-dot (resting) and
-  // status indicator (spinner / "..." / "R1/2"). One container = one
-  // LVGL label-cursor caret position; merging the two avoids the second
-  // caret in the opposite corner.
+  const sink = makeFullScreenEventSink();
+  // Top-right slot that doubles as recording-dot (resting) and status
+  // indicator (spinner / "..." / "R1/2"). One container = one LVGL label-
+  // cursor caret position; merging the two avoids the second caret in the
+  // opposite corner.
   const status = makeDiscreetStatus();
   return new RebuildPageContainer({
-    containerTotalNum: 2, listObject: [sink], textObject: [status],
+    containerTotalNum: 2, listObject: [], textObject: [sink, status],
   });
 }
 
 /**
- * Discreet result layout — full-screen question/answer, matching the
- * history-detail view. No dot, no status, no hint: once an answer is on
- * screen it fills the available space. The dot only exists in
- * discreet-minimal, which is what the user sees before the answer arrives.
- * The list sink at the bottom-right captures tap (→ menu) and scroll events.
+ * Discreet result layout — full-screen question/answer. No dot, no status,
+ * no hint: once an answer is on screen it fills the available space. Uses
+ * the same text-container event sink as discreet-minimal / baseline so
+ * swipes (scroll reason / walk claims) and taps (walk claims → menu) fire
+ * reliably.
  */
 function buildDiscreetResultPage(): RebuildPageContainer {
-  const sink = makeInvisibleListSink();
+  const sink = makeFullScreenEventSink();
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
     xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
@@ -688,8 +652,8 @@ function buildDiscreetResultPage(): RebuildPageContainer {
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   return new RebuildPageContainer({
-    containerTotalNum: 4, listObject: [sink],
-    textObject: [claim, verdict, reason],
+    containerTotalNum: 4, listObject: [],
+    textObject: [sink, claim, verdict, reason],
   });
 }
 
@@ -700,30 +664,6 @@ function makeFullScreenEventSink(): TextContainerProperty {
     containerID: CONTAINER.activeList, containerName: NAME.activeList,
     xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
     borderWidth: 0, paddingLength: 0, content: ' ', isEventCapture: 1,
-  });
-}
-
-/**
- * Discreet event sink — a tiny list parked at the bottom-right corner. Touch
- * input comes from the temple touchpad regardless of where the sink renders,
- * so we just need *some* container to be the event capturer; we don't need it
- * to cover the screen. Keeping it small and out of the way avoids the list's
- * item-cursor leaking next to the recording dot.
- */
-function makeInvisibleListSink(): ListContainerProperty {
-  // itemCount=2 (rather than 1) so the SDK has somewhere to "scroll to" and
-  // actually fires SCROLL_TOP / SCROLL_BOTTOM listEvents when the user swipes
-  // vertically. With a single-item list the SDK suppresses scroll events,
-  // which broke multi-claim swipe in discreet mode.
-  return new ListContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList,
-    xPosition: SCREEN_W - 2, yPosition: SCREEN_H - 2, width: 2, height: 2,
-    borderWidth: 0, paddingLength: 0,
-    itemContainer: new ListItemContainerProperty({
-      itemCount: 2, itemWidth: 2, isItemSelectBorderEn: 0,
-      itemName: ['', ''],
-    }),
-    isEventCapture: 1,
   });
 }
 

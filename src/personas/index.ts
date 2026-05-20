@@ -6,7 +6,6 @@ import { TRIVIA_SCHEMA, buildTriviaPrompt, parseTriviaResponse } from './trivia'
 import { LOGICAL_FALLACY_SCHEMA, buildLogicalFallacyPrompt, parseLogicalFallacyResponse } from './logicalFallacy';
 import { STATS_CHECK_SCHEMA, buildStatsCheckPrompt, parseStatsCheckResponse } from './statsCheck';
 import { BIAS_DETECTOR_SCHEMA, buildBiasDetectorPrompt, parseBiasDetectorResponse } from './biasDetector';
-import { TRANSLATION_SCHEMA, buildTranslationPrompt, parseTranslationResponse } from './translation';
 import { ELI5_SCHEMA, buildEli5Prompt, parseEli5Response } from './eli5';
 import { SESSION_SUMMARY_SCHEMA, buildSessionSummaryPrompt, parseSessionSummaryResponse } from './sessionSummary';
 import { AUTO_CLASSIFIER_SCHEMA, buildAutoPrompt, parseAutoResponse } from './auto';
@@ -86,16 +85,6 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildBiasDetectorPrompt,
     schema: BIAS_DETECTOR_SCHEMA,
     parse: parseBiasDetectorResponse,
-    builtin: true,
-  },
-  {
-    id: 'translation',
-    name: 'Translation',
-    description: 'Translates spoken words into your configured response language.',
-    hint: 'Tap to translate',
-    buildPrompt: buildTranslationPrompt,
-    schema: TRANSLATION_SCHEMA,
-    parse: parseTranslationResponse,
     builtin: true,
   },
   {

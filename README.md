@@ -8,14 +8,13 @@ A real-time **contextual intelligence layer** for [Even Realities G2](https://ww
 
 ## Features
 
-- **9 built-in lenses.** Choose the right tool for the moment or let Auto decide:
+- **8 built-in lenses.** Choose the right tool for the moment or let Auto decide:
   - **Auto** — classifies the audio and routes to the best lens automatically.
   - **Fact Check** — labels the most check-worthy claim as `TRUE / FALSE / UNVERIFIED`.
   - **Trivia** — answers trivia questions with a direct answer and brief description.
   - **Fallacy Check** — names any logical fallacy present in the argument.
   - **Stats Check** — rates a numerical claim as `PLAUSIBLE / SUSPICIOUS`.
   - **Bias Check** — detects political, emotional, or factional bias; rates `NEUTRAL / BIASED`.
-  - **Translation** — translates spoken words into your configured response language.
   - **Simplify** — explains jargon or complex statements in plain language.
   - **Summary** — summarizes the conversation recorded so far (requires extended buffer).
 - **Auto lens.** Makes a fast classification call (using a configurable lighter model) to pick the best analysis lens, then runs the full analysis. Adds ~300–500 ms but requires no manual lens selection.
@@ -75,7 +74,7 @@ src/
 │   ├── hud.ts              # HUD pages: unconfigured / picker / active / menu / history
 │   └── lifecycle.ts        # event routing, gestures, session state machine
 ├── personas/
-│   ├── index.ts            # persona registry (9 built-in lenses)
+│   ├── index.ts            # persona registry (8 built-in lenses)
 │   ├── _utils.ts           # shared prompt helpers
 │   ├── auto.ts             # Auto lens classifier prompt + schema + parser
 │   ├── factChecker.ts      # Fact Check prompt + schema + parser
@@ -83,7 +82,6 @@ src/
 │   ├── logicalFallacy.ts   # Fallacy Check prompt + schema + parser
 │   ├── statsCheck.ts       # Stats Check prompt + schema + parser
 │   ├── biasDetector.ts     # Bias Check prompt + schema + parser
-│   ├── translation.ts      # Translation prompt + schema + parser
 │   ├── eli5.ts             # Simplify prompt + schema + parser
 │   └── sessionSummary.ts   # Summary prompt + schema + parser
 ├── llm/gemini.ts           # generateContent client + model list fetch

@@ -9,7 +9,7 @@
   "permissions": [
     {
       "name": "network",
-      "desc": "VeritasLens sends a short audio snippet to Google Gemini for the analysis lens you trigger (fact check, trivia, fallacy, stats, bias, translation, simplify, summary, or auto-routed). Your API key and audio leave the device only as part of that request.",
+      "desc": "VeritasLens sends a short audio snippet to Google Gemini for the analysis lens you trigger (fact check, trivia, fallacy, stats, bias, simplify, summary, or auto-routed). Your API key and audio leave the device only as part of that request.",
       "whitelist": [
         "https://generativelanguage.googleapis.com"
       ]

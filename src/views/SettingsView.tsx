@@ -100,9 +100,6 @@ function formatResultText(result: LensResult): string {
         return `${head}${reasonBlock}`;
       }).join('\n\n');
     }
-    case 'translation': {
-      return result.translatedText;
-    }
     case 'eli5': {
       return result.claims.map((c, i) => {
         const head = result.claims.length > 1 ? `${i + 1}/${result.claims.length}\n` : '';

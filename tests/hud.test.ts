@@ -317,8 +317,11 @@ describe('discreet mode', () => {
     await showActivePage(getPersona('fact-checker')!);
 
     const payload = lastRebuildPayload();
-    expect(payload.textObject).toHaveLength(1);
-    expect(payload.listObject).toHaveLength(1);
+    // Discreet now uses a text-container event sink (same as baseline) so
+    // both swipe and tap fire reliably on hardware; that adds one text
+    // container alongside the status/dot, and the listObject is empty.
+    expect(payload.textObject).toHaveLength(2);
+    expect(payload.listObject).toHaveLength(0);
     expect(findText(payload, 'vl-status')?.content).toBe('•');
     expect(findText(payload, 'vl-clock')).toBeUndefined();
     expect(findText(payload, 'vl-rec')).toBeUndefined();
@@ -339,7 +342,9 @@ describe('discreet mode', () => {
     expect(findText(payload, 'vl-claim')).toBeDefined();
     expect(findText(payload, 'vl-verdict')).toBeDefined();
     expect(findText(payload, 'vl-reason')).toBeDefined();
-    expect(payload.textObject).toHaveLength(3);
+    // 4 text containers: invisible event sink + claim + verdict + reason.
+    expect(payload.textObject).toHaveLength(4);
+    expect(payload.listObject).toHaveLength(0);
   });
 
   it('setRecIndicator is a no-op while a discreet layout is active', async () => {
@@ -640,42 +645,6 @@ describe('multi-claim active page', () => {
     await scrollActiveReason(-1);
     expect(lastUpgradeByName('vl-claim')).toBe('1/2 · C1');
     expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
-  });
-
-  it('tryAdvanceActiveClaim walks forward then returns false on the last claim', async () => {
-    const { tryAdvanceActiveClaim } = await import('../src/runtime/hud');
-    await bootstrapHud('picker');
-    await showActivePage(getPersona('fact-checker')!);
-
-    await setLensResult({
-      type: 'fact-check',
-      claims: [
-        { quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' },
-        { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
-      ],
-    });
-
-    bridge.textContainerUpgrade.mockClear();
-    expect(await tryAdvanceActiveClaim()).toBe(true);
-    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
-    expect(lastUpgradeByName('vl-verdict')).toBe('- FALSE');
-
-    // On the last claim it should refuse and let the caller open the menu.
-    bridge.textContainerUpgrade.mockClear();
-    expect(await tryAdvanceActiveClaim()).toBe(false);
-    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
-  });
-
-  it('tryAdvanceActiveClaim returns false for single-claim results', async () => {
-    const { tryAdvanceActiveClaim } = await import('../src/runtime/hud');
-    await bootstrapHud('picker');
-    await showActivePage(getPersona('fact-checker')!);
-    await setLensResult({
-      type: 'fact-check',
-      claims: [{ quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' }],
-    });
-
-    expect(await tryAdvanceActiveClaim()).toBe(false);
   });
 
   it('scrollActiveReason past the last claim falls back to reason pagination', async () => {

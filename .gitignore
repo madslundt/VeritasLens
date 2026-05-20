@@ -6,3 +6,10 @@ dist
 *.log
 .env
 .env.local
+
+# Tooling state — not source.
+.omc/
+
+# Local scratch artifacts that don't belong in source control.
+assets/glasses_*.png
+docs/superpowers/

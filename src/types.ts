@@ -19,7 +19,6 @@ export type LensResult = (
   | { type: 'logical-fallacy'; claims: FallacyClaim[] }
   | { type: 'stats-check'; claims: StatsClaim[] }
   | { type: 'bias'; claims: BiasClaim[] }
-  | { type: 'translation'; translatedText: string; quote?: string }
   | { type: 'eli5'; claims: Eli5Claim[] }
   | { type: 'session-summary'; summary: string; quote?: string }
 ) & {

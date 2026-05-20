@@ -186,7 +186,6 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
         ? r
         : { type, claims: wrap({ explanation: r['explanation'] }), autoSelected: r['autoSelected'] };
       break;
-    case 'translation':
     case 'session-summary':
       migratedResult = { quote: '', ...r };
       break;

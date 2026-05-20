@@ -3,10 +3,9 @@ import { getBridge } from './bridge';
 import { PcmRingBuffer } from './audioBuffer';
 import {
   ACTIVE_HINT_ANALYZING,
-  applyDefaultActiveHint,
+  ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   currentHudPage,
-  tryAdvanceActiveClaim,
   getActiveLayout,
   hasPendingActiveResult,
   menuOptionAtIndex,
@@ -205,27 +204,21 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 }
 
 async function handleActiveGesture(g: Gesture): Promise<void> {
-  // Scrolls (vertical swipes) come through as SCROLL_TOP / SCROLL_BOTTOM
-  // from either the baseline text sink (textEvent path) or the discreet list
-  // sink (listEvent → here). Anything else — explicit CLICK_EVENT, the
-  // normalized `undefined`, or any other list-selection event the discreet
-  // sink might emit when the user taps — is treated as a tap. The discreet
-  // list sink emits a tap event whose `eventType` doesn't always match the
-  // baseline sysEvent CLICK_EVENT, so the previous narrow check was missing
-  // taps in discreet mode and tap-to-walk-claims silently no-op'd.
+  // Single-tap (CLICK_EVENT or the normalized `undefined`) opens the menu.
+  // For multi-claim results, claim navigation is via vertical swipe — which
+  // arrives here as SCROLL_TOP/BOTTOM from the discreet text-container sink,
+  // or via the textEvent branch in handleEvent for baseline (same sink type
+  // now). scrollActiveReason swaps claims when multi-claim, otherwise
+  // paginates a long reason.
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    await showMenuPage();
+    return;
+  }
   if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
     await scrollActiveReason(-1);
-    return;
-  }
-  if (g.type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+  } else if (g.type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
     await scrollActiveReason(1);
-    return;
   }
-  // For multi-claim results, single-tap walks forward through the claims.
-  // On the last claim it falls through to opening the menu (and for
-  // single-claim or answer-shaped results it goes straight to the menu).
-  if (await tryAdvanceActiveClaim()) return;
-  await showMenuPage();
 }
 
 async function handleMenuGesture(g: Gesture): Promise<void> {
@@ -255,7 +248,7 @@ async function handleBackMenuOption(): Promise<void> {
   if (hasPendingActiveResult()) {
     await restoreActivePage();
     await setStatus('displaying');
-    await applyDefaultActiveHint();
+    await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('displaying');
     return;
   }
@@ -488,25 +481,25 @@ async function runAnalysis(): Promise<void> {
     }
     await setLensResult(result);
     await setStatus('displaying');
-    await applyDefaultActiveHint();
+    await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('displaying');
   } catch (err) {
     stopSpinner();
     if ((err as Error)?.name === 'AbortError') {
       await setStatus('listening');
-      await applyDefaultActiveHint();
+      await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('listening');
       return;
     }
     if ((err as Error)?.name === 'NoSpeechError') {
       await setStatus('listening');
-      await applyDefaultActiveHint();
+      await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('listening');
       return;
     }
     setErrorMessage(err instanceof Error ? err.message : String(err));
     await setStatus('error');
-    await applyDefaultActiveHint();
+    await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('error');
   } finally {
     // Identity check prevents clobbering a newer controller spawned by a
@@ -582,7 +575,6 @@ function extractQuestion(result: LensResult): string {
       const c = result.claims[0];
       return c ? (c.direction || c.verdict) : '';
     }
-    case 'translation': return result.translatedText.slice(0, 80);
     case 'eli5': return (result.claims[0]?.explanation ?? '').slice(0, 80);
     case 'session-summary': return result.summary.slice(0, 80);
   }
@@ -595,7 +587,6 @@ function extractBadge(result: LensResult): string {
     case 'logical-fallacy': return (result.claims[0]?.fallacy ?? '').slice(0, 12).toUpperCase();
     case 'stats-check': return result.claims[0]?.verdict ?? 'SUSPICIOUS';
     case 'bias': return result.claims[0]?.verdict ?? 'NEUTRAL';
-    case 'translation': return 'TRANSL.';
     case 'eli5': return 'ELI5';
     case 'session-summary': return 'SUMMARY';
   }
@@ -636,7 +627,6 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
       }
     }
     /* falls through */
-    case 'translation':
     case 'session-summary':
       return [result];
   }
@@ -658,7 +648,6 @@ export function extractQuote(result: LensResult): string {
     case 'eli5':
       return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'session-summary':
-    case 'translation':
       return result.quote ?? '';
   }
 }
