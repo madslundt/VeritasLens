@@ -1,0 +1,280 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1779262420976,
+  "projectRoot": "/Users/madslundt/Documents/veritaslens",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "solid-js",
+        "version": "1.9.3",
+        "category": "frontend"
+      },
+      {
+        "name": "vite",
+        "version": "6.0.7",
+        "category": "build"
+      },
+      {
+        "name": "vitest",
+        "version": "3.0.2",
+        "category": "testing"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": "npm test",
+    "lintCommand": "npm run lint",
+    "devCommand": "npm run dev",
+    "scripts": {
+      "dev": "vite",
+      "build": "tsc --noEmit && vite build",
+      "preview": "vite preview",
+      "test": "vitest run",
+      "test:watch": "vitest",
+      "lint": "tsc --noEmit",
+      "pack": "evenhub pack app.json ./dist -o veritaslens.ehpk --check",
+      "qr": "evenhub qr",
+      "sim": "evenhub-simulator http://localhost:5173"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": "*.test.ts",
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "docs",
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 9,
+      "lastAccessed": 1779262420957,
+      "keyFiles": [
+        "glasses_20260519200435.png",
+        "glasses_20260519200441.png",
+        "glasses_20260519200553.png",
+        "glasses_20260519200603.png",
+        "icon-24.png"
+      ]
+    },
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 1,
+      "lastAccessed": 1779262420957,
+      "keyFiles": [
+        "index.html"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 0,
+      "lastAccessed": 1779262420959,
+      "keyFiles": []
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 4,
+      "lastAccessed": 1779262420964,
+      "keyFiles": [
+        "App.tsx",
+        "main.css",
+        "main.tsx",
+        "types.ts"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 5,
+      "lastAccessed": 1779262420967,
+      "keyFiles": [
+        "audioBuffer.test.ts",
+        "gemini.test.ts",
+        "hud.test.ts",
+        "personas.test.ts",
+        "store.test.ts"
+      ]
+    },
+    "dist/assets": {
+      "path": "dist/assets",
+      "purpose": "Static assets",
+      "fileCount": 2,
+      "lastAccessed": 1779262420968,
+      "keyFiles": [
+        "index-DvwTK9HA.js",
+        "index-F-dDSso4.css"
+      ]
+    },
+    "src/views": {
+      "path": "src/views",
+      "purpose": "View templates",
+      "fileCount": 1,
+      "lastAccessed": 1779262420970,
+      "keyFiles": [
+        "SettingsView.tsx"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/runtime/hud.ts",
+      "accessCount": 85,
+      "lastAccessed": 1779283175429,
+      "type": "file"
+    },
+    {
+      "path": "src/runtime/lifecycle.ts",
+      "accessCount": 58,
+      "lastAccessed": 1779295017075,
+      "type": "file"
+    },
+    {
+      "path": "tests/hud.test.ts",
+      "accessCount": 37,
+      "lastAccessed": 1779283256043,
+      "type": "file"
+    },
+    {
+      "path": "src/views/SettingsView.tsx",
+      "accessCount": 17,
+      "lastAccessed": 1779294950419,
+      "type": "file"
+    },
+    {
+      "path": "src/state/store.ts",
+      "accessCount": 15,
+      "lastAccessed": 1779281457131,
+      "type": "file"
+    },
+    {
+      "path": "src/types.ts",
+      "accessCount": 10,
+      "lastAccessed": 1779294729764,
+      "type": "file"
+    },
+    {
+      "path": "package.json",
+      "accessCount": 7,
+      "lastAccessed": 1779294493222,
+      "type": "file"
+    },
+    {
+      "path": "src/llm/gemini.ts",
+      "accessCount": 6,
+      "lastAccessed": 1779283049018,
+      "type": "file"
+    },
+    {
+      "path": "app.json",
+      "accessCount": 6,
+      "lastAccessed": 1779283534054,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 3,
+      "lastAccessed": 1779267401679,
+      "type": "file"
+    },
+    {
+      "path": "CHANGELOG.md",
+      "accessCount": 3,
+      "lastAccessed": 1779283799823,
+      "type": "file"
+    },
+    {
+      "path": "src/personas/index.ts",
+      "accessCount": 3,
+      "lastAccessed": 1779284121477,
+      "type": "file"
+    },
+    {
+      "path": "src/runtime/audioBuffer.ts",
+      "accessCount": 2,
+      "lastAccessed": 1779281273911,
+      "type": "file"
+    },
+    {
+      "path": "src/personas/auto.ts",
+      "accessCount": 2,
+      "lastAccessed": 1779281280019,
+      "type": "file"
+    },
+    {
+      "path": "tests/gemini.test.ts",
+      "accessCount": 2,
+      "lastAccessed": 1779283104056,
+      "type": "file"
+    },
+    {
+      "path": "src/runtime/bridge.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779262591209,
+      "type": "file"
+    },
+    {
+      "path": "src/personas/factChecker.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779281276809,
+      "type": "file"
+    },
+    {
+      "path": "src/personas/_utils.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779281283413,
+      "type": "file"
+    },
+    {
+      "path": "src/personas/eli5.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779281283664,
+      "type": "file"
+    },
+    {
+      "path": "src/personas/trivia.ts",
+      "accessCount": 1,
+      "lastAccessed": 1779281283754,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

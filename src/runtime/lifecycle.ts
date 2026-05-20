@@ -205,23 +205,27 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 }
 
 async function handleActiveGesture(g: Gesture): Promise<void> {
-  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    // For multi-claim results, single-tap walks forward through the claims.
-    // On the last claim it falls through to opening the menu (and for
-    // single-claim or answer-shaped results it goes straight to the menu).
-    if (await tryAdvanceActiveClaim()) return;
-    await showMenuPage();
-    return;
-  }
-  // Discreet layouts use a list container as the event sink, so vertical swipes
-  // arrive here as listEvent SCROLL_TOP/BOTTOM rather than via the textEvent
-  // path that the baseline text-container sink uses. Forward them to the same
-  // reason-pagination logic so a long reason is still scrollable in discreet-result.
+  // Scrolls (vertical swipes) come through as SCROLL_TOP / SCROLL_BOTTOM
+  // from either the baseline text sink (textEvent path) or the discreet list
+  // sink (listEvent → here). Anything else — explicit CLICK_EVENT, the
+  // normalized `undefined`, or any other list-selection event the discreet
+  // sink might emit when the user taps — is treated as a tap. The discreet
+  // list sink emits a tap event whose `eventType` doesn't always match the
+  // baseline sysEvent CLICK_EVENT, so the previous narrow check was missing
+  // taps in discreet mode and tap-to-walk-claims silently no-op'd.
   if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
     await scrollActiveReason(-1);
-  } else if (g.type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    await scrollActiveReason(1);
+    return;
   }
+  if (g.type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+    await scrollActiveReason(1);
+    return;
+  }
+  // For multi-claim results, single-tap walks forward through the claims.
+  // On the last claim it falls through to opening the menu (and for
+  // single-claim or answer-shaped results it goes straight to the menu).
+  if (await tryAdvanceActiveClaim()) return;
+  await showMenuPage();
 }
 
 async function handleMenuGesture(g: Gesture): Promise<void> {

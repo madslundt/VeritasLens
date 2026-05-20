@@ -59,63 +59,58 @@ function badgeClass(badge: string): string {
   return '';
 }
 
+// The expanded history row renders `entry.question` above the <pre>, so this
+// formatter intentionally omits both the field that `extractQuestion()` pulled
+// from each result variant and the verbatim quote (which is essentially the
+// same utterance) — otherwise the question text would appear twice.
 function formatResultText(result: LensResult): string {
   switch (result.type) {
     case 'fact-check': {
       return result.claims.map((c, i) => {
         const icon = c.verdict === 'TRUE' ? '✓' : c.verdict === 'FALSE' ? '✗' : '?';
         const head = result.claims.length > 1 ? `Claim ${i + 1}/${result.claims.length}\n` : '';
-        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
-        return `${head}${quoteLine}${icon} ${c.verdict} — ${c.claim}\n${c.reason}`;
+        return `${head}${icon} ${c.verdict}\n${c.reason}`;
       }).join('\n\n');
     }
     case 'trivia': {
       return result.claims.map((c, i) => {
         const head = result.claims.length > 1 ? `Q${i + 1}/${result.claims.length}\n` : '';
-        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
-        return `${head}${quoteLine}${c.question}\n${c.answer}\n${c.description}`;
+        return `${head}${c.answer}\n${c.description}`;
       }).join('\n\n');
     }
     case 'logical-fallacy': {
       return result.claims.map((c, i) => {
         const head = result.claims.length > 1 ? `Fallacy ${i + 1}/${result.claims.length}\n` : '';
-        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
-        return `${head}${quoteLine}${c.fallacy}\n${c.explanation}`;
+        return `${head}${c.explanation}`;
       }).join('\n\n');
     }
     case 'stats-check': {
       return result.claims.map((c, i) => {
         const icon = c.verdict === 'PLAUSIBLE' ? '✓' : '✗';
         const head = result.claims.length > 1 ? `Stat ${i + 1}/${result.claims.length}\n` : '';
-        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
-        return `${head}${quoteLine}${icon} ${c.verdict} — ${c.stat}\n${c.reason}`;
+        return `${head}${icon} ${c.verdict}\n${c.reason}`;
       }).join('\n\n');
     }
     case 'bias': {
       return result.claims.map((c, i) => {
         const icon = c.verdict === 'NEUTRAL' ? '✓' : '✗';
         const head = result.claims.length > 1 ? `Claim ${i + 1}/${result.claims.length}\n` : '';
-        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
-        const firstLine = c.direction
-          ? `${icon} ${c.verdict} · ${c.direction}`
-          : `${icon} ${c.verdict}`;
-        return `${head}${quoteLine}${firstLine}\n${c.reason}`;
+        const firstLine = c.direction ? `${icon} ${c.verdict}` : '';
+        const reasonBlock = firstLine ? `${firstLine}\n${c.reason}` : c.reason;
+        return `${head}${reasonBlock}`;
       }).join('\n\n');
     }
     case 'translation': {
-      const q = result.quote ? `“${result.quote}”\n\n` : '';
-      return `${q}${result.translatedText}`;
+      return result.translatedText;
     }
     case 'eli5': {
       return result.claims.map((c, i) => {
         const head = result.claims.length > 1 ? `${i + 1}/${result.claims.length}\n` : '';
-        const quoteLine = c.quote ? `“${c.quote}”\n` : '';
-        return `${head}${quoteLine}${c.explanation}`;
+        return `${head}${c.explanation}`;
       }).join('\n\n');
     }
     case 'session-summary': {
-      const q = result.quote ? `“${result.quote}”\n\n` : '';
-      return `${q}${result.summary}`;
+      return result.summary;
     }
   }
 }
