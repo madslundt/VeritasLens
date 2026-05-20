@@ -47,9 +47,9 @@ describe('_utils', () => {
     expect(coerceQuote(42)).toBe('');
   });
 
-  it('readClaimsArray caps at 2 items even when the LLM returns more', () => {
-    const raw = { claims: [{ a: 1 }, { a: 2 }, { a: 3 }] };
-    expect(readClaimsArray(raw)).toHaveLength(2);
+  it('readClaimsArray caps at MAX_CLAIMS (5) items even when the LLM returns more', () => {
+    const raw = { claims: [{ a: 1 }, { a: 2 }, { a: 3 }, { a: 4 }, { a: 5 }, { a: 6 }, { a: 7 }] };
+    expect(readClaimsArray(raw)).toHaveLength(5);
   });
 
   it('readClaimsArray returns [] when claims is missing or wrong type', () => {
@@ -85,15 +85,18 @@ describe('fact-checker', () => {
     }
   });
 
-  it('caps claims at 2 even if more are returned', () => {
+  it('caps claims at MAX_CLAIMS (5) even if more are returned', () => {
     const result = parseFactCheckerResponse(JSON.stringify({
       claims: [
         { quote: 'q1', verdict: 'TRUE', claim: 'c1', reason: 'r1' },
         { quote: 'q2', verdict: 'FALSE', claim: 'c2', reason: 'r2' },
         { quote: 'q3', verdict: 'TRUE', claim: 'c3', reason: 'r3' },
+        { quote: 'q4', verdict: 'FALSE', claim: 'c4', reason: 'r4' },
+        { quote: 'q5', verdict: 'TRUE', claim: 'c5', reason: 'r5' },
+        { quote: 'q6', verdict: 'FALSE', claim: 'c6', reason: 'r6' },
       ],
     }));
-    if (result.type === 'fact-check') expect(result.claims).toHaveLength(2);
+    if (result.type === 'fact-check') expect(result.claims).toHaveLength(5);
   });
 
   it('falls back to UNVERIFIED for unknown verdict', () => {

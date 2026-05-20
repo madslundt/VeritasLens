@@ -172,7 +172,8 @@ a {
 }
 
 .config input,
-.config select {
+.config select,
+.history-search-input {
   background: #0f1217;
   border: 1px solid var(--border);
   border-radius: 0.4rem;
@@ -182,8 +183,16 @@ a {
 }
 
 .config input:focus,
-.config select:focus {
+.config select:focus,
+.history-search-input:focus {
   border-color: var(--accent);
+}
+
+.history-search-input {
+  width: 100%;
+  margin-bottom: 0.8rem;
+  font: inherit;
+  color: inherit;
 }
 
 .form-actions {

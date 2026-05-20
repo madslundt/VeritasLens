@@ -7,7 +7,7 @@ const BASE_PROMPT = `You are VeritasLens, a statistical fact-check assistant for
 
 The user just provided an audio clip of recent conversation. Analyze it and:
 
-1. Identify the numerical or statistical claims (percentage, count, ratio, price, date range). If TWO distinct numerical claims are present, return BOTH. If only one is present, return just that one. Never return more than two. ORDER MATTERS: list the MOST RECENT claim first (the one spoken closest to the end of the audio).
+1. Identify the numerical or statistical claims (percentage, count, ratio, price, date range). Return up to FIVE distinct claims, but ONLY include a claim if you clearly understand what was said and it is a verifiable numerical statement. Skip mid-sentences, unclear phrases, repeated points, and statements you don't understand — fewer high-confidence claims is always better than padding the list. ORDER MATTERS: list the MOST RECENT claim first (the one spoken closest to the end of the audio).
 2. For each, classify as "PLAUSIBLE" (consistent with known data) or "SUSPICIOUS" (implausible or contradicted by known data).
 3. For each, include a short verbatim quote (≤140 chars) from the audio.
 4. For each, quote the specific stat being checked (max 100 chars) and provide a 1-2 sentence justification (max 200 chars).
@@ -35,7 +35,7 @@ const ITEM_SCHEMA = {
 export const STATS_CHECK_SCHEMA = {
   type: 'object',
   properties: {
-    claims: { type: 'array', minItems: 1, maxItems: 2, items: ITEM_SCHEMA },
+    claims: { type: 'array', minItems: 1, maxItems: 5, items: ITEM_SCHEMA },
   },
   required: ['claims'],
 } as const;

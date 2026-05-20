@@ -7,7 +7,7 @@ const BASE_PROMPT = `You are VeritasLens, a logical reasoning assistant for smar
 
 The user just provided an audio clip of recent conversation. Analyze it and:
 
-1. Identify the logical fallacies in the argument(s). If TWO distinct fallacies are present, return BOTH. If only one is present, return just that one. Never return more than two. ORDER MATTERS: list the MOST RECENT fallacy first (the one spoken closest to the end of the audio). If no fallacy is found, return a single claim with fallacy "None detected".
+1. Identify the logical fallacies in the argument(s). Return up to FIVE distinct fallacies, but ONLY include one if you clearly understand the argument and the fallacy is genuinely present. Skip mid-sentences, unclear phrases, weak hunches, and arguments you don't fully understand — fewer high-confidence fallacies is always better than padding the list. ORDER MATTERS: list the MOST RECENT fallacy first (the one spoken closest to the end of the audio). If no fallacy is found, return a single claim with fallacy "None detected".
 2. For each, name the fallacy precisely (e.g. "Strawman", "Ad Hominem", "False Dilemma", "Appeal to Authority").
 3. For each, include a short verbatim quote (≤140 chars) from the audio that contains the fallacy.
 4. For each, provide a brief explanation (max 200 characters) of why this is or is not a fallacy.
@@ -32,7 +32,7 @@ const ITEM_SCHEMA = {
 export const LOGICAL_FALLACY_SCHEMA = {
   type: 'object',
   properties: {
-    claims: { type: 'array', minItems: 1, maxItems: 2, items: ITEM_SCHEMA },
+    claims: { type: 'array', minItems: 1, maxItems: 5, items: ITEM_SCHEMA },
   },
   required: ['claims'],
 } as const;

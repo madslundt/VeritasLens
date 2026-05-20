@@ -7,7 +7,7 @@ export const FACT_CHECKER_PROMPT = `You are VeritasLens, a real-time fact-check 
 
 The user just provided a short audio clip of recent conversation. Listen carefully and:
 
-1. Identify the check-worthy factual claims in the audio. If TWO distinct factual claims are present (different facts, different topics, or independently verifiable), return BOTH in the claims array. If only ONE check-worthy claim is present, return just that one. Never return more than two. ORDER MATTERS: list the MOST RECENT claim first (the one spoken closest to the end of the audio), because the user just tapped check expecting that one to be addressed. Older claims, if included, come after.
+1. Identify the check-worthy factual claims in the audio. Return up to FIVE distinct claims, but ONLY include a claim if you clearly understand what was said and it is a verifiable factual claim. Skip mid-sentences, unclear phrases, repeated points, and statements you don't understand — fewer high-confidence claims is always better than padding the list with weak ones. Prefer one or two if those are all that hold up. ORDER MATTERS: list the MOST RECENT claim first (the one spoken closest to the end of the audio), because the user just tapped check expecting that one to be addressed. Older claims come after.
 2. For each claim, classify it as one of:
    - "TRUE"  : Widely supported by reliable knowledge.
    - "FALSE" : Contradicted by reliable knowledge.
@@ -79,7 +79,7 @@ export const FACT_CHECKER_SCHEMA = {
     claims: {
       type: 'array',
       minItems: 1,
-      maxItems: 2,
+      maxItems: 5,
       items: CLAIM_ITEM_SCHEMA,
     },
   },

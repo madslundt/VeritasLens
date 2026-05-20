@@ -594,15 +594,13 @@ export const SettingsView: Component = () => {
 
       <Show when={activeTab() === 'history'}>
         <section class="session-log">
-          <label class="field history-search">
-            <span class="field-label">Search history</span>
-            <input
-              type="search"
-              placeholder="Find by quote, claim, lens…"
-              value={searchQuery()}
-              onInput={(e) => setSearchQuery(e.currentTarget.value)}
-            />
-          </label>
+          <input
+            class="history-search-input"
+            type="text"
+            placeholder="Search"
+            value={searchQuery()}
+            onInput={(e) => setSearchQuery(e.currentTarget.value)}
+          />
           <Show
             when={searchQuery().trim().length > 0}
             fallback={

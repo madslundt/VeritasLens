@@ -7,7 +7,7 @@ const BASE_PROMPT = `You are VeritasLens, a bias detection assistant for smart g
 
 The user just provided an audio clip of recent conversation. Analyze it and:
 
-1. Identify the biased statements in the audio. If TWO distinct biased statements are present (different topics, different bias directions, or independently loaded), return BOTH. If only one is present, return just that one. Never return more than two. ORDER MATTERS: list the MOST RECENT biased statement first (the one spoken closest to the end of the audio). If the audio is neutral, return a single claim with verdict "NEUTRAL".
+1. Identify the biased statements in the audio. Return up to FIVE distinct biased statements, but ONLY include one if you clearly understand what was said and the bias is genuinely present. Skip mid-sentences, unclear phrases, weak hunches, and statements you don't understand — fewer high-confidence calls is always better than padding the list. ORDER MATTERS: list the MOST RECENT biased statement first (the one spoken closest to the end of the audio). If the audio is neutral, return a single claim with verdict "NEUTRAL".
 2. For each, classify as "NEUTRAL" or "BIASED".
 3. For each, include a short verbatim quote (≤140 chars) from the audio.
 4. For each, describe the direction concisely (e.g. "political-left", "political-right", "emotionally-loaded", "corporate", "nationalist") — max 30 characters.
@@ -34,7 +34,7 @@ const ITEM_SCHEMA = {
 export const BIAS_DETECTOR_SCHEMA = {
   type: 'object',
   properties: {
-    claims: { type: 'array', minItems: 1, maxItems: 2, items: ITEM_SCHEMA },
+    claims: { type: 'array', minItems: 1, maxItems: 5, items: ITEM_SCHEMA },
   },
   required: ['claims'],
 } as const;
