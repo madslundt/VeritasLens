@@ -667,13 +667,17 @@ function makeFullScreenEventSink(): TextContainerProperty {
  * item-cursor leaking next to the recording dot.
  */
 function makeInvisibleListSink(): ListContainerProperty {
+  // itemCount=2 (rather than 1) so the SDK has somewhere to "scroll to" and
+  // actually fires SCROLL_TOP / SCROLL_BOTTOM listEvents when the user swipes
+  // vertically. With a single-item list the SDK suppresses scroll events,
+  // which broke multi-claim swipe in discreet mode.
   return new ListContainerProperty({
     containerID: CONTAINER.activeList, containerName: NAME.activeList,
     xPosition: SCREEN_W - 2, yPosition: SCREEN_H - 2, width: 2, height: 2,
     borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
-      itemCount: 1, itemWidth: 2, isItemSelectBorderEn: 0,
-      itemName: [''],
+      itemCount: 2, itemWidth: 2, isItemSelectBorderEn: 0,
+      itemName: ['', ''],
     }),
     isEventCapture: 1,
   });
