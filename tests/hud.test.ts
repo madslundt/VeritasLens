@@ -587,7 +587,7 @@ describe('multi-claim active page', () => {
     return undefined;
   }
 
-  it('renders the 1/2 indicator on the verdict line when 2 claims are present', async () => {
+  it('renders the 1/2 indicator on the claim line when 2 claims are present', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -599,8 +599,8 @@ describe('multi-claim active page', () => {
         { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
       ],
     });
-    expect(lastUpgradeByName('vl-verdict')).toBe('1/2 · + TRUE');
-    expect(lastUpgradeByName('vl-claim')).toBe('C1');
+    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · C1');
+    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
     expect(lastUpgradeByName('vl-reason')).toBe('R1');
   });
 
@@ -613,6 +613,7 @@ describe('multi-claim active page', () => {
       type: 'fact-check',
       claims: [{ quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' }],
     });
+    expect(lastUpgradeByName('vl-claim')).toBe('C1');
     expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
   });
 
@@ -631,14 +632,14 @@ describe('multi-claim active page', () => {
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-verdict')).toBe('2/2 · - FALSE');
-    expect(lastUpgradeByName('vl-claim')).toBe('C2');
+    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
+    expect(lastUpgradeByName('vl-verdict')).toBe('- FALSE');
     expect(lastUpgradeByName('vl-reason')).toBe('R2');
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(-1);
-    expect(lastUpgradeByName('vl-verdict')).toBe('1/2 · + TRUE');
-    expect(lastUpgradeByName('vl-claim')).toBe('C1');
+    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · C1');
+    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
   });
 
   it('scrollActiveReason past the last claim falls back to reason pagination', async () => {

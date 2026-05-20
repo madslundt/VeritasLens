@@ -464,24 +464,19 @@ async function runAnalysis(): Promise<void> {
     });
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
-    // Log the raw response so the settings WebView's debug log can show what
-    // Gemini actually returned — useful for diagnosing whether multi-claim
-    // schemas are being honoured.
-    pushDebugEvent({
-      label: `raw:${analysisPersona.id}`,
-      detail: rawText.length > 1200 ? `${rawText.slice(0, 1200)}…` : rawText,
-    });
     stopSpinner();
     setStateResult(result);
-    pushHistoryEntry({
-      sessionId: currentSessionId,
-      lensId: analysisPersona.id,
-      lensName: analysisPersona.name,
-      question: extractQuestion(result),
-      badge: extractBadge(result),
-      quote: extractQuote(result),
-      result,
-    }, (k, v) => getBridge().setLocalStorage(k, v));
+    for (const single of splitResultByClaim(result)) {
+      pushHistoryEntry({
+        sessionId: currentSessionId,
+        lensId: analysisPersona.id,
+        lensName: analysisPersona.name,
+        question: extractQuestion(single),
+        badge: extractBadge(single),
+        quote: extractQuote(single),
+        result: single,
+      }, (k, v) => getBridge().setLocalStorage(k, v));
+    }
     await setLensResult(result);
     await setStatus('displaying');
     await setActiveHint(ACTIVE_HINT_DEFAULT);
@@ -539,15 +534,17 @@ async function runAutoSummary(): Promise<void> {
       model: settings().geminiModel,
     });
     const result = persona.parse(rawText);
-    pushHistoryEntry({
-      sessionId: currentSessionId,
-      lensId: persona.id,
-      lensName: persona.name,
-      question: extractQuestion(result),
-      badge: 'AUTO',
-      quote: extractQuote(result),
-      result,
-    }, (k, v) => getBridge().setLocalStorage(k, v));
+    for (const single of splitResultByClaim(result)) {
+      pushHistoryEntry({
+        sessionId: currentSessionId,
+        lensId: persona.id,
+        lensName: persona.name,
+        question: extractQuestion(single),
+        badge: 'AUTO',
+        quote: extractQuote(single),
+        result: single,
+      }, (k, v) => getBridge().setLocalStorage(k, v));
+    }
   } catch (err) {
     // Auto-summary is best-effort, but failures should be observable in the
     // debug log so the user can see why the timer is firing without producing
@@ -585,6 +582,43 @@ function extractBadge(result: LensResult): string {
     case 'translation': return 'TRANSL.';
     case 'eli5': return 'ELI5';
     case 'session-summary': return 'SUMMARY';
+  }
+}
+
+/**
+ * Splits a multi-claim result into individual single-claim variants so each
+ * claim becomes its own history entry. Answer-shaped results (and already-
+ * single-claim claim-shaped results) pass through unchanged. The HUD's
+ * active page still uses the original multi-claim result — splitting happens
+ * only at history-storage time.
+ */
+export function splitResultByClaim(result: LensResult): LensResult[] {
+  switch (result.type) {
+    case 'fact-check':
+    case 'logical-fallacy':
+    case 'stats-check':
+    case 'bias': {
+      if (result.claims.length <= 1) return [result];
+      // Type-narrowing per variant is needed because each `claims` array is
+      // typed against its own per-claim shape; we rebuild the same variant
+      // per claim instead of using a generic spread.
+      switch (result.type) {
+        case 'fact-check':
+          return result.claims.map((c) => ({ type: 'fact-check', claims: [c], autoSelected: result.autoSelected }));
+        case 'stats-check':
+          return result.claims.map((c) => ({ type: 'stats-check', claims: [c], autoSelected: result.autoSelected }));
+        case 'logical-fallacy':
+          return result.claims.map((c) => ({ type: 'logical-fallacy', claims: [c], autoSelected: result.autoSelected }));
+        case 'bias':
+          return result.claims.map((c) => ({ type: 'bias', claims: [c], autoSelected: result.autoSelected }));
+      }
+    }
+    /* falls through */
+    case 'trivia':
+    case 'translation':
+    case 'eli5':
+    case 'session-summary':
+      return [result];
   }
 }
 

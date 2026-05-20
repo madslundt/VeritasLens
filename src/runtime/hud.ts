@@ -400,11 +400,12 @@ function claimCount(result: LensResult): number {
 function formatLensResult(result: LensResult, claimIdx: number = 0): { top: string; middle: string; bottom: string } {
   const parts = formatLensResultBase(result, claimIdx);
   const count = claimCount(result);
-  // Inline 1/2 · 2/2 indicator on the middle (verdict) line for multi-claim
-  // results. Keeps the discreet HUD density unchanged — no extra container.
+  // Inline 1/2 · 2/2 indicator on the top (claim) line for multi-claim
+  // results, so it sits next to the question rather than the verdict.
+  // Keeps the discreet HUD density unchanged — no extra container.
   if (count > 1) {
     const tag = `${claimIdx + 1}/${count}`;
-    parts.middle = parts.middle ? `${tag} · ${parts.middle}` : tag;
+    parts.top = parts.top ? `${tag} · ${parts.top}` : tag;
   }
   if (result.autoSelected) {
     return { ...parts, top: parts.top ? `Auto · ${parts.top}` : 'Auto' };

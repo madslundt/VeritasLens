@@ -2,8 +2,6 @@
 import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component } from 'solid-js';
 import {
   availableModels,
-  clearDebugEvents,
-  debugEvents,
   deviceStatus,
   modelsLoading,
   saveAutoSummaryEnabled,
@@ -617,33 +615,6 @@ export const SettingsView: Component = () => {
           </Show>
         </section>
 
-        <Show when={debugEvents().length > 0}>
-          <section class="debug-log">
-            <div class="field-header">
-              <span class="field-label">Debug log</span>
-              <button type="button" class="link-button" onClick={() => clearDebugEvents()}>
-                Clear
-              </button>
-            </div>
-            <p class="field-hint">
-              Raw Gemini responses for the last few analyses. Use this to confirm whether multi-claim
-              schemas are being honoured.
-            </p>
-            <ul class="debug-list">
-              <For each={debugEvents()}>
-                {(e) => (
-                  <li class="debug-row">
-                    <div class="debug-row-head">
-                      <span class="debug-label">{e.label}</span>
-                      <span class="debug-time">{formatTime(e.ts)}</span>
-                    </div>
-                    <pre class="debug-detail">{e.detail}</pre>
-                  </li>
-                )}
-              </For>
-            </ul>
-          </section>
-        </Show>
       </Show>
     </main>
   );
