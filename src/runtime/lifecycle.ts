@@ -6,7 +6,7 @@ import {
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   currentHudPage,
-  cycleActiveClaim,
+  tryAdvanceActiveClaim,
   getActiveLayout,
   hasPendingActiveResult,
   menuOptionAtIndex,
@@ -206,6 +206,10 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
 
 async function handleActiveGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    // For multi-claim results, single-tap walks forward through the claims.
+    // On the last claim it falls through to opening the menu (and for
+    // single-claim or answer-shaped results it goes straight to the menu).
+    if (await tryAdvanceActiveClaim()) return;
     await showMenuPage();
     return;
   }
@@ -226,7 +230,6 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
     const option = menuOptionAtIndex(lastMenuIndex);
     switch (option) {
       case 'back': await handleBackMenuOption(); break;
-      case 'next-claim': await restoreActivePage(); await cycleActiveClaim(); lastMenuIndex = 0; break;
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
       case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
       case 'exit': await leaveActiveSession(); break;

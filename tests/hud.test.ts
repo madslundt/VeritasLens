@@ -116,12 +116,9 @@ describe('personaAtIndex', () => {
 });
 
 describe('menuOptionAtIndex', () => {
-  it('returns each displayed menu option id by index (single-claim default)', () => {
-    // Without a multi-claim result on screen, "Next claim ↻" is hidden, so
-    // the displayed list is [Back, Check, History, Exit].
-    const displayed = ['back', 'fact-check', 'history', 'exit'];
-    for (let i = 0; i < displayed.length; i++) {
-      expect(menuOptionAtIndex(i)).toBe(displayed[i]);
+  it('returns each menu option id by index', () => {
+    for (let i = 0; i < MENU_OPTIONS.length; i++) {
+      expect(menuOptionAtIndex(i)).toBe(MENU_OPTIONS[i]!.id);
     }
   });
 
@@ -129,21 +126,6 @@ describe('menuOptionAtIndex', () => {
     expect(menuOptionAtIndex(99)).toBe('back');
     expect(menuOptionAtIndex(undefined)).toBe('back');
     expect(menuOptionAtIndex(-1)).toBe('back');
-  });
-
-  it('surfaces "next-claim" at index 1 when a multi-claim result is on screen', async () => {
-    await bootstrapHud('picker');
-    await showActivePage(getPersona('fact-checker')!);
-    await setLensResult({
-      type: 'fact-check',
-      claims: [
-        { quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' },
-        { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
-      ],
-    });
-    expect(menuOptionAtIndex(0)).toBe('back');
-    expect(menuOptionAtIndex(1)).toBe('next-claim');
-    expect(menuOptionAtIndex(2)).toBe('fact-check');
   });
 });
 
@@ -658,6 +640,42 @@ describe('multi-claim active page', () => {
     await scrollActiveReason(-1);
     expect(lastUpgradeByName('vl-claim')).toBe('1/2 · C1');
     expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
+  });
+
+  it('tryAdvanceActiveClaim walks forward then returns false on the last claim', async () => {
+    const { tryAdvanceActiveClaim } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    await setLensResult({
+      type: 'fact-check',
+      claims: [
+        { quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' },
+        { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
+      ],
+    });
+
+    bridge.textContainerUpgrade.mockClear();
+    expect(await tryAdvanceActiveClaim()).toBe(true);
+    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
+    expect(lastUpgradeByName('vl-verdict')).toBe('- FALSE');
+
+    // On the last claim it should refuse and let the caller open the menu.
+    bridge.textContainerUpgrade.mockClear();
+    expect(await tryAdvanceActiveClaim()).toBe(false);
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('tryAdvanceActiveClaim returns false for single-claim results', async () => {
+    const { tryAdvanceActiveClaim } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' }],
+    });
+
+    expect(await tryAdvanceActiveClaim()).toBe(false);
   });
 
   it('scrollActiveReason past the last claim falls back to reason pagination', async () => {

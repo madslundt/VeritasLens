@@ -97,21 +97,11 @@ export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
 
 export const MENU_OPTIONS = [
   { id: 'back', label: '← Back' },
-  { id: 'next-claim', label: 'Next claim ↻' },
   { id: 'fact-check', label: 'Check' },
   { id: 'history', label: 'History' },
   { id: 'exit', label: 'Exit' },
 ] as const;
 export type MenuOptionId = (typeof MENU_OPTIONS)[number]['id'];
-
-/**
- * The menu options actually rendered right now. "Next claim ↻" is hidden
- * unless a multi-claim result is on screen — it would be a no-op otherwise.
- */
-export function getDisplayedMenuOptions(): readonly (typeof MENU_OPTIONS)[number][] {
-  const multi = !!currentActiveResult && claimCount(currentActiveResult) > 1;
-  return MENU_OPTIONS.filter((o) => o.id !== 'next-claim' || multi);
-}
 
 const DETAIL_PAGE_CHARS = 200;
 const ACTIVE_PAGE_CHARS = 200;
@@ -165,11 +155,10 @@ export function personaAtIndex(idx: number | undefined | null): Persona | null {
   return list[safe] ?? list[0] ?? null;
 }
 
-/** Map list index → menu option id, against the *displayed* options. */
+/** Map list index → menu option id. */
 export function menuOptionAtIndex(idx: number | undefined | null): MenuOptionId {
-  const opts = getDisplayedMenuOptions();
   const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
-  return opts[safe]?.id ?? 'back';
+  return MENU_OPTIONS[safe]?.id ?? 'back';
 }
 
 export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'picker'): Promise<void> {
@@ -327,16 +316,18 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
 }
 
 /**
- * Cycle the active page to the next claim (wraps around). Used by the
- * "Next claim ↻" menu option as a tap-driven alternative to swipe — the
- * swipe path depends on hardware-level scroll events which don't always
- * fire on the discreet event sink.
+ * Try to advance the active page to the next claim. Returns true iff a
+ * swap actually happened. Returns false on the last claim, on single-claim
+ * results, and when off the active page — letting the caller fall back to
+ * the default tap action (open the menu).
  */
-export async function cycleActiveClaim(): Promise<void> {
-  if (currentPage !== 'active' || !currentActiveResult) return;
+export async function tryAdvanceActiveClaim(): Promise<boolean> {
+  if (currentPage !== 'active' || !currentActiveResult) return false;
   const total = claimCount(currentActiveResult);
-  if (total <= 1) return;
-  activeClaimIndex = (activeClaimIndex + 1) % total;
+  if (total <= 1) return false;
+  const next = activeClaimIndex + 1;
+  if (next >= total) return false;
+  activeClaimIndex = next;
   const { top, middle, bottom } = formatLensResult(currentActiveResult, activeClaimIndex);
   activeReasonFull = bottom;
   activeReasonOffset = 0;
@@ -345,6 +336,7 @@ export async function cycleActiveClaim(): Promise<void> {
     upgradeText(CONTAINER.verdict, NAME.verdict, middle),
     upgradeText(CONTAINER.reason, NAME.reason, bottom.slice(0, ACTIVE_PAGE_CHARS)),
   ]);
+  return true;
 }
 
 export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
@@ -574,13 +566,12 @@ function buildMenuPage(): RebuildPageContainer {
     borderWidth: 0, paddingLength: 0,
     content: formatClockTime(), isEventCapture: 0,
   });
-  const displayed = getDisplayedMenuOptions();
   const list = new ListContainerProperty({
     containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
     width: SCREEN_W - 32, height: SCREEN_H - 48, borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
-      itemCount: displayed.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
-      itemName: displayed.map((o) => o.label),
+      itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: MENU_OPTIONS.map((o) => o.label),
     }),
     isEventCapture: 1,
   });
