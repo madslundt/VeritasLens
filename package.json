@@ -11,7 +11,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
-    "pack": "evenhub pack app.json ./dist -o veritaslens.ehpk --check",
+    "pack": "evenhub pack app.json ./dist -o veritaslens.ehpk",
     "qr": "evenhub qr",
     "sim": "evenhub-simulator http://localhost:5173"
   },
