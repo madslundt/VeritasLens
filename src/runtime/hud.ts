@@ -107,6 +107,8 @@ const DETAIL_PAGE_CHARS = 200;
 const ACTIVE_PAGE_CHARS = 200;
 let detailReasonFull = '';
 let detailReasonOffset = 0;
+/** Index into cachedHistoryEntries of the entry currently shown on history-detail. */
+let historyDetailIndex = -1;
 let activeReasonFull = '';
 let activeReasonOffset = 0;
 /**
@@ -226,6 +228,16 @@ export async function showHistoryListPage(entries: HistoryEntry[]): Promise<void
 
 export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showHistoryDetailPage().');
+  // Remember where this entry sits in the cached list so scrollHistoryDetail
+  // can walk to its neighbours. Falls back to a one-element list if the
+  // entry isn't in the cache (defensive).
+  const cached = cachedHistoryEntries.indexOf(entry);
+  if (cached >= 0) {
+    historyDetailIndex = cached;
+  } else {
+    cachedHistoryEntries = [entry];
+    historyDetailIndex = 0;
+  }
   detailReasonFull = formatLensResult(entry.result).bottom;
   detailReasonOffset = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry));
@@ -235,6 +247,20 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
 
 export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
   if (currentPage !== 'history-detail') return;
+  // Mirror the multi-claim active-page pattern: swipe walks between entries
+  // first (most-recent-first ordering, so scroll-down advances to an older
+  // entry). When you're already at the first/last entry, fall through to
+  // reason pagination so a long single reason is still scrollable.
+  const nextIdx = historyDetailIndex + dir;
+  if (nextIdx >= 0 && nextIdx < cachedHistoryEntries.length) {
+    historyDetailIndex = nextIdx;
+    const entry = cachedHistoryEntries[nextIdx]!;
+    detailReasonFull = formatLensResult(entry.result).bottom;
+    detailReasonOffset = 0;
+    const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry));
+    if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
+    return;
+  }
   const maxOffset = Math.max(0, detailReasonFull.length - DETAIL_PAGE_CHARS);
   const newOffset = Math.max(0, Math.min(maxOffset, detailReasonOffset + dir * DETAIL_PAGE_CHARS));
   if (newOffset === detailReasonOffset) return;
@@ -709,11 +735,16 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
 
 function buildHistoryDetailPage(entry: HistoryEntry): RebuildPageContainer {
   const { top, middle } = formatLensResult(entry.result);
+  const total = cachedHistoryEntries.length;
+  // X/Y position indicator across the current session's entries — only shown
+  // when there's more than one, so a single-entry session doesn't get the
+  // chrome.
+  const idxPrefix = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total} · ` : '';
   const reasonContent = detailReasonFull.slice(detailReasonOffset, detailReasonOffset + DETAIL_PAGE_CHARS);
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
     xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
-    borderWidth: 0, paddingLength: 4, content: top, isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: `${idxPrefix}${top}`, isEventCapture: 0,
   });
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,
@@ -739,6 +770,7 @@ export function resetHudSessionState(): void {
   cachedHistoryEntries = [];
   detailReasonFull = '';
   detailReasonOffset = 0;
+  historyDetailIndex = -1;
   activeReasonFull = '';
   activeReasonOffset = 0;
   activeClaimIndex = 0;
