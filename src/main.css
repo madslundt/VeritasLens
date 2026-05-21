@@ -629,20 +629,6 @@ button:disabled {
   margin-top: 0.15rem;
 }
 
-/* Inline chip row for the Role picker. Reuses .lens-tag styling for the
-   chips themselves; this container just lays them out below the row header. */
-.meeting-prep-role-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0.35rem 0 0.2rem;
-}
-
-.meeting-prep-role-chips .lens-tag {
-  cursor: pointer;
-  -webkit-tap-highlight-color: transparent;
-}
-
 /* Soft accent "+ Add" pill — feels native without competing with primary CTAs. */
 .meeting-prep-add {
   display: inline-flex;

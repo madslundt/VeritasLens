@@ -42,8 +42,8 @@ import {
 } from '@/personas/meetingPrep';
 import {
   activePersona,
-  meetingPrepConfig,
   meetingPrepIsConfigured,
+  meetingPrepSections,
   pushDebugEvent,
   pushHistoryEntry,
   sessionHistory,
@@ -55,7 +55,7 @@ import {
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import type { LanguageCode, LensResult, MeetingPrepPayload } from '@/types';
+import type { LanguageCode, LensResult, MeetingPrepSection } from '@/types';
 
 let running = false;
 let buffer: PcmRingBuffer | null = null;
@@ -410,14 +410,9 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
 function buildMeetingPromptWithContext(
   _persona: Persona,
   lang: LanguageCode,
-  payload: MeetingPrepPayload,
+  sections: MeetingPrepSection[],
 ): string {
-  const base = buildMeetingPrepPrompt({
-    lang,
-    sections: payload.sections,
-    goal: payload.goal,
-    role: payload.role,
-  });
+  const base = buildMeetingPrepPrompt(lang, sections);
   const recent = sessionHistory().slice(-3).map((e, i) => `${i + 1}. ${e.question}`);
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
@@ -531,9 +526,9 @@ async function runAnalysis(): Promise<void> {
     // folded into the single history entry rather than fanning out — they're
     // suggestions, not standalone facts.
     if (persona.id === MEETING_PREP_ID) {
-      const config = meetingPrepConfig();
-      const meetingPrompt = buildMeetingPromptWithContext(persona, lang, config);
-      const meetingSchema = buildMeetingPrepSchema(config.sections);
+      const sections = meetingPrepSections();
+      const meetingPrompt = buildMeetingPromptWithContext(persona, lang, sections);
+      const meetingSchema = buildMeetingPrepSchema(sections);
       const meetingContext = buildContextBlock(persona.name);
       const rawText = await callLens({
         apiKey,
@@ -544,7 +539,7 @@ async function runAnalysis(): Promise<void> {
         signal: controller.signal,
         onRetry,
       });
-      const result = parseMeetingPrepResponse(rawText, config.sections);
+      const result = parseMeetingPrepResponse(rawText, sections);
       stopSpinner();
       setStateResult(result);
       pushHistoryEntry({
