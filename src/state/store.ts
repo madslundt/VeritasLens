@@ -16,6 +16,7 @@ import {
   type HistoryEntry,
   type LanguageCode,
   type LensResult,
+  type MeetingPrepSection,
   type Settings,
 } from '@/types';
 
@@ -32,6 +33,12 @@ const HISTORY_KEY = 'veritaslens.history';
 const HISTORY_BYTE_BUDGET = 300 * 1024;
 const HISTORY_MAX_ENTRIES = 500;
 
+const MEETING_PREP_KEY = 'veritaslens.meetingPrep';
+/** Total UTF-8 byte cap for the meeting-prep payload (label+body across all sections). */
+export const MEETING_PREP_BYTE_BUDGET = 50 * 1024;
+/** Per-label character cap, applied at write time. */
+export const MEETING_PREP_LABEL_MAX = 80;
+
 export const [appMode, setAppMode] = createSignal<AppMode>('settings');
 export const [appPhase, setAppPhase] = createSignal<AppPhase>('booting');
 export const [availableModels, setAvailableModels] = createSignal<string[]>([DEFAULT_GEMINI_MODEL]);
@@ -41,6 +48,7 @@ export const [lensResult, setLensResult] = createSignal<LensResult | null>(null)
 export const [deviceStatus, setDeviceStatus] = createSignal<DeviceStatus | null>(null);
 export const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
 export const [sessionHistory, setSessionHistory] = createSignal<HistoryEntry[]>([]);
+export const [meetingPrepSections, setMeetingPrepSectionsSignal] = createSignal<MeetingPrepSection[]>([]);
 
 const [settings, setSettings] = createSignal<Settings>({
   geminiApiKey: '',
@@ -189,6 +197,11 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
     case 'session-summary':
       migratedResult = { quote: '', ...r };
       break;
+    case 'meeting-prep':
+      // No legacy shape exists for meeting-prep; require the claims array.
+      if (!Array.isArray(r['claims'])) return null;
+      migratedResult = r;
+      break;
     default:
       return null;
   }
@@ -272,6 +285,98 @@ function coerceAutoSummaryInterval(raw: string | null | undefined): AutoSummaryI
   const n = Number(raw);
   if (n === 1 || n === 2 || n === 5) return n;
   return DEFAULT_AUTO_SUMMARY_INTERVAL;
+}
+
+// ---------- Meeting Prep context ----------
+
+/**
+ * Load the persisted meeting-prep sections. Tolerates a missing or corrupt
+ * blob — falls back to an empty list rather than throwing.
+ */
+export async function loadMeetingPrepSections(
+  getLocalStorage: (k: string) => Promise<string>,
+): Promise<void> {
+  try {
+    const raw = await getLocalStorage(MEETING_PREP_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return;
+    const sectionsRaw = (parsed as Record<string, unknown>)['sections'];
+    if (!Array.isArray(sectionsRaw)) return;
+    const sections: MeetingPrepSection[] = [];
+    for (const s of sectionsRaw) {
+      if (!s || typeof s !== 'object') continue;
+      const rec = s as Record<string, unknown>;
+      const id = typeof rec['id'] === 'string' && rec['id'] ? rec['id'] : newSectionId();
+      const label = typeof rec['label'] === 'string' ? rec['label'] : '';
+      const body = typeof rec['body'] === 'string' ? rec['body'] : '';
+      sections.push({ id, label, body });
+    }
+    setMeetingPrepSectionsSignal(sections);
+  } catch {
+    // corrupt or missing — start fresh
+  }
+}
+
+/**
+ * Persist meeting-prep sections. Returns `{ ok }` and an error when the
+ * payload exceeds the byte budget — the UI shows the message inline so the
+ * user can shrink content rather than silently losing edits. Trims labels
+ * to MEETING_PREP_LABEL_MAX on write.
+ */
+export async function saveMeetingPrepSections(
+  setLs: SetLs,
+  sections: MeetingPrepSection[],
+): Promise<{ ok: boolean; error?: string }> {
+  const normalized: MeetingPrepSection[] = sections.map((s, i) => ({
+    id: s.id || newSectionId(),
+    // Section 0 is the general-context slot — unlabeled by convention so it
+    // never appears as a citable source. Force-clear any stale label that
+    // might have been carried over from an older shape.
+    label: i === 0 ? '' : s.label.slice(0, MEETING_PREP_LABEL_MAX),
+    body: s.body,
+  }));
+  const payload = JSON.stringify({ sections: normalized });
+  const bytes = utf8ByteLength(payload);
+  if (bytes > MEETING_PREP_BYTE_BUDGET) {
+    return {
+      ok: false,
+      error: `Too much text (${Math.round(bytes / 1024)} KB). Limit is ${Math.round(
+        MEETING_PREP_BYTE_BUDGET / 1024,
+      )} KB.`,
+    };
+  }
+  const ok = await setLs(MEETING_PREP_KEY, payload);
+  if (ok) setMeetingPrepSectionsSignal(normalized);
+  return { ok };
+}
+
+/** True when at least one section has a non-empty body — required for the lens to run. */
+export function meetingPrepIsConfigured(): boolean {
+  return meetingPrepSections().some((s) => s.body.trim().length > 0);
+}
+
+/** Total UTF-8 bytes of the current meeting-prep payload (used by the editor UI). */
+export function meetingPrepUsedBytes(): number {
+  return utf8ByteLength(JSON.stringify({ sections: meetingPrepSections() }));
+}
+
+export function newSectionId(): string {
+  return `s-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+function utf8ByteLength(s: string): number {
+  // Faster than encoder for short strings and avoids a TextEncoder dep in the
+  // hot path of the autosave debounce.
+  let bytes = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) bytes += 1;
+    else if (c < 0x800) bytes += 2;
+    else if (c >= 0xd800 && c <= 0xdbff) { bytes += 4; i++; }
+    else bytes += 3;
+  }
+  return bytes;
 }
 
 // ---------- Debug event log ----------

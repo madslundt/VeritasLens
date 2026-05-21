@@ -336,3 +336,214 @@ describe('auto-classifier', () => {
       .toThrow(/no clear human speech/i);
   });
 });
+
+import {
+  buildMeetingPrepPrompt,
+  buildMeetingPrepSchema,
+  parseMeetingPrepResponse,
+  resolveAttachmentLabels,
+  MAX_FOLLOW_UPS,
+  MAX_ANSWER_CHARS,
+  MAX_FOLLOW_UP_CHARS,
+} from '../src/personas/meetingPrep';
+import type { MeetingPrepSection } from '../src/types';
+
+const GENERAL_ONLY: MeetingPrepSection[] = [
+  { id: 's0', label: '', body: 'Negotiating prepayment terms; aim for ≤5y fixed.' },
+];
+
+const GENERAL_PLUS_TWO: MeetingPrepSection[] = [
+  { id: 's0', label: '', body: 'Negotiating prepayment terms.' },
+  { id: 's1', label: 'Bank contract', body: 'Current rate 4.8%, 25-year term.' },
+  { id: 's2', label: 'Questions', body: 'Can I prepay without penalty?' },
+];
+
+describe('meeting-prep / resolveAttachmentLabels', () => {
+  it('preserves trimmed user labels and auto-numbers unlabeled rows as "Attachment N"', () => {
+    const labels = resolveAttachmentLabels([
+      { id: 'a', label: '  ', body: 'x' },
+      { id: 'b', label: 'Mortgage', body: 'y' },
+      { id: 'c', label: '', body: 'z' },
+    ]);
+    expect(labels).toEqual(['Attachment 1', 'Mortgage', 'Attachment 2']);
+  });
+
+  it('returns an empty list when no attachments are passed', () => {
+    expect(resolveAttachmentLabels([])).toEqual([]);
+  });
+});
+
+describe('meeting-prep / buildMeetingPrepSchema', () => {
+  it('produces a source enum from attachment labels only — never the general slot', () => {
+    const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const source = props['source'] as Record<string, unknown>;
+    expect(source['enum']).toEqual(['Bank contract', 'Questions']);
+    expect(schema['required']).toEqual(['answer']);
+  });
+
+  it('omits source entirely when no attachments are configured (general only)', () => {
+    const schema = buildMeetingPrepSchema(GENERAL_ONLY) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    expect(props['source']).toBeUndefined();
+    const followUps = props['followUps'] as Record<string, unknown>;
+    const items = followUps['items'] as Record<string, unknown>;
+    const itemProps = items['properties'] as Record<string, unknown>;
+    expect(itemProps['source']).toBeUndefined();
+  });
+
+  it('caps follow-ups at MAX_FOLLOW_UPS', () => {
+    const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const followUps = props['followUps'] as Record<string, unknown>;
+    expect(followUps['maxItems']).toBe(MAX_FOLLOW_UPS);
+  });
+
+  it('uses "Attachment N" defaults in the enum when attachments are unlabeled', () => {
+    const schema = buildMeetingPrepSchema([
+      { id: 's0', label: '', body: 'general' },
+      { id: 'a', label: '', body: 'first att' },
+      { id: 'b', label: '', body: 'second att' },
+    ]) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const source = props['source'] as Record<string, unknown>;
+    expect(source['enum']).toEqual(['Attachment 1', 'Attachment 2']);
+  });
+
+  it('skips attachments with empty bodies when building the source enum', () => {
+    const schema = buildMeetingPrepSchema([
+      { id: 's0', label: '', body: 'general' },
+      { id: 'a', label: 'Real', body: 'content' },
+      { id: 'b', label: 'Blank', body: '   ' },
+    ]) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const source = props['source'] as Record<string, unknown>;
+    expect(source['enum']).toEqual(['Real']);
+  });
+});
+
+describe('meeting-prep / buildMeetingPrepPrompt', () => {
+  it('embeds the general body unlabeled and lists attachments with headers + source labels', () => {
+    const prompt = buildMeetingPrepPrompt('da', GENERAL_PLUS_TWO);
+    expect(prompt).toContain('Dansk');
+    expect(prompt).toContain('# Notes');
+    expect(prompt).toContain('Negotiating prepayment terms.');
+    expect(prompt).toContain('=== Bank contract ===');
+    expect(prompt).toContain('=== Questions ===');
+    expect(prompt).toContain('"Bank contract"');
+    expect(prompt).toContain('"Questions"');
+  });
+
+  it('tells the model not to set source when there are no attachments', () => {
+    const prompt = buildMeetingPrepPrompt('en', GENERAL_ONLY);
+    expect(prompt).toMatch(/no attachments/i);
+    expect(prompt).not.toContain('=== ');
+  });
+});
+
+describe('meeting-prep / parseMeetingPrepResponse', () => {
+  it('parses a primary answer with detail and an attachment source', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'They are offering 4.2% — lower than your current 4.8%.',
+        detail: 'Saves about €120/month at current balance.',
+        source: 'Bank contract',
+      }),
+      GENERAL_PLUS_TWO,
+    );
+    expect(result.type).toBe('meeting-prep');
+    if (result.type === 'meeting-prep') {
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.text).toContain('4.2%');
+      expect(result.claims[0]!.source).toBe('Bank contract');
+      expect(result.claims[0]!.detail).toContain('€120');
+    }
+  });
+
+  it('drops source when it does not match a known attachment label', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({ answer: 'X', source: 'Made-up label' }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims[0]!.source).toBe('');
+    }
+  });
+
+  it('drops source even if the model returns the general slot name (general is never citable)', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({ answer: 'X', source: 'Notes' }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims[0]!.source).toBe('');
+    }
+  });
+
+  it('parses follow-ups and preserves their order', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'Primary',
+        followUps: [
+          { prompt: 'Ask about prepayment.', source: 'Questions' },
+          { prompt: 'Ask about reset windows.' },
+        ],
+      }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims).toHaveLength(3);
+      expect(result.claims[1]!.text).toBe('Ask about prepayment.');
+      expect(result.claims[1]!.source).toBe('Questions');
+      expect(result.claims[2]!.text).toBe('Ask about reset windows.');
+      expect(result.claims[2]!.source).toBe('');
+    }
+  });
+
+  it('clamps follow-ups at MAX_FOLLOW_UPS even when the model returns more', () => {
+    const followUps = Array.from({ length: 6 }, (_, i) => ({ prompt: `F${i}` }));
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({ answer: 'A', followUps }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims).toHaveLength(1 + MAX_FOLLOW_UPS);
+    }
+  });
+
+  it('skips follow-ups with empty prompts but keeps valid ones', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'A',
+        followUps: [
+          { prompt: '' },
+          { prompt: 'Real follow-up' },
+          { other: 'malformed' },
+        ],
+      }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims).toHaveLength(2);
+      expect(result.claims[1]!.text).toBe('Real follow-up');
+    }
+  });
+
+  it('truncates over-long answer and follow-up text', () => {
+    const huge = 'x'.repeat(500);
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({ answer: huge, followUps: [{ prompt: huge }] }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims[0]!.text.length).toBeLessThanOrEqual(MAX_ANSWER_CHARS);
+      expect(result.claims[1]!.text.length).toBeLessThanOrEqual(MAX_FOLLOW_UP_CHARS);
+    }
+  });
+
+  it('throws NoSpeechError when the model reports no speech', () => {
+    expect(() =>
+      parseMeetingPrepResponse(JSON.stringify({ noSpeech: true }), GENERAL_PLUS_TWO),
+    ).toThrow(/no clear human speech/i);
+  });
+});

@@ -6,6 +6,7 @@ import {
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   currentHudPage,
+  flashPickerHint,
   getActiveLayout,
   hasPendingActiveResult,
   menuOptionAtIndex,
@@ -33,7 +34,15 @@ import { callLens, MAX_RETRIES } from '@/llm/gemini';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
 import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
 import {
+  MEETING_PREP_ID,
+  buildMeetingPrepPrompt,
+  buildMeetingPrepSchema,
+  parseMeetingPrepResponse,
+} from '@/personas/meetingPrep';
+import {
   activePersona,
+  meetingPrepIsConfigured,
+  meetingPrepSections,
   pushDebugEvent,
   pushHistoryEntry,
   sessionHistory,
@@ -45,7 +54,7 @@ import {
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import type { LanguageCode, LensResult } from '@/types';
+import type { LanguageCode, LensResult, MeetingPrepSection } from '@/types';
 
 let running = false;
 let buffer: PcmRingBuffer | null = null;
@@ -199,7 +208,16 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
   if (typeof g.itemIndex === 'number') lastPickerIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const persona = personaAtIndex(lastPickerIndex);
-    if (persona) await enterActiveSession(persona.id);
+    if (!persona) return;
+    // Block entry into Meeting Prep when no context exists — opening a
+    // session would needlessly power the mic and allocate the ring buffer
+    // for a lens that can't produce anything useful. Flash a hint on the
+    // picker so the wearer knows why nothing happened.
+    if (persona.id === MEETING_PREP_ID && !meetingPrepIsConfigured()) {
+      await flashPickerHint('Add notes in phone settings first');
+      return;
+    }
+    await enterActiveSession(persona.id);
   }
 }
 
@@ -360,6 +378,35 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   return parts.join('\n');
 }
 
+/**
+ * Mirror of buildPromptWithContext for Meeting Prep — wraps the same speech-
+ * focus preamble and recent-list around the section-aware prompt. Kept as a
+ * dedicated helper so the runtime doesn't need to make the Persona shape
+ * accept a sections argument.
+ */
+function buildMeetingPromptWithContext(
+  _persona: Persona,
+  lang: LanguageCode,
+  sections: MeetingPrepSection[],
+): string {
+  const base = buildMeetingPrepPrompt(lang, sections);
+  const recent = sessionHistory().slice(-3).map((e, i) => `${i + 1}. ${e.question}`);
+  const parts = [
+    'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
+    'If no clear human speech is detected, set noSpeech to true in your response.',
+    '',
+    base,
+  ];
+  if (recent.length > 0) {
+    parts.push(
+      '',
+      'RECENT: These have already been analyzed this session — if the audio contains the same content, focus on anything new instead:',
+      ...recent,
+    );
+  }
+  return parts.join('\n');
+}
+
 function buildContextBlock(personaName: string): string {
   const now = new Date();
   const date = now.toLocaleDateString('en', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
@@ -389,6 +436,31 @@ async function runAnalysis(): Promise<void> {
 
   const persona = getPersona(activePersona());
   if (!persona) return;
+
+  // Empty-context guard for Meeting Prep: show a clear "configure on phone"
+  // message and skip the API call entirely. The user can leave context empty
+  // and still pick the lens from the picker, so this needs to be friendly
+  // rather than an error.
+  if (persona.id === MEETING_PREP_ID && !meetingPrepIsConfigured()) {
+    const guidance: LensResult = {
+      type: 'meeting-prep',
+      claims: [{
+        text: 'Add meeting context in phone settings to use this lens.',
+        source: '',
+        detail: '',
+      }],
+    };
+    setStateResult(guidance);
+    if (settings().discreet && getActiveLayout() !== 'discreet-minimal') {
+      setActiveLayout('discreet-minimal');
+    }
+    await restoreActivePage();
+    await setLensResult(guidance);
+    await setStatus('displaying');
+    await setActiveHint(ACTIVE_HINT_DEFAULT);
+    setAppPhase('displaying');
+    return;
+  }
 
   // Clear the previous answer and rebuild the active page before starting a
   // new check. Without this, a double-tap from the result screen leaves '...'
@@ -424,6 +496,44 @@ async function runAnalysis(): Promise<void> {
       spinnerPrefix = `R${attempt}/${MAX_RETRIES}`;
       if (!spinnerTimer) startSpinner();
     };
+
+    // Meeting Prep follows a dedicated flow: prompt and schema are built from
+    // the user's prepared sections (read from the store at call time so a mid-
+    // session settings edit takes effect on the next tap). Follow-ups stay
+    // folded into the single history entry rather than fanning out — they're
+    // suggestions, not standalone facts.
+    if (persona.id === MEETING_PREP_ID) {
+      const sections = meetingPrepSections();
+      const meetingPrompt = buildMeetingPromptWithContext(persona, lang, sections);
+      const meetingSchema = buildMeetingPrepSchema(sections);
+      const meetingContext = buildContextBlock(persona.name);
+      const rawText = await callLens({
+        apiKey,
+        wav,
+        prompt: `${meetingContext}\n\n${meetingPrompt}`,
+        schema: meetingSchema,
+        model: settings().geminiModel,
+        signal: controller.signal,
+        onRetry,
+      });
+      const result = parseMeetingPrepResponse(rawText, sections);
+      stopSpinner();
+      setStateResult(result);
+      pushHistoryEntry({
+        sessionId: currentSessionId,
+        lensId: persona.id,
+        lensName: persona.name,
+        question: extractQuestion(result),
+        badge: extractBadge(result),
+        quote: extractQuote(result),
+        result,
+      }, (k, v) => getBridge().setLocalStorage(k, v));
+      await setLensResult(result);
+      await setStatus('displaying');
+      await setActiveHint(ACTIVE_HINT_DEFAULT);
+      setAppPhase('displaying');
+      return;
+    }
 
     let analysisPersona: Persona = persona;
     let autoSelected = false;
@@ -577,6 +687,7 @@ function extractQuestion(result: LensResult): string {
     }
     case 'eli5': return (result.claims[0]?.explanation ?? '').slice(0, 80);
     case 'session-summary': return result.summary.slice(0, 80);
+    case 'meeting-prep': return result.claims[0]?.text ?? '';
   }
 }
 
@@ -589,6 +700,13 @@ function extractBadge(result: LensResult): string {
     case 'bias': return result.claims[0]?.verdict ?? 'NEUTRAL';
     case 'eli5': return 'ELI5';
     case 'session-summary': return 'SUMMARY';
+    case 'meeting-prep': {
+      const src = result.claims[0]?.source ?? '';
+      // Falls back to a generic "PREP" tag when the response didn't ground
+      // itself in a specific section, so the history badge column never
+      // renders empty for this lens.
+      return src ? src.toUpperCase().slice(0, 12) : 'PREP';
+    }
   }
 }
 
@@ -629,6 +747,10 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
     /* falls through */
     case 'session-summary':
       return [result];
+    case 'meeting-prep':
+      // Follow-ups are suggestions, not standalone facts — keep the primary
+      // answer + follow-ups together as one history entry.
+      return [result];
   }
 }
 
@@ -649,6 +771,10 @@ export function extractQuote(result: LensResult): string {
       return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'session-summary':
       return result.quote ?? '';
+    case 'meeting-prep':
+      // Primary answer's detail line — the closest thing this lens has to a
+      // verbatim audio quote, since Gemini isn't asked to echo the heard text.
+      return result.claims[0]?.detail ?? '';
   }
 }
 

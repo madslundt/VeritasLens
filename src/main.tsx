@@ -5,6 +5,7 @@ import { initBridge } from './runtime/bridge';
 import { startHudRuntime } from './runtime/lifecycle';
 import {
   loadHistory,
+  loadMeetingPrepSections,
   loadSettings,
   setAppMode,
   setAppPhase,
@@ -37,6 +38,7 @@ async function bootstrap(): Promise<void> {
 
     await loadSettings((k) => bridge.getLocalStorage(k));
     await loadHistory((k) => bridge.getLocalStorage(k));
+    await loadMeetingPrepSections((k) => bridge.getLocalStorage(k));
 
     setAvailableModels([settings().geminiModel]);
 

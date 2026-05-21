@@ -9,6 +9,11 @@ import { BIAS_DETECTOR_SCHEMA, buildBiasDetectorPrompt, parseBiasDetectorRespons
 import { ELI5_SCHEMA, buildEli5Prompt, parseEli5Response } from './eli5';
 import { SESSION_SUMMARY_SCHEMA, buildSessionSummaryPrompt, parseSessionSummaryResponse } from './sessionSummary';
 import { AUTO_CLASSIFIER_SCHEMA, buildAutoPrompt, parseAutoResponse } from './auto';
+import {
+  MEETING_PREP_ID,
+  buildMeetingPrepPromptStub,
+  parseMeetingPrepResponseStub,
+} from './meetingPrep';
 
 export type PersonaId = string;
 
@@ -105,6 +110,20 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildSessionSummaryPrompt,
     schema: SESSION_SUMMARY_SCHEMA,
     parse: parseSessionSummaryResponse,
+    builtin: true,
+  },
+  {
+    id: MEETING_PREP_ID,
+    name: 'Meeting Prep',
+    description:
+      'Real-time answers grounded in context you prepared on your phone — general notes plus optional labeled attachments (contracts, prepared questions).',
+    hint: 'Tap to ask about what was said',
+    // Prompt and schema are built per-tap from the user's section list, so the
+    // lifecycle special-cases this lens instead of going through the generic
+    // path. Same shape as the Auto lens.
+    buildPrompt: buildMeetingPrepPromptStub,
+    schema: {},
+    parse: parseMeetingPrepResponseStub,
     builtin: true,
   },
 ];

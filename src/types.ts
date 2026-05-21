@@ -12,6 +12,24 @@ export interface BiasClaim { quote: string; verdict: 'NEUTRAL' | 'BIASED'; direc
 export interface TriviaClaim { quote: string; question: string; answer: string; description: string; }
 export interface Eli5Claim { quote: string; explanation: string; }
 
+/**
+ * Per-entry shape for the Meeting Prep lens. The first entry in `claims` is
+ * the primary answer to whatever the user just heard; any further entries are
+ * follow-up prompts the user could ask next, in priority order.
+ */
+export interface MeetingPrepClaim {
+  /** Primary answer text or follow-up prompt. */
+  text: string;
+  /**
+   * Section label this draws from — constrained to the user's section labels
+   * via a dynamic enum in the response schema. Empty string when the response
+   * is not grounded in any specific section.
+   */
+  source: string;
+  /** Optional supporting line (numbers, contract clause refs, contrasts). Typically only set on the primary answer. */
+  detail: string;
+}
+
 /** Result union — every built-in lens returns one of these shapes. */
 export type LensResult = (
   | { type: 'fact-check'; claims: FactClaim[] }
@@ -21,10 +39,24 @@ export type LensResult = (
   | { type: 'bias'; claims: BiasClaim[] }
   | { type: 'eli5'; claims: Eli5Claim[] }
   | { type: 'session-summary'; summary: string; quote?: string }
+  | { type: 'meeting-prep'; claims: MeetingPrepClaim[] }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
   autoSelected?: boolean;
 };
+
+/**
+ * One labeled context block the user prepared before a meeting, e.g. pasted
+ * contract text or questions to ask. Persisted under `veritaslens.meetingPrep`.
+ */
+export interface MeetingPrepSection {
+  /** Stable id used as the row key in the editor. */
+  id: string;
+  /** User-visible label (e.g. "Bank contract"). Empty labels are auto-named "Note 1", "Note 2", … at prompt-build time. */
+  label: string;
+  /** Free-form pasted/typed context. */
+  body: string;
+}
 
 /** One entry in the in-memory session history. */
 export interface HistoryEntry {

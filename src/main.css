@@ -371,6 +371,336 @@ button:disabled {
   letter-spacing: 0.02em;
 }
 
+/* ---------- Meeting Prep editor ---------- */
+
+.lens-row--expandable {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.lens-row--expandable.lens-row--open {
+  background: #11151a;
+  border-color: #262c33;
+}
+
+/* Expandable row head — two stacked full-width rows so the title row's
+   right-aligned badge actually reaches the row's right edge, and the
+   description shares its row with the Configure toggle. */
+.lens-row-head {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.lens-row-title,
+.lens-row-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.lens-row-title > strong {
+  font-weight: 500;
+  font-size: 0.95rem;
+  min-width: 0;
+}
+
+.lens-row-sub > .lens-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Calm amber when no context configured, soft accent when it is. */
+.lens-tag--empty {
+  color: var(--warn);
+  background: rgba(211, 192, 122, 0.1);
+  border-color: rgba(211, 192, 122, 0.32);
+}
+
+.lens-tag--ok {
+  color: var(--accent);
+  background: rgba(139, 208, 160, 0.1);
+  border-color: rgba(139, 208, 160, 0.28);
+}
+
+/* iOS-style pill toggle with a rotating chevron. */
+.meeting-prep-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  /* Fixed min-width sized for the longer label ("Configure") so the pill
+     doesn't visibly resize when it flips to "Done". */
+  min-width: 6.5rem;
+  padding: 0.32rem 0.7rem;
+  border-radius: 999px;
+  background: rgba(139, 208, 160, 0.1);
+  color: var(--accent);
+  border: 1px solid rgba(139, 208, 160, 0.22);
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.meeting-prep-trigger:hover {
+  background: rgba(139, 208, 160, 0.18);
+  border-color: rgba(139, 208, 160, 0.35);
+}
+
+.meeting-prep-trigger:active {
+  background: rgba(139, 208, 160, 0.26);
+}
+
+.meeting-prep-trigger.open {
+  background: rgba(139, 208, 160, 0.2);
+  border-color: rgba(139, 208, 160, 0.4);
+}
+
+.meeting-prep-chevron {
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.meeting-prep-trigger.open .meeting-prep-chevron {
+  transform: rotate(180deg);
+}
+
+.meeting-prep-inline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  animation: vl-prep-reveal 0.22s ease;
+}
+
+@keyframes vl-prep-reveal {
+  from { opacity: 0; transform: translateY(-3px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.meeting-prep-inline > .field-hint {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.meeting-prep-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+}
+
+.meeting-prep-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.75rem 0.8rem;
+  background: #0f1217;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  transition: border-color 0.15s ease;
+}
+
+.meeting-prep-row:focus-within {
+  border-color: rgba(139, 208, 160, 0.35);
+}
+
+/* General row gets a thin accent rail on the left so it reads as the "always
+   on" base context, distinct from the optional attachments below it. */
+.meeting-prep-row--general {
+  border-left: 2px solid rgba(139, 208, 160, 0.45);
+  padding-left: 0.7rem;
+}
+
+.meeting-prep-row-tag {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.meeting-prep-hint-strong {
+  color: var(--text);
+  font-weight: 600;
+  margin-right: 0.2rem;
+}
+.meeting-prep-hint-strong + .meeting-prep-hint-strong::before {
+  content: '';
+}
+.meeting-prep-inline > .field-hint .meeting-prep-hint-strong:not(:first-child) {
+  margin-left: 0.4rem;
+}
+
+.meeting-prep-row-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.meeting-prep-label,
+.meeting-prep-body {
+  width: 100%;
+  background: #0b0d0f;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  padding: 0.55rem 0.7rem;
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.meeting-prep-label::placeholder,
+.meeting-prep-body::placeholder {
+  color: var(--muted);
+}
+
+.meeting-prep-label:focus,
+.meeting-prep-body:focus {
+  border-color: var(--accent);
+  background: #0d1014;
+}
+
+.meeting-prep-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.92rem;
+  font-weight: 500;
+}
+
+.meeting-prep-body {
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  resize: vertical;
+  min-height: 5.5rem;
+}
+
+/* Circular ghost button — quiet by default, picks up the red tint on hover. */
+.meeting-prep-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.meeting-prep-remove:hover {
+  color: var(--err);
+  background: rgba(224, 122, 122, 0.1);
+  border-color: rgba(224, 122, 122, 0.32);
+}
+
+.meeting-prep-remove:active {
+  background: rgba(224, 122, 122, 0.18);
+}
+
+.meeting-prep-remove svg {
+  display: block;
+}
+
+.meeting-prep-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.15rem;
+}
+
+/* Soft accent "+ Add" pill — feels native without competing with primary CTAs. */
+.meeting-prep-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(139, 208, 160, 0.08);
+  border: 1px dashed rgba(139, 208, 160, 0.3);
+  color: var(--accent);
+  border-radius: 0.55rem;
+  padding: 0.5rem 0.85rem;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.88rem;
+  transition: background 0.15s ease, border-color 0.15s ease, border-style 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.meeting-prep-add:hover {
+  background: rgba(139, 208, 160, 0.16);
+  border-color: rgba(139, 208, 160, 0.5);
+  border-style: solid;
+}
+
+.meeting-prep-add svg {
+  flex-shrink: 0;
+}
+
+/* Fine progress bar replacing the plain "x / y KB used" text. */
+.meeting-prep-meter {
+  flex: 1 1 8rem;
+  min-width: 6rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.meeting-prep-meter-bar {
+  position: relative;
+  height: 4px;
+  background: #0f1217;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.meeting-prep-meter-bar::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: var(--fill, 0%);
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width 0.25s ease, background 0.15s ease;
+}
+
+.meeting-prep-meter--warn .meeting-prep-meter-bar::after {
+  background: var(--warn);
+}
+
+.meeting-prep-meter--over .meeting-prep-meter-bar::after {
+  background: var(--err);
+}
+
+.meeting-prep-meter-label {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.meeting-prep-meter--over .meeting-prep-meter-label {
+  color: var(--err);
+}
+
 .lens-form {
   margin-top: 0.5rem;
   padding: 0.75rem;

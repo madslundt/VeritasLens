@@ -398,6 +398,32 @@ export async function setMenuSpinner(content: string): Promise<void> {
   await upgradeText(CONTAINER.menuSpinner, NAME.menuSpinner, content);
 }
 
+let pickerHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Briefly replace the picker page's hint text with a message (e.g. "Add notes
+ * in phone settings first"), then restore the standard navigation hint. Used
+ * to give the wearer feedback when they tap a picker entry that can't be
+ * entered — like Meeting Prep with no configured context.
+ *
+ * No-op when the picker isn't currently on screen; safe to call from event
+ * handlers without checking page state.
+ */
+export async function flashPickerHint(message: string, ms = 2500): Promise<void> {
+  if (currentPage !== 'picker') return;
+  if (pickerHintFlashTimer) clearTimeout(pickerHintFlashTimer);
+  await upgradeText(CONTAINER.pickerHint, NAME.pickerHint, message);
+  pickerHintFlashTimer = setTimeout(() => {
+    pickerHintFlashTimer = null;
+    if (currentPage !== 'picker') return;
+    const list = getPickerPersonas(settings().bufferDuration);
+    const baseline = list.length > 1
+      ? 'Swipe ⇅ · Tap: start · Double-tap: exit'
+      : 'Tap: start · Double-tap: exit';
+    void upgradeText(CONTAINER.pickerHint, NAME.pickerHint, baseline);
+  }, ms);
+}
+
 
 async function upgradeText(containerID: number, containerName: string, content: string): Promise<void> {
   const upgrade = new TextContainerUpgrade({
@@ -419,6 +445,7 @@ function claimCount(result: LensResult): number {
     case 'bias':
     case 'trivia':
     case 'eli5':
+    case 'meeting-prep':
       return Math.max(1, result.claims.length);
     default:
       return 1;
@@ -481,6 +508,14 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
     }
     case 'session-summary':
       return { top: '', middle: '', bottom: clip(result.summary, 240) };
+    case 'meeting-prep': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
+      // claim 0 is the primary answer; later claims are follow-up prompts.
+      // The "→" prefix distinguishes follow-ups from the answer at a glance.
+      const text = claimIdx === 0 ? c.text : `→ ${c.text}`;
+      const middle = c.source ? `From: ${c.source}` : '';
+      return { top: clip(text, 140), middle, bottom: clip(c.detail, 240) };
+    }
   }
 }
 

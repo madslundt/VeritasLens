@@ -1,9 +1,13 @@
 // src/views/SettingsView.tsx
-import { createEffect, createMemo, createSignal, For, onCleanup, Show, type Component } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, Index, onCleanup, Show, type Component } from 'solid-js';
 import {
+  MEETING_PREP_BYTE_BUDGET,
+  MEETING_PREP_LABEL_MAX,
   availableModels,
   deviceStatus,
+  meetingPrepSections,
   modelsLoading,
+  newSectionId,
   saveAutoSummaryEnabled,
   saveAutoSummaryInterval,
   saveBufferDuration,
@@ -11,6 +15,7 @@ import {
   saveGeminiKey,
   saveGeminiModel,
   saveGeminiAutoModel,
+  saveMeetingPrepSections,
   saveResponseLanguage,
   sessionHistory,
   setAvailableModels,
@@ -27,8 +32,10 @@ import {
   type HistoryEntry,
   type LanguageCode,
   type LensResult,
+  type MeetingPrepSection,
 } from '@/types';
 import { personas } from '@/personas';
+import { MEETING_PREP_ID } from '@/personas/meetingPrep';
 
 const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
   { value: 30, label: '30 seconds' },
@@ -109,6 +116,21 @@ function formatResultText(result: LensResult): string {
     case 'session-summary': {
       return result.summary;
     }
+    case 'meeting-prep': {
+      // Primary answer first, then any follow-ups labeled with their source.
+      // The header on the row already shows entry.question (= primary text),
+      // so only the supporting detail + follow-ups are emitted here.
+      const primary = result.claims[0];
+      const followUps = result.claims.slice(1);
+      const blocks: string[] = [];
+      if (primary?.detail) blocks.push(primary.detail);
+      if (primary?.source) blocks.push(`From: ${primary.source}`);
+      followUps.forEach((c, i) => {
+        const src = c.source ? ` · From: ${c.source}` : '';
+        blocks.push(`→ Follow-up ${i + 1}${src}\n${c.text}`);
+      });
+      return blocks.join('\n\n');
+    }
   }
 }
 
@@ -138,6 +160,17 @@ export const SettingsView: Component = () => {
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftAutoInterval, setDraftAutoInterval] = createSignal<AutoSummaryInterval>(settings().autoSummaryInterval);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
+  // Local draft of meeting-prep sections. Mirrors the persisted store value but
+  // always carries at least one row so the editor never collapses to nothing.
+  // Autosaves on debounce; cap violations surface inline in `prepError`.
+  const [prepDraft, setPrepDraft] = createSignal<MeetingPrepSection[]>(
+    meetingPrepSections().length > 0
+      ? meetingPrepSections()
+      : [{ id: newSectionId(), label: '', body: '' }],
+  );
+  const [prepStatus, setPrepStatus] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [prepError, setPrepError] = createSignal('');
+  const [prepExpanded, setPrepExpanded] = createSignal(false);
   const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [testState, setTestState] = createSignal<'idle' | 'running' | 'ok' | 'fail'>('idle');
   const [testMessage, setTestMessage] = createSignal('');
@@ -169,6 +202,97 @@ export const SettingsView: Component = () => {
 
   const isConfigured = createMemo(() => settings().geminiApiKey.trim().length >= 10);
   const canSave = createMemo(() => draftKey().trim().length >= 10);
+
+  // Autosave the meeting-prep draft on debounce. Stays separate from the main
+  // Save button (which handles every other setting) because the editor is
+  // dynamic — multiple add/remove ops in a row would otherwise force the user
+  // to mash Save constantly. Persisted serialization happens through the
+  // bridge LocalStorage path used by every other setting.
+  let prepSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  let prepSavedFadeTimer: ReturnType<typeof setTimeout> | null = null;
+  createEffect(() => {
+    const next = prepDraft();
+    if (prepSaveTimer) clearTimeout(prepSaveTimer);
+    prepSaveTimer = setTimeout(async () => {
+      setPrepStatus('saving');
+      const bridge = getBridge();
+      const result = await saveMeetingPrepSections(
+        (k, v) => bridge.setLocalStorage(k, v),
+        next,
+      );
+      if (result.ok) {
+        setPrepStatus('saved');
+        setPrepError('');
+        if (prepSavedFadeTimer) clearTimeout(prepSavedFadeTimer);
+        prepSavedFadeTimer = setTimeout(() => setPrepStatus('idle'), 1500);
+      } else {
+        setPrepStatus('error');
+        setPrepError(result.error ?? 'Could not save meeting prep.');
+      }
+    }, 600);
+  });
+  onCleanup(() => {
+    if (prepSaveTimer) clearTimeout(prepSaveTimer);
+    if (prepSavedFadeTimer) clearTimeout(prepSavedFadeTimer);
+  });
+
+  const prepUsedBytes = createMemo(() => {
+    // Mirrors the saver's measurement so the inline counter matches what the
+    // cap check will see on the next debounce tick.
+    let bytes = 2 + '"sections":'.length + 2; // {"sections":[]}
+    const sections = prepDraft();
+    sections.forEach((s, i) => {
+      bytes += 1; // {
+      bytes += `"id":${JSON.stringify(s.id)},`.length;
+      bytes += `"label":${JSON.stringify(s.label)},`.length;
+      bytes += `"body":${JSON.stringify(s.body)}`.length;
+      bytes += 1; // }
+      if (i < sections.length - 1) bytes += 1; // ,
+    });
+    return bytes;
+  });
+
+  /** Whether the general slot (row 0) has any content. */
+  const prepGeneralSet = createMemo(
+    () => (prepDraft()[0]?.body ?? '').trim().length > 0,
+  );
+  /** Count of attachments (rows 1+) with non-empty body — the only ones that
+   * become citable sources for the lens. */
+  const prepAttachmentCount = createMemo(
+    () => prepDraft().slice(1).filter((s) => s.body.trim().length > 0).length,
+  );
+  /** Whether anything at all is configured — gates the empty/ok badge style. */
+  const prepConfigured = createMemo(
+    () => prepGeneralSet() || prepAttachmentCount() > 0,
+  );
+  /** Short label shown on the lens row badge. */
+  const prepBadgeText = createMemo(() => {
+    if (!prepConfigured()) return 'Empty';
+    const parts: string[] = [];
+    if (prepGeneralSet()) parts.push('Notes');
+    if (prepAttachmentCount() > 0) {
+      parts.push(`${prepAttachmentCount()} attachment${prepAttachmentCount() === 1 ? '' : 's'}`);
+    }
+    return parts.join(' · ');
+  });
+  /** Reactive view onto just the attachments (rows 1+) for the Index loop. */
+  const prepAttachments = createMemo(() => prepDraft().slice(1));
+
+  const updateGeneralBody = (body: string): void => {
+    setPrepDraft((prev) => prev.map((s, i) => (i === 0 ? { ...s, body } : s)));
+  };
+  const clearGeneral = (): void => {
+    setPrepDraft((prev) => prev.map((s, i) => (i === 0 ? { ...s, label: '', body: '' } : s)));
+  };
+  const updateAttachment = (id: string, patch: Partial<MeetingPrepSection>): void => {
+    setPrepDraft((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  };
+  const addAttachment = (): void => {
+    setPrepDraft((prev) => [...prev, { id: newSectionId(), label: '', body: '' }]);
+  };
+  const removeAttachment = (id: string): void => {
+    setPrepDraft((prev) => prev.filter((s) => s.id !== id));
+  };
 
   // Group history entries by sessionId, preserving insertion order
   const sessionGroups = createMemo(() => {
@@ -416,12 +540,169 @@ export const SettingsView: Component = () => {
             <ul class="lens-list">
               <For each={personas()}>
                 {(p) => (
-                  <li class="lens-row">
-                    <div class="lens-info">
-                      <strong>{p.name}</strong>
-                      <span class="lens-desc">{p.description}</span>
-                    </div>
-                  </li>
+                  <Show
+                    when={p.id === MEETING_PREP_ID}
+                    fallback={(
+                      <li class="lens-row">
+                        <div class="lens-info">
+                          <strong>{p.name}</strong>
+                          <span class="lens-desc">{p.description}</span>
+                        </div>
+                      </li>
+                    )}
+                  >
+                    <li
+                      class="lens-row lens-row--expandable"
+                      classList={{ 'lens-row--open': prepExpanded() }}
+                    >
+                      <div class="lens-row-head">
+                        {/* Row 1 — title left, badge right. Full row width so
+                            the badge actually reaches the row's right edge. */}
+                        <div class="lens-row-title">
+                          <strong>{p.name}</strong>
+                          <span
+                            class="lens-tag"
+                            classList={{
+                              'lens-tag--empty': !prepConfigured(),
+                              'lens-tag--ok': prepConfigured(),
+                            }}
+                          >
+                            {prepBadgeText()}
+                          </span>
+                        </div>
+                        {/* Row 2 — description left, toggle right. */}
+                        <div class="lens-row-sub">
+                          <span class="lens-desc">{p.description}</span>
+                          <button
+                            type="button"
+                            class="meeting-prep-trigger"
+                            classList={{ open: prepExpanded() }}
+                            aria-expanded={prepExpanded()}
+                            onClick={() => setPrepExpanded((v) => !v)}
+                          >
+                            <span>{prepExpanded() ? 'Done' : 'Configure'}</span>
+                            <svg
+                              class="meeting-prep-chevron"
+                              viewBox="0 0 10 6"
+                              width="10"
+                              height="6"
+                              aria-hidden="true"
+                            >
+                              <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                            </svg>
+                          </button>
+                        </div>
+                      </div>
+                      <Show when={prepExpanded()}>
+                        <div class="meeting-prep-inline">
+                          <p class="field-hint">
+                            <strong class="meeting-prep-hint-strong">General notes</strong> apply to every tap.
+                            <strong class="meeting-prep-hint-strong">Attachments</strong> are labeled chunks
+                            (contract excerpts, prepared questions, source documents) the assistant can cite
+                            as the source of an answer.
+                          </p>
+                          <ul class="meeting-prep-list">
+                            {/* General context — fixed first slot, no label,
+                                cannot be removed (only cleared). */}
+                            <li class="meeting-prep-row meeting-prep-row--general">
+                              <div class="meeting-prep-row-head">
+                                <span class="meeting-prep-row-tag">General context</span>
+                                <button
+                                  type="button"
+                                  class="meeting-prep-remove"
+                                  onClick={clearGeneral}
+                                  disabled={!prepGeneralSet()}
+                                  aria-label="Clear general context"
+                                  title="Clear"
+                                >
+                                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                    <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                  </svg>
+                                </button>
+                              </div>
+                              <textarea
+                                class="meeting-prep-body"
+                                placeholder="Notes, agenda, what you want out of this meeting…"
+                                rows={6}
+                                value={prepDraft()[0]?.body ?? ''}
+                                onInput={(e) => updateGeneralBody(e.currentTarget.value)}
+                              />
+                            </li>
+                            {/* Attachments — Index keys by position so the
+                                input/textarea DOM nodes stay mounted while
+                                typing (avoids the focus-loss caused by
+                                rebuilding the row on every keystroke). */}
+                            <Index each={prepAttachments()}>
+                              {(attachment) => (
+                                <li class="meeting-prep-row meeting-prep-row--attachment">
+                                  <div class="meeting-prep-row-head">
+                                    <input
+                                      type="text"
+                                      class="meeting-prep-label"
+                                      placeholder="Attachment label (e.g. Bank contract)"
+                                      maxLength={MEETING_PREP_LABEL_MAX}
+                                      value={attachment().label}
+                                      onInput={(e) => updateAttachment(attachment().id, { label: e.currentTarget.value })}
+                                    />
+                                    <button
+                                      type="button"
+                                      class="meeting-prep-remove"
+                                      onClick={() => removeAttachment(attachment().id)}
+                                      aria-label="Remove attachment"
+                                      title="Remove attachment"
+                                    >
+                                      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                        <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                      </svg>
+                                    </button>
+                                  </div>
+                                  <textarea
+                                    class="meeting-prep-body"
+                                    placeholder="Paste contract text, quote, clause, document excerpt…"
+                                    rows={5}
+                                    value={attachment().body}
+                                    onInput={(e) => updateAttachment(attachment().id, { body: e.currentTarget.value })}
+                                  />
+                                </li>
+                              )}
+                            </Index>
+                          </ul>
+                          <div class="meeting-prep-actions">
+                            <button type="button" class="meeting-prep-add" onClick={addAttachment}>
+                              <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                                <path d="M6 1.5v9M1.5 6h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                              </svg>
+                              <span>Add attachment</span>
+                            </button>
+                            <div
+                              class="meeting-prep-meter"
+                              classList={{
+                                'meeting-prep-meter--warn': prepUsedBytes() / MEETING_PREP_BYTE_BUDGET >= 0.8 && prepUsedBytes() < MEETING_PREP_BYTE_BUDGET,
+                                'meeting-prep-meter--over': prepUsedBytes() >= MEETING_PREP_BYTE_BUDGET,
+                              }}
+                            >
+                              <div
+                                class="meeting-prep-meter-bar"
+                                style={{ '--fill': `${Math.min(100, Math.round((prepUsedBytes() / MEETING_PREP_BYTE_BUDGET) * 100))}%` }}
+                              />
+                              <span class="meeting-prep-meter-label">
+                                {Math.round(prepUsedBytes() / 1024)} / {Math.round(MEETING_PREP_BYTE_BUDGET / 1024)} KB
+                              </span>
+                            </div>
+                            <Show when={prepStatus() === 'saving'}>
+                              <span class="status">Saving…</span>
+                            </Show>
+                            <Show when={prepStatus() === 'saved'}>
+                              <span class="status ok">Saved</span>
+                            </Show>
+                            <Show when={prepStatus() === 'error'}>
+                              <span class="status err">{prepError() || 'Could not save'}</span>
+                            </Show>
+                          </div>
+                        </div>
+                      </Show>
+                    </li>
+                  </Show>
                 )}
               </For>
             </ul>
