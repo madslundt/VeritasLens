@@ -33,7 +33,13 @@ import {
 import { callLens, MAX_RETRIES } from '@/llm/gemini';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
 import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
-import { buildSessionSummaryPrompt } from '@/personas/sessionSummary';
+import {
+  SESSION_SUMMARY_ID,
+  SESSION_SUMMARY_NAME,
+  SESSION_SUMMARY_SCHEMA,
+  buildSessionSummaryPrompt,
+  parseSessionSummaryResponse,
+} from '@/personas/sessionSummary';
 import {
   MEETING_PREP_ID,
   buildMeetingPrepPrompt,
@@ -42,6 +48,7 @@ import {
 } from '@/personas/meetingPrep';
 import {
   activePersona,
+  loadHistory,
   meetingPrepIsConfigured,
   meetingPrepSections,
   pushDebugEvent,
@@ -82,6 +89,19 @@ let currentSessionId = '';
 let sessionStartTime = 0;
 
 export function isHudRunning(): boolean { return running; }
+
+/**
+ * Re-reads history from bridge storage and pushes it into the sessionHistory
+ * signal. Called after analyze/check completions and on lens exit so the
+ * settings WebView surfaces fresh entries even when the runtime that wrote
+ * them is in a sibling WebView context (same-context is a harmless re-set of
+ * the value we just wrote). Best-effort — failures are swallowed.
+ */
+async function reloadHistoryFromStorage(): Promise<void> {
+  try {
+    await loadHistory((k) => getBridge().getLocalStorage(k));
+  } catch { /* best-effort */ }
+}
 
 export async function startHudRuntime(): Promise<void> {
   const configured = settings().geminiApiKey.trim().length >= 10;
@@ -359,6 +379,10 @@ async function leaveActiveSession(): Promise<void> {
   resetHudSessionState();
   await showPickerPage();
   setAppPhase('idle');
+  // Refresh history before kicking off the background final summary so the
+  // settings WebView shows everything from the session that just ended.
+  // runFinalSummary will reload again on its own once it lands.
+  await reloadHistoryFromStorage();
   if (finalInputs) void runFinalSummary(finalInputs);
 }
 
@@ -548,7 +572,7 @@ async function runAnalysis(): Promise<void> {
       const result = parseMeetingPrepResponse(rawText, sections);
       stopSpinner();
       setStateResult(result);
-      pushHistoryEntry({
+      await pushHistoryEntry({
         sessionId: currentSessionId,
         lensId: persona.id,
         lensName: persona.name,
@@ -557,6 +581,7 @@ async function runAnalysis(): Promise<void> {
         quote: extractQuote(result),
         result,
       }, (k, v) => getBridge().setLocalStorage(k, v));
+      await reloadHistoryFromStorage();
       await setLensResult(result);
       await setStatus('displaying');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
@@ -607,8 +632,8 @@ async function runAnalysis(): Promise<void> {
     if (autoSelected) result.autoSelected = true;
     stopSpinner();
     setStateResult(result);
-    for (const single of splitResultByClaim(result)) {
-      pushHistoryEntry({
+    await Promise.all(
+      splitResultByClaim(result).map((single) => pushHistoryEntry({
         sessionId: currentSessionId,
         lensId: analysisPersona.id,
         lensName: analysisPersona.name,
@@ -616,8 +641,9 @@ async function runAnalysis(): Promise<void> {
         badge: extractBadge(single),
         quote: extractQuote(single),
         result: single,
-      }, (k, v) => getBridge().setLocalStorage(k, v));
-    }
+      }, (k, v) => getBridge().setLocalStorage(k, v))),
+    );
+    await reloadHistoryFromStorage();
     await setLensResult(result);
     await setStatus('displaying');
     await setActiveHint(ACTIVE_HINT_DEFAULT);
@@ -679,18 +705,16 @@ async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;
   const apiKey = settings().geminiApiKey;
   if (!apiKey) return;
-  const persona = getPersona('session-summary');
-  if (!persona) return;
   try {
     const wav = buffer.snapshotWav();
     const rawText = await callLens({
       apiKey,
       wav,
-      prompt: persona.buildPrompt(settings().responseLanguage),
-      schema: persona.schema,
+      prompt: buildSessionSummaryPrompt(settings().responseLanguage),
+      schema: SESSION_SUMMARY_SCHEMA,
       model: settings().geminiModel,
     });
-    const result = persona.parse(rawText);
+    const result = parseSessionSummaryResponse(rawText);
     // Intermediate tick — accumulate text in memory only. The final end-of-
     // session call folds these into one history entry; intermediates never
     // appear in History on their own.
@@ -760,8 +784,6 @@ function captureFinalSummaryInputs(): FinalSummaryInputs | null {
  * Best-effort; failures land in pushDebugEvent and never throw.
  */
 async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
-  const persona = getPersona('session-summary');
-  if (!persona) return;
   try {
     const prompt = buildSessionSummaryPrompt(inputs.language, {
       previousSummaries: inputs.intermediates,
@@ -777,25 +799,26 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
       apiKey: inputs.apiKey,
       wav: inputs.wav,
       prompt,
-      schema: persona.schema,
+      schema: SESSION_SUMMARY_SCHEMA,
       model: inputs.model,
     });
-    const result = persona.parse(rawText);
+    const result = parseSessionSummaryResponse(rawText);
     if (result.type !== 'session-summary') return;
     // Fall back to the most-recent intermediate quote if the final response
     // didn't include one — keeps the history row from rendering with an empty
     // quote column when prior ticks already captured a salient line.
     const lastIntermediate = inputs.intermediates[inputs.intermediates.length - 1];
     const quote = result.quote ?? lastIntermediate?.quote ?? '';
-    pushHistoryEntry({
+    await pushHistoryEntry({
       sessionId: inputs.sessionId,
-      lensId: persona.id,
-      lensName: persona.name,
+      lensId: SESSION_SUMMARY_ID,
+      lensName: SESSION_SUMMARY_NAME,
       question: extractQuestion(result),
       badge: 'SUMMARY',
       quote,
       result,
     }, (k, v) => getBridge().setLocalStorage(k, v));
+    await reloadHistoryFromStorage();
   } catch (err) {
     pushDebugEvent({
       label: 'final-summary-fail',

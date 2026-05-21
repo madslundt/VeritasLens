@@ -243,18 +243,23 @@ async function persistHistory(
   await setLs(HISTORY_KEY, json);
 }
 
-/** Push a completed analysis result into session history and persist it. */
+/**
+ * Push a completed analysis result into session history and persist it.
+ * Returns a promise that resolves once persistence is done, so callers that
+ * need to reload history from storage (e.g. to surface entries written by a
+ * sibling WebView context) can await the write first.
+ */
 export function pushHistoryEntry(
   entry: Omit<HistoryEntry, 'id' | 'timestamp'>,
   setLs?: (k: string, v: string) => Promise<boolean>
-): void {
+): Promise<void> {
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
   const next: HistoryEntry[] = [
     ...sessionHistory(),
     { id, timestamp: Date.now(), ...entry },
   ].slice(-HISTORY_MAX_ENTRIES);
   setSessionHistory(next);
-  if (setLs) void persistHistory(setLs, next);
+  return setLs ? persistHistory(setLs, next) : Promise.resolve();
 }
 
 export function clearSessionHistory(setLs?: (k: string, v: string) => Promise<boolean>): void {

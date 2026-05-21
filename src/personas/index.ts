@@ -7,7 +7,6 @@ import { LOGICAL_FALLACY_SCHEMA, buildLogicalFallacyPrompt, parseLogicalFallacyR
 import { STATS_CHECK_SCHEMA, buildStatsCheckPrompt, parseStatsCheckResponse } from './statsCheck';
 import { BIAS_DETECTOR_SCHEMA, buildBiasDetectorPrompt, parseBiasDetectorResponse } from './biasDetector';
 import { ELI5_SCHEMA, buildEli5Prompt, parseEli5Response } from './eli5';
-import { SESSION_SUMMARY_SCHEMA, buildSessionSummaryPrompt, parseSessionSummaryResponse } from './sessionSummary';
 import { AUTO_CLASSIFIER_SCHEMA, buildAutoPrompt, parseAutoResponse } from './auto';
 import {
   MEETING_PREP_ID,
@@ -103,16 +102,6 @@ const BUILTINS: Persona[] = [
     builtin: true,
   },
   {
-    id: 'session-summary',
-    name: 'Summary',
-    description: 'Summarizes the conversation recorded so far. Requires extended buffer.',
-    hint: 'Tap to summarize',
-    buildPrompt: buildSessionSummaryPrompt,
-    schema: SESSION_SUMMARY_SCHEMA,
-    parse: parseSessionSummaryResponse,
-    builtin: true,
-  },
-  {
     id: MEETING_PREP_ID,
     name: 'Meeting Prep',
     description:
@@ -141,10 +130,11 @@ export function getPersona(id: PersonaId): Persona | undefined {
 }
 
 /**
- * Personas shown in the HUD picker.
- * Session Summary is hidden when buffer is 30 s — it needs a longer buffer to be useful.
+ * Personas shown in the HUD picker. Currently identical to the full list —
+ * kept as a separate function so future picker-only filtering has a single
+ * call site to update.
  */
-export function getPickerPersonas(bufferDuration: number): Persona[] {
-  return personasSignal().filter((p) => p.id !== 'session-summary' || bufferDuration > 30);
+export function getPickerPersonas(_bufferDuration: number): Persona[] {
+  return personasSignal();
 }
 
