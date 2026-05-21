@@ -2,9 +2,13 @@
 import { createEffect, createMemo, createSignal, For, Index, onCleanup, Show, type Component } from 'solid-js';
 import {
   MEETING_PREP_BYTE_BUDGET,
+  MEETING_PREP_GOAL_MAX,
   MEETING_PREP_LABEL_MAX,
+  MEETING_PREP_ROLE_MAX,
   availableModels,
   deviceStatus,
+  meetingPrepGoal,
+  meetingPrepRole,
   meetingPrepSections,
   modelsLoading,
   newSectionId,
@@ -26,6 +30,7 @@ import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import {
   LANGUAGES,
+  MEETING_PREP_ROLE_PRESETS,
   type AutoSummaryInterval,
   type BufferDuration,
   type GeminiModel,
@@ -168,6 +173,19 @@ export const SettingsView: Component = () => {
       ? meetingPrepSections()
       : [{ id: newSectionId(), label: '', body: '' }],
   );
+  // Goal/Role are opt-in (like attachments) — they only appear in the UI once
+  // the user clicks "+ Goal" or "+ Role". Empty string = not added; any other
+  // value = row visible. Persisted as siblings of `sections` in the same blob.
+  const [prepGoalDraft, setPrepGoalDraft] = createSignal<string>(meetingPrepGoal());
+  const [prepRoleDraft, setPrepRoleDraft] = createSignal<string>(meetingPrepRole());
+  const [prepGoalVisible, setPrepGoalVisible] = createSignal<boolean>(meetingPrepGoal().length > 0);
+  const [prepRoleVisible, setPrepRoleVisible] = createSignal<boolean>(meetingPrepRole().length > 0);
+  /** True while editing a custom Role string ("Other" chip). Lets us swap the
+   * chip row for a text input without losing the "Role row visible" state. */
+  const [prepRoleCustomMode, setPrepRoleCustomMode] = createSignal<boolean>(
+    meetingPrepRole().length > 0 &&
+      !(MEETING_PREP_ROLE_PRESETS as readonly string[]).includes(meetingPrepRole()),
+  );
   const [prepStatus, setPrepStatus] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [prepError, setPrepError] = createSignal('');
   const [prepExpanded, setPrepExpanded] = createSignal(false);
@@ -211,14 +229,17 @@ export const SettingsView: Component = () => {
   let prepSaveTimer: ReturnType<typeof setTimeout> | null = null;
   let prepSavedFadeTimer: ReturnType<typeof setTimeout> | null = null;
   createEffect(() => {
-    const next = prepDraft();
+    // Read all three so the effect re-runs on goal/role edits as well.
+    const nextSections = prepDraft();
+    const nextGoal = prepGoalDraft();
+    const nextRole = prepRoleDraft();
     if (prepSaveTimer) clearTimeout(prepSaveTimer);
     prepSaveTimer = setTimeout(async () => {
       setPrepStatus('saving');
       const bridge = getBridge();
       const result = await saveMeetingPrepSections(
         (k, v) => bridge.setLocalStorage(k, v),
-        next,
+        { goal: nextGoal, role: nextRole, sections: nextSections },
       );
       if (result.ok) {
         setPrepStatus('saved');
@@ -238,18 +259,16 @@ export const SettingsView: Component = () => {
 
   const prepUsedBytes = createMemo(() => {
     // Mirrors the saver's measurement so the inline counter matches what the
-    // cap check will see on the next debounce tick.
-    let bytes = 2 + '"sections":'.length + 2; // {"sections":[]}
+    // cap check will see on the next debounce tick. The saver stringifies
+    // {goal, role, sections} as a unit; we approximate the same shape here.
     const sections = prepDraft();
-    sections.forEach((s, i) => {
-      bytes += 1; // {
-      bytes += `"id":${JSON.stringify(s.id)},`.length;
-      bytes += `"label":${JSON.stringify(s.label)},`.length;
-      bytes += `"body":${JSON.stringify(s.body)}`.length;
-      bytes += 1; // }
-      if (i < sections.length - 1) bytes += 1; // ,
-    });
-    return bytes;
+    const sectionsStr = JSON.stringify(sections);
+    const goalStr = JSON.stringify(prepGoalDraft());
+    const roleStr = JSON.stringify(prepRoleDraft());
+    // {"goal":"…","role":"…","sections":[…]}
+    return 2 + '"goal":'.length + goalStr.length + 1
+      + '"role":'.length + roleStr.length + 1
+      + '"sections":'.length + sectionsStr.length;
   });
 
   /** Whether the general slot (row 0) has any content. */
@@ -263,7 +282,11 @@ export const SettingsView: Component = () => {
   );
   /** Whether anything at all is configured — gates the empty/ok badge style. */
   const prepConfigured = createMemo(
-    () => prepGeneralSet() || prepAttachmentCount() > 0,
+    () =>
+      prepGeneralSet() ||
+      prepAttachmentCount() > 0 ||
+      prepGoalDraft().trim().length > 0 ||
+      prepRoleDraft().trim().length > 0,
   );
   /** Short label shown on the lens row badge. */
   const prepBadgeText = createMemo(() => {
@@ -273,6 +296,8 @@ export const SettingsView: Component = () => {
     if (prepAttachmentCount() > 0) {
       parts.push(`${prepAttachmentCount()} attachment${prepAttachmentCount() === 1 ? '' : 's'}`);
     }
+    if (prepGoalDraft().trim()) parts.push('Goal');
+    if (prepRoleDraft().trim()) parts.push('Role');
     return parts.join(' · ');
   });
   /** Reactive view onto just the attachments (rows 1+) for the Index loop. */
@@ -292,6 +317,38 @@ export const SettingsView: Component = () => {
   };
   const removeAttachment = (id: string): void => {
     setPrepDraft((prev) => prev.filter((s) => s.id !== id));
+  };
+  /** Open the Goal row with an empty value — focus is handled by autofocus on the input. */
+  const addGoal = (): void => {
+    setPrepGoalDraft('');
+    setPrepGoalVisible(true);
+  };
+  /** Hide and clear the Goal row. Empty string means "not configured" downstream. */
+  const removeGoal = (): void => {
+    setPrepGoalDraft('');
+    setPrepGoalVisible(false);
+  };
+  /** Open the Role row showing chips. Picking a preset commits its label; "Other" swaps to text input. */
+  const addRole = (): void => {
+    setPrepRoleDraft('');
+    setPrepRoleCustomMode(false);
+    setPrepRoleVisible(true);
+  };
+  const removeRole = (): void => {
+    setPrepRoleDraft('');
+    setPrepRoleCustomMode(false);
+    setPrepRoleVisible(false);
+  };
+  const pickRolePreset = (value: string): void => {
+    setPrepRoleDraft(value.slice(0, MEETING_PREP_ROLE_MAX));
+    setPrepRoleCustomMode(false);
+  };
+  const pickRoleOther = (): void => {
+    // Keep any existing custom value; otherwise start blank.
+    if ((MEETING_PREP_ROLE_PRESETS as readonly string[]).includes(prepRoleDraft())) {
+      setPrepRoleDraft('');
+    }
+    setPrepRoleCustomMode(true);
   };
 
   // Group history entries by sessionId, preserving insertion order
@@ -609,6 +666,100 @@ export const SettingsView: Component = () => {
                             as the source of an answer.
                           </p>
                           <ul class="meeting-prep-list">
+                            {/* Goal — opt-in single-line field. Steers Gemini
+                                toward an outcome instead of generic answers.
+                                Hidden until "+ Goal" is clicked; remove (×)
+                                hides and clears. */}
+                            <Show when={prepGoalVisible()}>
+                              <li class="meeting-prep-row meeting-prep-row--general">
+                                <div class="meeting-prep-row-head">
+                                  <span class="meeting-prep-row-tag">Goal</span>
+                                  <button
+                                    type="button"
+                                    class="meeting-prep-remove"
+                                    onClick={removeGoal}
+                                    aria-label="Remove goal"
+                                    title="Remove"
+                                  >
+                                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                      <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                    </svg>
+                                  </button>
+                                </div>
+                                <input
+                                  type="text"
+                                  class="meeting-prep-label"
+                                  placeholder="e.g. Negotiate rate below 4.2%"
+                                  maxLength={MEETING_PREP_GOAL_MAX}
+                                  value={prepGoalDraft()}
+                                  ref={(el) => queueMicrotask(() => el?.focus())}
+                                  onInput={(e) => setPrepGoalDraft(e.currentTarget.value)}
+                                />
+                              </li>
+                            </Show>
+                            {/* Role — opt-in chip selector. Steers follow-ups
+                                toward what the user (in this role) would ask
+                                the OTHER PARTY. "Other" swaps in a text input
+                                so non-preset roles still work. */}
+                            <Show when={prepRoleVisible()}>
+                              <li class="meeting-prep-row meeting-prep-row--general">
+                                <div class="meeting-prep-row-head">
+                                  <span class="meeting-prep-row-tag">I'm the…</span>
+                                  <button
+                                    type="button"
+                                    class="meeting-prep-remove"
+                                    onClick={removeRole}
+                                    aria-label="Remove role"
+                                    title="Remove"
+                                  >
+                                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                      <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                    </svg>
+                                  </button>
+                                </div>
+                                <div class="meeting-prep-role-chips">
+                                  <For each={MEETING_PREP_ROLE_PRESETS}>
+                                    {(preset) => (
+                                      <button
+                                        type="button"
+                                        class="lens-tag"
+                                        classList={{
+                                          'lens-tag--ok':
+                                            !prepRoleCustomMode() && prepRoleDraft() === preset,
+                                          'lens-tag--empty':
+                                            prepRoleCustomMode() || prepRoleDraft() !== preset,
+                                        }}
+                                        onClick={() => pickRolePreset(preset)}
+                                      >
+                                        {preset}
+                                      </button>
+                                    )}
+                                  </For>
+                                  <button
+                                    type="button"
+                                    class="lens-tag"
+                                    classList={{
+                                      'lens-tag--ok': prepRoleCustomMode(),
+                                      'lens-tag--empty': !prepRoleCustomMode(),
+                                    }}
+                                    onClick={pickRoleOther}
+                                  >
+                                    Other
+                                  </button>
+                                </div>
+                                <Show when={prepRoleCustomMode()}>
+                                  <input
+                                    type="text"
+                                    class="meeting-prep-label"
+                                    placeholder="e.g. Procurement officer"
+                                    maxLength={MEETING_PREP_ROLE_MAX}
+                                    value={prepRoleDraft()}
+                                    ref={(el) => queueMicrotask(() => el?.focus())}
+                                    onInput={(e) => setPrepRoleDraft(e.currentTarget.value)}
+                                  />
+                                </Show>
+                              </li>
+                            </Show>
                             {/* General context — fixed first slot, no label,
                                 cannot be removed (only cleared). */}
                             <li class="meeting-prep-row meeting-prep-row--general">
@@ -675,6 +826,22 @@ export const SettingsView: Component = () => {
                             </Index>
                           </ul>
                           <div class="meeting-prep-actions">
+                            <Show when={!prepGoalVisible()}>
+                              <button type="button" class="meeting-prep-add" onClick={addGoal}>
+                                <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                                  <path d="M6 1.5v9M1.5 6h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                </svg>
+                                <span>Goal</span>
+                              </button>
+                            </Show>
+                            <Show when={!prepRoleVisible()}>
+                              <button type="button" class="meeting-prep-add" onClick={addRole}>
+                                <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                                  <path d="M6 1.5v9M1.5 6h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                </svg>
+                                <span>Role</span>
+                              </button>
+                            </Show>
                             <button type="button" class="meeting-prep-add" onClick={addAttachment}>
                               <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
                                 <path d="M6 1.5v9M1.5 6h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
