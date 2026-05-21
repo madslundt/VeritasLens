@@ -121,10 +121,6 @@ const [personasSignal] = createSignal<Persona[]>(BUILTINS);
 
 export const personas = personasSignal;
 
-export function getPersonas(): Persona[] {
-  return personasSignal();
-}
-
 export function getPersona(id: PersonaId): Persona | undefined {
   return personasSignal().find((p) => p.id === id);
 }
