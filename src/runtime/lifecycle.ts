@@ -23,6 +23,7 @@ import {
   setMenuSpinner,
   setRecIndicator,
   setStatus,
+  setSummaryBadgeState,
   showActivePage,
   showHistoryDetailPage,
   showHistoryListPage,
@@ -725,8 +726,10 @@ async function runAnalysis(): Promise<void> {
     setStateResult(result);
     // Single atomic write for all per-claim history entries — see
     // pushHistoryEntries for the race it prevents (concurrent persist calls
-    // overwriting each other with stale snapshots).
-    await pushHistoryEntries(
+    // overwriting each other with stale snapshots). Capture the returned ids
+    // so the HUD's session-wide swipe scroll knows which entries belong to
+    // this just-finished analysis (drives the "1/N within-analysis" indicator).
+    const freshIds = await pushHistoryEntries(
       splitResultByClaim(result).map((single) => ({
         sessionId: currentSessionId,
         lensId: analysisPersona.id,
@@ -739,7 +742,8 @@ async function runAnalysis(): Promise<void> {
       (k, v) => getBridge().setLocalStorage(k, v),
     );
     await reloadHistoryFromStorage();
-    await setLensResult(result);
+    const sessionEntriesNext = sessionHistory().filter((e) => e.sessionId === currentSessionId);
+    await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set(freshIds) });
     await setStatus('displaying');
     await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('displaying');
@@ -945,6 +949,7 @@ function synthesizeSummaryFromIntermediates(
 async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
   const controller = new AbortController();
   finalSummaryInflight = controller;
+  await setSummaryBadgeState('generating');
   try {
     // Empty-buffer fallback: synthesize a history entry from the intermediates
     // alone rather than discarding the whole session. Skips the Gemini call
@@ -957,6 +962,7 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
           label: 'final-summary-skip',
           detail: 'no audio and no intermediates at session end',
         });
+        await setSummaryBadgeState('idle');
         return;
       }
       pushDebugEvent({
@@ -973,6 +979,7 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
         result: synth,
       }, (k, v) => getBridge().setLocalStorage(k, v));
       await reloadHistoryFromStorage();
+      await setSummaryBadgeState('ready');
       return;
     }
     const prompt = buildSessionSummaryPrompt(inputs.language, {
@@ -992,9 +999,15 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
       model: inputs.model,
       signal: controller.signal,
     });
-    if (controller.signal.aborted) return;
+    if (controller.signal.aborted) {
+      await setSummaryBadgeState('idle');
+      return;
+    }
     const result = parseSessionSummaryResponse(rawText);
-    if (result.type !== 'session-summary') return;
+    if (result.type !== 'session-summary') {
+      await setSummaryBadgeState('idle');
+      return;
+    }
     // Fall back to the most-recent intermediate quote if the final response
     // didn't include one — keeps the history row from rendering with an empty
     // quote column when prior ticks already captured a salient line.
@@ -1010,12 +1023,14 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
       result,
     }, (k, v) => getBridge().setLocalStorage(k, v));
     await reloadHistoryFromStorage();
+    await setSummaryBadgeState('ready');
   } catch (err) {
     if ((err as Error)?.name === 'AbortError') return;
     pushDebugEvent({
       label: 'final-summary-fail',
       detail: err instanceof Error ? err.message : String(err),
     });
+    await setSummaryBadgeState('idle');
   } finally {
     if (finalSummaryInflight === controller) finalSummaryInflight = null;
   }

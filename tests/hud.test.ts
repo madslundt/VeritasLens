@@ -69,6 +69,7 @@ import {
   setLensResult,
   setMenuSpinner,
   setRecIndicator,
+  setSummaryBadgeState,
   showActivePage,
   showHistoryDetailPage,
   showHistoryListPage,
@@ -76,7 +77,7 @@ import {
   showPickerPage,
   showUnconfiguredPage,
 } from '../src/runtime/hud';
-import { saveDiscreet, setLensResult as setStateLensResult, settings } from '../src/state/store';
+import { saveAutoSummaryEnabled, saveDiscreet, setLensResult as setStateLensResult, settings } from '../src/state/store';
 import { getPersona, getPickerPersonas } from '../src/personas';
 import type { HistoryEntry, LensResult } from '../src/types';
 
@@ -85,6 +86,7 @@ const fakeSetLs = (_k: string, _v: string): Promise<boolean> => Promise.resolve(
 afterEach(async () => {
   // Always reset discreet + layout + result so test order does not bleed state.
   await saveDiscreet(fakeSetLs, false);
+  await saveAutoSummaryEnabled(fakeSetLs, false);
   setActiveLayout('baseline');
   setStateLensResult(null);
 });
@@ -252,6 +254,59 @@ describe('setRecIndicator', () => {
     bridge.textContainerUpgrade.mockClear();
     await setRecIndicator(true);
     expect(bridge.textContainerUpgrade).toHaveBeenCalledOnce();
+  });
+});
+
+describe('setSummaryBadgeState', () => {
+  type UpgradeBag = { payload: { containerName: string; content: string } };
+
+  function badgeWrites(): string[] {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[UpgradeBag]>;
+    return calls
+      .filter((c) => c[0].payload.containerName === 'vl-sum-badge')
+      .map((c) => c[0].payload.content);
+  }
+
+  it('writes "generating summary..." when auto-summary is enabled', async () => {
+    await saveAutoSummaryEnabled(fakeSetLs, true);
+    await bootstrapHud('picker');
+    bridge.textContainerUpgrade.mockClear();
+    await setSummaryBadgeState('generating');
+    expect(badgeWrites()).toEqual(['generating summary...']);
+  });
+
+  it('flashes "summary ready!" then reverts to "auto-summary" after 2.5s', async () => {
+    vi.useFakeTimers();
+    try {
+      await saveAutoSummaryEnabled(fakeSetLs, true);
+      await bootstrapHud('picker');
+      bridge.textContainerUpgrade.mockClear();
+      await setSummaryBadgeState('ready');
+      expect(badgeWrites()).toEqual(['summary ready!']);
+      vi.advanceTimersByTime(2500);
+      await Promise.resolve();
+      expect(badgeWrites()).toEqual(['summary ready!', 'auto-summary']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the badge blank when auto-summary is disabled', async () => {
+    await saveAutoSummaryEnabled(fakeSetLs, false);
+    await bootstrapHud('picker');
+    bridge.textContainerUpgrade.mockClear();
+    await setSummaryBadgeState('generating');
+    await setSummaryBadgeState('ready');
+    expect(badgeWrites()).toEqual(['', '']);
+  });
+
+  it('is a no-op when not on the picker page', async () => {
+    await saveAutoSummaryEnabled(fakeSetLs, true);
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    bridge.textContainerUpgrade.mockClear();
+    await setSummaryBadgeState('generating');
+    expect(badgeWrites()).toEqual([]);
   });
 });
 
@@ -765,6 +820,144 @@ describe('hide / reveal active result via scroll edges', () => {
       claims: [{ quote: 'q', verdict: 'TRUE', claim: 'fresh', reason: 'r' }],
     });
     expect(isActiveHidden()).toBe(false);
+  });
+});
+
+describe('session-wide swipe scroll', () => {
+  type TextBag = { payload: { containerName: string; content: string } };
+  function lastUpgradeByName(name: string): string | undefined {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
+    }
+    return undefined;
+  }
+
+  function entry(opts: { id: string; sessionId?: string; verdict: 'TRUE' | 'FALSE'; claim: string; reason?: string }): HistoryEntry {
+    return {
+      id: opts.id, timestamp: 1, sessionId: opts.sessionId ?? 's',
+      lensId: 'fact-checker', lensName: 'Fact Check', question: opts.claim,
+      badge: opts.verdict, quote: '',
+      result: { type: 'fact-check', claims: [{ quote: '', verdict: opts.verdict, claim: opts.claim, reason: opts.reason ?? 'r' }] },
+    };
+  }
+
+  it('first analysis: 1/N within-analysis, scroll-up at first claim noop (single analysis)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const e1 = entry({ id: 'e1', verdict: 'TRUE', claim: 'CLAIM-A', reason: 'RA' });
+    const e2 = entry({ id: 'e2', verdict: 'FALSE', claim: 'CLAIM-B', reason: 'RB' });
+    // Single analysis that just landed: 2 split entries, both belong to the
+    // latest analysis.
+    await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e1', 'e2']) });
+
+    // Cursor at first new entry → "1/2 · CLAIM-A" within-analysis.
+    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · CLAIM-A');
+
+    // Swipe-up from first claim: there's no earlier entry, so noop.
+    bridge.textContainerUpgrade.mockClear();
+    const outcome = await scrollActiveReason(-1);
+    expect(outcome).toBe('noop');
+  });
+
+  it('crosses into older history: indicator flips from 1/2 within-analysis to X/Y session', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const eOld1 = entry({ id: 'o1', verdict: 'TRUE',  claim: 'OLD-1' });
+    const eOld2 = entry({ id: 'o2', verdict: 'FALSE', claim: 'OLD-2' });
+    const eNew1 = entry({ id: 'n1', verdict: 'TRUE',  claim: 'NEW-1' });
+    const eNew2 = entry({ id: 'n2', verdict: 'FALSE', claim: 'NEW-2' });
+    // First analysis: 2 old entries.
+    await setLensResult(eOld2.result, { sessionEntries: [eOld1, eOld2], newEntryIds: new Set(['o1', 'o2']) });
+    // Subsequent analysis: append 2 new entries (cursor preserved at first
+    // old entry per the "stay where the user was" rule).
+    await setLensResult(eNew2.result, { sessionEntries: [eOld1, eOld2, eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
+
+    // Subsequent analysis preserves cursor at entry 0 (OLD-1). Indicator
+    // is session-relative since cursor is outside the new latest range.
+    expect(lastUpgradeByName('vl-claim')).toBe('1/4 · OLD-1');
+
+    // Swipe down advances through session.
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-claim')).toBe('2/4 · OLD-2');
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-claim')).toBe('3/4 · NEW-1');
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-claim')).toBe('4/4 · NEW-2');
+
+    // Swipe down past the last page hides (session end).
+    const outcome = await scrollActiveReason(1);
+    expect(outcome).toBe('hidden');
+    expect(isActiveHidden()).toBe(true);
+
+    // Reveal jumps to the last session page (Y/Y).
+    bridge.textContainerUpgrade.mockClear();
+    const reveal = await scrollActiveReason(-1);
+    expect(reveal).toBe('revealed');
+    expect(lastUpgradeByName('vl-claim')).toBe('4/4 · NEW-2');
+  });
+
+  it('within-analysis 1/N for fresh single multi-claim analysis crosses to session X/Y on swipe-up', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const eOld = entry({ id: 'o', verdict: 'TRUE', claim: 'OLD' });
+    const eNew1 = entry({ id: 'n1', verdict: 'TRUE',  claim: 'NEW-1' });
+    const eNew2 = entry({ id: 'n2', verdict: 'FALSE', claim: 'NEW-2' });
+
+    // Prior single-claim entry already exists in this session; user then
+    // analyzed and got 2 new claims (split into 2 entries).
+    await setLensResult(eOld.result, { sessionEntries: [eOld], newEntryIds: new Set(['o']) });
+    // Mid-session-scroll cursor isn't important — what matters is the new
+    // analysis's first claim should land at the cursor only on first-analysis.
+    // Since this isn't first-analysis, the cursor stays at OLD. We need to
+    // get the cursor onto the latest analysis to see 1/2 within-analysis.
+    // Simulate that the user is on the latest analysis fresh by clearing first.
+    await setLensResult(null);
+    // First analysis of the session: the 2-claim analysis lands.
+    await setLensResult(eNew2.result, { sessionEntries: [eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
+    // Cursor at first new claim → within-analysis 1/2.
+    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · NEW-1');
+
+    // Swipe down stays within-analysis → 2/2.
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · NEW-2');
+  });
+
+  it('no indicator on a single-claim, single-entry session', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const eOnly = entry({ id: 'a', verdict: 'TRUE', claim: 'ONLY' });
+    await setLensResult(eOnly.result, { sessionEntries: [eOnly], newEntryIds: new Set(['a']) });
+    expect(lastUpgradeByName('vl-claim')).toBe('ONLY');
+  });
+
+  it('hidden reveal after new analysis lands on Y/Y (last session page)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const eOld = entry({ id: 'o', verdict: 'TRUE', claim: 'OLD' });
+    const eNew = entry({ id: 'n', verdict: 'FALSE', claim: 'NEW' });
+
+    // First analysis with 1 entry → no indicator. Hide.
+    await setLensResult(eOld.result, { sessionEntries: [eOld], newEntryIds: new Set(['o']) });
+    markActiveHidden();
+    expect(isActiveHidden()).toBe(true);
+
+    // New analysis arrives while hidden → activeHidden preserved.
+    await setLensResult(eNew.result, { sessionEntries: [eOld, eNew], newEntryIds: new Set(['n']) });
+    expect(isActiveHidden()).toBe(true);
+
+    // Reveal jumps to last session page (Y=2, X=2).
+    bridge.textContainerUpgrade.mockClear();
+    const outcome = await scrollActiveReason(-1);
+    expect(outcome).toBe('revealed');
+    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · NEW');
   });
 });
 

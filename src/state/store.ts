@@ -266,11 +266,12 @@ async function persistHistory(
  * need to reload history from storage (e.g. to surface entries written by a
  * sibling WebView context) can await the write first.
  */
-export function pushHistoryEntry(
+export async function pushHistoryEntry(
   entry: Omit<HistoryEntry, 'id' | 'timestamp'>,
   setLs?: (k: string, v: string) => Promise<boolean>
-): Promise<void> {
-  return pushHistoryEntries([entry], setLs);
+): Promise<string> {
+  const [id] = await pushHistoryEntries([entry], setLs);
+  return id ?? '';
 }
 
 /**
@@ -279,12 +280,16 @@ export function pushHistoryEntry(
  * without N racing local-storage writes — out-of-order resolves between
  * concurrent persist calls would otherwise let an earlier (shorter) write
  * overwrite a later (complete) one and silently drop claims.
+ *
+ * Returns the ids of the just-pushed entries in input order. Callers use
+ * these to identify which entries belong to the latest analysis (for the
+ * session-wide swipe scroll's latestAnalysisRange).
  */
-export function pushHistoryEntries(
+export async function pushHistoryEntries(
   entries: Array<Omit<HistoryEntry, 'id' | 'timestamp'>>,
   setLs?: (k: string, v: string) => Promise<boolean>
-): Promise<void> {
-  if (entries.length === 0) return Promise.resolve();
+): Promise<string[]> {
+  if (entries.length === 0) return [];
   const ts = Date.now();
   const fresh: HistoryEntry[] = entries.map((e, i) => ({
     id: `${ts}-${i}-${Math.random().toString(36).slice(2, 6)}`,
@@ -293,7 +298,8 @@ export function pushHistoryEntries(
   }));
   const next: HistoryEntry[] = [...sessionHistory(), ...fresh].slice(-HISTORY_MAX_ENTRIES);
   setSessionHistory(next);
-  return setLs ? persistHistory(setLs, next) : Promise.resolve();
+  if (setLs) await persistHistory(setLs, next);
+  return fresh.map((e) => e.id);
 }
 
 export function clearSessionHistory(setLs?: (k: string, v: string) => Promise<boolean>): void {

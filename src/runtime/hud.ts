@@ -155,20 +155,36 @@ type PageRef = {
   claimChunk?: string;
 };
 
-let activePages: PageRef[] = [];
-let activePageIndex = 0;
-// True when the active result has been hidden via tap-back from the menu. The
-// page list + index are preserved so the next scroll-up can reveal the last
-// page the user was viewing; the visible layout is demoted to baseline /
-// discreet-minimal in the meantime.
+/** A page in the session-wide flat list spanning every entry in the current
+ * session. Adds `entryIdx` (index into `sessionEntries`) on top of `PageRef`. */
+type SessionPageRef = PageRef & { entryIdx: number };
+
+// Session-wide flat scroll model. The cursor walks across every entry in the
+// current session (split per claim by the lifecycle), so a swipe-up at the
+// first claim of the latest analysis hops to the previous question rather
+// than no-op'ing. `latestAnalysisRange` + `useWithinAnalysisIndicator` track
+// the indicator format (1/N within-analysis vs X/Y session-relative).
+let sessionEntries: HistoryEntry[] = [];
+let sessionPages: SessionPageRef[] = [];
+let sessionPageIndex = 0;
+// True when the active result has been hidden via tap-back from the menu or
+// swipe-down past the session end. The session-pages list + index are
+// preserved so the next scroll-up can reveal the last session page; the
+// visible layout is demoted to baseline / discreet-minimal in the meantime.
 let activeHidden = false;
+/** First/last entry index of the most recent analysis. Drives the "within
+ *  analysis" indicator scope: when the cursor sits inside this range the
+ *  indicator counts within-analysis claims; outside, it counts session-wide. */
+let latestAnalysisRange: { firstEntry: number; lastEntry: number } | null = null;
+/** Indicator mode. Flips to false the first time the cursor leaves
+ *  `latestAnalysisRange` (sticks until the next first-analysis-of-session). */
+let useWithinAnalysisIndicator = true;
 let detailPages: PageRef[] = [];
 let detailPageIndex = 0;
 /** Tracks which history-detail layout is currently on screen (full vs scroll). */
 let detailIsFullLayout = true;
 /** Index into cachedHistoryEntries of the entry currently shown on history-detail. */
 let historyDetailIndex = -1;
-let currentActiveResult: LensResult | null = null;
 // Stash for results that arrive while the user is off the active page (e.g.
 // they opened the menu while analysis was in flight). Consumed when the
 // active page is next rebuilt, so the answer they were waiting for is
@@ -347,22 +363,51 @@ export async function setStatus(label: keyof typeof STATUS_LABEL | string): Prom
   await upgradeText(CONTAINER.status, NAME.status, text);
 }
 
-export async function setLensResult(result: LensResult | null): Promise<void> {
+/** Optional context the lifecycle passes after running a new analysis.
+ *  Without it (tests, menu replay), `setLensResult` synthesizes a 1-entry
+ *  "session" from the result alone — within-analysis scope only. */
+export interface SetLensResultContext {
+  sessionEntries: HistoryEntry[];
+  newEntryIds: ReadonlySet<string>;
+}
+
+/** Synthetic id prefix used when `setLensResult(result)` is called without a
+ *  session context. Kept stable so a follow-up call replaces the prior synthetic
+ *  entry deterministically (rather than accumulating ghost entries). */
+const SYNTHETIC_ENTRY_ID = '__veritaslens_synthetic_active__';
+
+function synthesizeEntryFromResult(result: LensResult): HistoryEntry {
+  return {
+    id: SYNTHETIC_ENTRY_ID,
+    sessionId: '',
+    timestamp: 0,
+    lensId: '',
+    lensName: '',
+    question: '',
+    badge: '',
+    quote: '',
+    result,
+  };
+}
+
+export async function setLensResult(result: LensResult | null, context?: SetLensResultContext): Promise<void> {
   if (currentPage !== 'active' && currentPage !== 'history-detail') {
     // User is off the active page (typically on the menu after opening it
     // mid-analysis). Stash the answer so the next showActivePage replays it.
     if (result) pendingActiveResult = result;
     return;
   }
-  currentActiveResult = result;
-  activeHidden = false;
 
   // Null result paths — clear or demote, matching prior behaviour. Discreet
   // demotes to the dot-only idle layout; baseline-scroll falls back to baseline
   // (so the claim/verdict containers exist again); baseline just clears text.
   if (!result) {
-    activePages = [];
-    activePageIndex = 0;
+    sessionEntries = [];
+    sessionPages = [];
+    sessionPageIndex = 0;
+    activeHidden = false;
+    latestAnalysisRange = null;
+    useWithinAnalysisIndicator = true;
     if (currentPage !== 'active') return;
     if (activeLayout === 'discreet-minimal') return; // already idle
     if (isDiscreetLayout(activeLayout)) {
@@ -385,19 +430,47 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     return;
   }
 
-  // Compute the flat page list for this result. Scroll-page reason budget
-  // depends on chrome (discreet drops REC+hint, gains 1 line). Claim slot
-  // capacity depends on the page-0 layout (discreet-result is taller).
-  const discreet = isDiscreetLayout(activeLayout);
-  const scrollLines = discreet ? DISCREET_SCROLL_REASON_LINES : BASELINE_SCROLL_REASON_LINES;
-  const claimLines = discreet ? DISCREET_CLAIM_LINES : BASELINE_CLAIM_LINES;
-  activePages = computePagesForResult(result, scrollLines, claimLines);
-  activePageIndex = 0;
-  if (currentPage === 'active') {
-    await renderActivePage();
+  const wasEmpty = sessionPages.length === 0;
+
+  if (context) {
+    // Lifecycle path — full session view with cross-analysis scroll.
+    sessionEntries = context.sessionEntries;
+    recomputeSessionPages();
+    latestAnalysisRange = computeRangeFromIds(sessionEntries, context.newEntryIds);
+    if (wasEmpty && latestAnalysisRange) {
+      // First analysis of the session: jump cursor to the first page of the
+      // new analysis and start in within-analysis mode (today's behavior).
+      sessionPageIndex = firstPageIndexForEntry(latestAnalysisRange.firstEntry);
+      useWithinAnalysisIndicator = latestAnalysisClaimCount() > 1;
+      activeHidden = false;
+    } else {
+      // Subsequent analysis: preserve the cursor. The user stays on whatever
+      // entry they were reading. The new analysis is reachable by swiping
+      // down. activeHidden is preserved (reveal jumps to session end).
+      // New entries were appended → existing sessionPageIndex still points to
+      // the same entry/page. Clamp in case the prior cursor was past-end.
+      if (sessionPageIndex >= sessionPages.length) {
+        sessionPageIndex = Math.max(0, sessionPages.length - 1);
+      }
+      // Indicator mode: only stay within-analysis if the preserved cursor
+      // happens to sit inside the new latest range (effectively never, since
+      // those entries are brand new and the cursor predates them).
+      useWithinAnalysisIndicator = cursorInLatestRange();
+    }
   } else {
-    // history-detail: setLensResult is unused on this page in practice (the
-    // history flow uses showHistoryDetailPage). Nothing to do.
+    // Direct-call path (tests, menu replay): synthesize a 1-entry session
+    // holding the multi-claim result whole. Within-analysis indicator uses
+    // the claim count of the result, matching today's "1/N" behavior.
+    sessionEntries = [synthesizeEntryFromResult(result)];
+    recomputeSessionPages();
+    latestAnalysisRange = { firstEntry: 0, lastEntry: 0 };
+    sessionPageIndex = 0;
+    useWithinAnalysisIndicator = claimCount(result) > 1;
+    activeHidden = false;
+  }
+
+  if (currentPage === 'active' && !activeHidden) {
+    await renderActivePage();
   }
 }
 
@@ -408,38 +481,49 @@ export async function scrollActiveReason(dir: 1 | -1): Promise<ScrollActiveResul
   if (currentPage !== 'active') return 'noop';
 
   // Hidden state: questions were tucked away via tap-back or swipe-down. A
-  // swipe-up brings the LAST page back into view (so the user re-sees the
-  // question they were last on). Swipe-down while hidden stays hidden.
+  // swipe-up always reveals the LAST page of the LAST entry (= session end /
+  // Y/Y). If a new analysis arrived while hidden, that's where reveal lands.
+  // Swipe-down while hidden stays hidden.
   if (activeHidden) {
-    if (dir === -1 && activePages.length > 0) {
+    if (dir === -1 && sessionPages.length > 0) {
       activeHidden = false;
-      activePageIndex = activePages.length - 1;
+      sessionPageIndex = sessionPages.length - 1;
+      useWithinAnalysisIndicator = false;
       await renderActivePage();
       return 'revealed';
     }
     return 'noop';
   }
 
-  if (activePages.length === 0) return 'noop';
+  if (sessionPages.length === 0) return 'noop';
 
-  // Swipe-down past the last page hides the answer (preserving activePages so
-  // a follow-up swipe-up can re-reveal it). Layout demotes to listening view.
-  if (dir === 1 && activePageIndex === activePages.length - 1) {
+  // Swipe-down past the LAST page of the LAST entry hides the result. Layout
+  // demotes to listening view; sessionPages stay so a follow-up swipe-up can
+  // re-reveal. (= "end of session" boundary.)
+  if (dir === 1 && sessionPageIndex === sessionPages.length - 1) {
     await hideActiveResultInPlace();
     return 'hidden';
   }
 
-  const next = activePageIndex + dir;
-  if (next < 0 || next >= activePages.length) return 'noop';
-  activePageIndex = next;
+  const next = sessionPageIndex + dir;
+  if (next < 0 || next >= sessionPages.length) return 'noop';
+  sessionPageIndex = next;
+
+  // Mode flip: any page outside latestAnalysisRange engages session-relative
+  // indicator. Once flipped, stays flipped until the next first-analysis
+  // resets it.
+  if (useWithinAnalysisIndicator && !cursorInLatestRange()) {
+    useWithinAnalysisIndicator = false;
+  }
+
   await renderActivePage();
   return 'scrolled';
 }
 
 /** Demote the active page to its idle layout (baseline / discreet-minimal)
- * while keeping `activePages` and `currentActiveResult` intact, so a swipe-up
- * can reveal the last page again. Shared by swipe-down dismiss and tap-back
- * from the menu. */
+ * while keeping `sessionPages` and `sessionPageIndex` intact, so a swipe-up
+ * can reveal the last session page again. Shared by swipe-down dismiss and
+ * tap-back from the menu. */
 async function hideActiveResultInPlace(): Promise<void> {
   activeHidden = true;
   const targetIdle: ActiveLayout = isDiscreetLayout(activeLayout) ? 'discreet-minimal' : 'baseline';
@@ -459,10 +543,9 @@ async function hideActiveResultInPlace(): Promise<void> {
 }
 
 /** Mark the active result as hidden without clearing it. Used by the menu's
- * Back option so the next swipe-up can re-reveal the last page the user was
- * viewing. */
+ * Back option so the next swipe-up can re-reveal the last session page. */
 export function markActiveHidden(): void {
-  if (activePages.length > 0) activeHidden = true;
+  if (sessionPages.length > 0) activeHidden = true;
 }
 
 /** True iff the active result is preserved in memory but currently hidden. */
@@ -524,6 +607,51 @@ export async function flashPickerHint(message: string, ms = 2500): Promise<void>
   }, ms);
 }
 
+export type SummaryBadgeState = 'idle' | 'generating' | 'ready';
+
+let summaryBadgeReadyTimer: ReturnType<typeof setTimeout> | null = null;
+
+function summaryBadgeBaseline(): string {
+  return settings().autoSummaryEnabled ? 'auto-summary' : '';
+}
+
+/**
+ * Drive the picker page's top-right summary badge through final-summary states.
+ * No-op when the picker isn't on screen; safe to call from lifecycle hooks.
+ *
+ * - 'generating' → "generating summary..."
+ * - 'ready'      → "summary ready!", auto-reverts to baseline after 2.5 s
+ * - 'idle'       → baseline ("auto-summary" if enabled, blank otherwise)
+ *
+ * When autoSummaryEnabled is false the slot stays blank regardless of state —
+ * the feature isn't surfaced to the wearer so progress shouldn't be either.
+ */
+export async function setSummaryBadgeState(state: SummaryBadgeState): Promise<void> {
+  if (currentPage !== 'picker') return;
+  if (summaryBadgeReadyTimer) {
+    clearTimeout(summaryBadgeReadyTimer);
+    summaryBadgeReadyTimer = null;
+  }
+  if (!settings().autoSummaryEnabled) {
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, '');
+    return;
+  }
+  if (state === 'generating') {
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'generating summary...');
+    return;
+  }
+  if (state === 'ready') {
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'summary ready!');
+    summaryBadgeReadyTimer = setTimeout(() => {
+      summaryBadgeReadyTimer = null;
+      if (currentPage !== 'picker') return;
+      void upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, summaryBadgeBaseline());
+    }, 2500);
+    return;
+  }
+  await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, summaryBadgeBaseline());
+}
+
 
 async function upgradeText(containerID: number, containerName: string, content: string): Promise<void> {
   const upgrade = new TextContainerUpgrade({
@@ -552,20 +680,22 @@ function claimCount(result: LensResult): number {
   }
 }
 
+/** Decorate a claim's top line with the position tag and optional Auto badge.
+ *  Position goes inside Auto (`Auto · 1/2 · X`) so the badge always reads
+ *  first — matching the pre-session-scroll layout. */
+function applyClaimPrefixes(top: string, posTag: string, autoSelected: boolean): string {
+  let s = top;
+  if (posTag) s = s ? `${posTag} · ${s}` : posTag;
+  if (autoSelected) s = s ? `Auto · ${s}` : 'Auto';
+  return s;
+}
+
+/** Base claim/verdict/reason for a result, *without* position tag or Auto
+ *  prefix. The indicator/Auto are stamped in at render-time by
+ *  `applyClaimPrefixes` because the format depends on the cursor's session
+ *  context (within-analysis "1/N" vs session-relative "X/Y"). */
 function formatLensResult(result: LensResult, claimIdx: number = 0): { top: string; middle: string; bottom: string } {
-  const parts = formatLensResultBase(result, claimIdx);
-  const count = claimCount(result);
-  // Inline 1/2 · 2/2 indicator on the top (claim) line for multi-claim
-  // results, so it sits next to the question rather than the verdict.
-  // Keeps the discreet HUD density unchanged — no extra container.
-  if (count > 1) {
-    const tag = `${claimIdx + 1}/${count}`;
-    parts.top = parts.top ? `${tag} · ${parts.top}` : tag;
-  }
-  if (result.autoSelected) {
-    return { ...parts, top: parts.top ? `Auto · ${parts.top}` : 'Auto' };
-  }
-  return parts;
+  return formatLensResultBase(result, claimIdx);
 }
 
 function formatLensResultBase(result: LensResult, claimIdx: number): { top: string; middle: string; bottom: string } {
@@ -794,12 +924,10 @@ function computePagesForResult(result: LensResult, scrollLines: number, claimLin
   return out;
 }
 
-function formatCompactHeader(result: LensResult, claimIdx: number): string {
+function formatCompactHeader(result: LensResult, claimIdx: number, posTag: string): string {
   const { middle } = formatLensResult(result, claimIdx);
-  const count = claimCount(result);
-  const pos = count > 1 ? `${claimIdx + 1}/${count}` : '';
-  if (pos && middle) return `${pos} · ${middle}`;
-  return pos || middle;
+  if (posTag && middle) return `${posTag} · ${middle}`;
+  return posTag || middle;
 }
 
 function isDiscreetLayout(layout: ActiveLayout): boolean {
@@ -812,17 +940,115 @@ function targetLayoutForActivePage(page: PageRef): ActiveLayout {
   return discreet ? 'discreet-scroll' : 'baseline-scroll';
 }
 
-/** Render `activePages[activePageIndex]` on the active page; rebuild if the
- * target layout differs from the current one. */
+/** The entry the active-page cursor is currently pointing at. */
+function currentActiveEntry(): HistoryEntry | null {
+  const p = sessionPages[sessionPageIndex];
+  return p ? sessionEntries[p.entryIdx] ?? null : null;
+}
+
+/** Sum of claims across `sessionEntries[0..entryIdx-1]` — global claim offset
+ *  of an entry's first claim. */
+function claimsBefore(entryIdx: number): number {
+  let sum = 0;
+  for (let i = 0; i < entryIdx && i < sessionEntries.length; i++) {
+    sum += claimCount(sessionEntries[i]!.result);
+  }
+  return sum;
+}
+
+function totalSessionClaims(): number {
+  return claimsBefore(sessionEntries.length);
+}
+
+function latestAnalysisClaimCount(): number {
+  if (!latestAnalysisRange) return 0;
+  return claimsBefore(latestAnalysisRange.lastEntry + 1) - claimsBefore(latestAnalysisRange.firstEntry);
+}
+
+function cursorInLatestRange(): boolean {
+  if (!latestAnalysisRange) return false;
+  const p = sessionPages[sessionPageIndex];
+  if (!p) return false;
+  return p.entryIdx >= latestAnalysisRange.firstEntry && p.entryIdx <= latestAnalysisRange.lastEntry;
+}
+
+/** Build the position tag for the active page's claim line / compact header.
+ *  Returns "" when there's nothing to show (single-claim session, or
+ *  within-analysis mode with a single-claim latest analysis). */
+function activeIndicatorTag(): string {
+  const p = sessionPages[sessionPageIndex];
+  if (!p) return '';
+  if (useWithinAnalysisIndicator && latestAnalysisRange && cursorInLatestRange()) {
+    const count = latestAnalysisClaimCount();
+    if (count <= 1) return '';
+    const offset = (claimsBefore(p.entryIdx) - claimsBefore(latestAnalysisRange.firstEntry)) + p.claimIdx;
+    return `${offset + 1}/${count}`;
+  }
+  const total = totalSessionClaims();
+  if (total <= 1) return '';
+  const x = claimsBefore(p.entryIdx) + p.claimIdx;
+  return `${x + 1}/${total}`;
+}
+
+/** Find the contiguous run of `sessionEntries` whose ids are in `newIds`.
+ *  Since lifecycle appends new analyses at the tail, this is just the tail
+ *  segment — but we scan defensively in case the persistence layer reordered. */
+function computeRangeFromIds(
+  entries: HistoryEntry[],
+  newIds: ReadonlySet<string>,
+): { firstEntry: number; lastEntry: number } | null {
+  if (entries.length === 0 || newIds.size === 0) return null;
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < entries.length; i++) {
+    if (newIds.has(entries[i]!.id)) {
+      if (first === -1) first = i;
+      last = i;
+    }
+  }
+  if (first === -1) return null;
+  return { firstEntry: first, lastEntry: last };
+}
+
+/** Index into `sessionPages` of the first page (pageWithinClaim===0,
+ *  claimIdx===0) for the given entry. Returns 0 when the entry has no
+ *  pages — defensive fallback. */
+function firstPageIndexForEntry(entryIdx: number): number {
+  for (let i = 0; i < sessionPages.length; i++) {
+    if (sessionPages[i]!.entryIdx === entryIdx) return i;
+  }
+  return 0;
+}
+
+/** Rebuild `sessionPages` by paginating every entry's result. The scroll-line
+ *  and claim-line budgets follow the current active layout (discreet vs
+ *  baseline); a layout change requires re-running this so the chunk sizes
+ *  match the new container heights. */
+function recomputeSessionPages(): void {
+  const discreet = isDiscreetLayout(activeLayout);
+  const scrollLines = discreet ? DISCREET_SCROLL_REASON_LINES : BASELINE_SCROLL_REASON_LINES;
+  const claimLines = discreet ? DISCREET_CLAIM_LINES : BASELINE_CLAIM_LINES;
+  const out: SessionPageRef[] = [];
+  for (let i = 0; i < sessionEntries.length; i++) {
+    const entry = sessionEntries[i]!;
+    const entryPages = computePagesForResult(entry.result, scrollLines, claimLines);
+    for (const p of entryPages) out.push({ ...p, entryIdx: i });
+  }
+  sessionPages = out;
+}
+
+/** Render the active page from the session cursor; rebuild the page container
+ *  if the target layout differs from the current one. */
 async function renderActivePage(): Promise<void> {
   if (currentPage !== 'active') return;
   // Clamp the index in case a result that arrived mid-scroll shortened the
   // page list while a queued scroll event still references the old position.
-  if (activePages.length > 0 && activePageIndex >= activePages.length) {
-    activePageIndex = activePages.length - 1;
+  if (sessionPages.length > 0 && sessionPageIndex >= sessionPages.length) {
+    sessionPageIndex = sessionPages.length - 1;
   }
-  const page = activePages[activePageIndex];
-  if (!page || !currentActiveResult) return;
+  const page = sessionPages[sessionPageIndex];
+  const entry = currentActiveEntry();
+  if (!page || !entry) return;
   const target = targetLayoutForActivePage(page);
   const layoutChanged = target !== activeLayout;
   if (layoutChanged) {
@@ -831,18 +1057,21 @@ async function renderActivePage(): Promise<void> {
     if (!ok) throw new Error('rebuildPageContainer (active) failed.');
   }
   if (page.pageWithinClaim === 0) {
-    const { middle } = formatLensResult(currentActiveResult, page.claimIdx);
+    const { middle } = formatLensResult(entry.result, page.claimIdx);
+    const decoratedClaim = applyClaimPrefixes(
+      page.claimChunk ?? '',
+      activeIndicatorTag(),
+      entry.result.autoSelected === true,
+    );
     await Promise.all([
-      // page.claimChunk already carries the X/Y and Auto prefixes from
-      // formatLensResult — we paginated the prefixed top text.
-      upgradeText(CONTAINER.claim, NAME.claim, page.claimChunk ?? ''),
+      upgradeText(CONTAINER.claim, NAME.claim, decoratedClaim),
       upgradeText(CONTAINER.verdict, NAME.verdict, middle),
       upgradeText(CONTAINER.reason, NAME.reason, page.text),
     ]);
   } else {
-    // Compact-header layout. The header content is set inline at build time,
-    // so on layout-cross we only need to update the reason. On same-layout
-    // scrolls within the same claim, the header content also doesn't change.
+    // Compact-header layout. The header content is set inline at build time
+    // (uses activeIndicatorTag() of the page that triggered the rebuild). On
+    // same-layout scrolls within the same claim only the reason changes.
     await upgradeText(CONTAINER.reason, NAME.reason, page.text);
   }
 }
@@ -868,9 +1097,10 @@ async function renderHistoryDetailPage(): Promise<void> {
   if (wantsFull) {
     const { middle } = formatLensResult(entry.result, page.claimIdx);
     const total = cachedHistoryEntries.length;
-    const idxPrefix = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total} · ` : '';
+    const idxTag = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total}` : '';
+    const decorated = applyClaimPrefixes(page.claimChunk ?? '', idxTag, entry.result.autoSelected === true);
     await Promise.all([
-      upgradeText(CONTAINER.claim, NAME.claim, `${idxPrefix}${page.claimChunk ?? ''}`),
+      upgradeText(CONTAINER.claim, NAME.claim, decorated),
       upgradeText(CONTAINER.verdict, NAME.verdict, middle),
       upgradeText(CONTAINER.reason, NAME.reason, page.text),
     ]);
@@ -1118,8 +1348,9 @@ function buildDiscreetResultPage(): RebuildPageContainer {
  */
 function buildDiscreetScrollPage(): RebuildPageContainer {
   const sink = makeFullScreenEventSink();
-  const page = activePages[activePageIndex];
-  const headerContent = page && currentActiveResult ? formatCompactHeader(currentActiveResult, page.claimIdx) : '';
+  const page = sessionPages[sessionPageIndex];
+  const entry = currentActiveEntry();
+  const headerContent = page && entry ? formatCompactHeader(entry.result, page.claimIdx, activeIndicatorTag()) : '';
   const header = new TextContainerProperty({
     containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
     xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
@@ -1144,8 +1375,9 @@ function buildDiscreetScrollPage(): RebuildPageContainer {
  */
 function buildBaselineScrollPage(): RebuildPageContainer {
   const sink = makeFullScreenEventSink();
-  const page = activePages[activePageIndex];
-  const headerContent = page && currentActiveResult ? formatCompactHeader(currentActiveResult, page.claimIdx) : '';
+  const page = sessionPages[sessionPageIndex];
+  const entry = currentActiveEntry();
+  const headerContent = page && entry ? formatCompactHeader(entry.result, page.claimIdx, activeIndicatorTag()) : '';
   const header = new TextContainerProperty({
     containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
     xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
@@ -1232,7 +1464,8 @@ function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPage
   // X/Y position indicator across the current session's entries — only shown
   // when there's more than one, so a single-entry session doesn't get the
   // chrome.
-  const idxPrefix = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total} · ` : '';
+  const idxTag = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total}` : '';
+  const decoratedClaim = applyClaimPrefixes(page.claimChunk ?? '', idxTag, entry.result.autoSelected === true);
   // History-detail has no top status chrome, so claim can start higher than
   // the active page (y=24 vs y=32). That extra 8 px absorbs the verdict slot
   // growth (26 → 32) without squeezing the reason container's 4-line budget;
@@ -1240,7 +1473,7 @@ function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPage
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
     xPosition: 16, yPosition: 24, width: SCREEN_W - 32, height: 68,
-    borderWidth: 0, paddingLength: 4, content: `${idxPrefix}${page.claimChunk ?? ''}`, isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: decoratedClaim, isEventCapture: 0,
   });
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,
@@ -1265,7 +1498,12 @@ function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPage
  * + tall reason area + bottom hint, with the reason container as the event
  * sink so swipes register. */
 function buildHistoryDetailScrollPage(entry: HistoryEntry, page: PageRef): RebuildPageContainer {
-  const headerContent = formatCompactHeader(entry.result, page.claimIdx);
+  // Within-entry "1/N" claim position in the compact header (same as the
+  // pre-session-scroll active page behavior). The cross-entry X/Y prefix only
+  // lives on full-layout claim chunks.
+  const count = claimCount(entry.result);
+  const posTag = count > 1 ? `${page.claimIdx + 1}/${count}` : '';
+  const headerContent = formatCompactHeader(entry.result, page.claimIdx, posTag);
   const header = new TextContainerProperty({
     containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
     xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
@@ -1293,10 +1531,12 @@ export function resetHudSessionState(): void {
   detailPageIndex = 0;
   detailIsFullLayout = true;
   historyDetailIndex = -1;
-  activePages = [];
-  activePageIndex = 0;
+  sessionEntries = [];
+  sessionPages = [];
+  sessionPageIndex = 0;
   activeHidden = false;
-  currentActiveResult = null;
+  latestAnalysisRange = null;
+  useWithinAnalysisIndicator = true;
   activeLayout = 'baseline';
   pendingActiveResult = null;
   pendingMenuSpinnerFrame = '';
