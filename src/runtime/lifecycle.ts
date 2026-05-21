@@ -240,7 +240,7 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
   // now). scrollActiveReason swaps claims when multi-claim, otherwise
   // paginates a long reason.
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    await showMenuPage();
+    await showMenuPage({ exitGeneratesSummary: canGenerateFinalSummary() });
     return;
   }
   if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -342,16 +342,18 @@ async function leaveActiveSession(): Promise<void> {
   // discarded by the intermediates clear at the end of this function.
   stopAutoSummaryTimer();
   try { await getBridge().audioControl(false); } catch { /* ignore */ }
-  // Best-effort end-of-session summary. runFinalSummary is internally guarded
-  // and never throws, so this can't block the cleanup that follows. It runs
-  // before buffer.clear() so the most-recent audio is still available.
-  await runFinalSummary();
+  // Snapshot the inputs for the end-of-session summary while the buffer and
+  // session id are still live. The call itself runs in the background so the
+  // user is returned to the picker immediately — the history entry appears
+  // whenever Gemini responds.
+  const finalInputs = captureFinalSummaryInputs();
   intermediateSummaries = [];
   buffer?.clear();
   buffer = null;
   resetHudSessionState();
   await showPickerPage();
   setAppPhase('idle');
+  if (finalInputs) void runFinalSummary(finalInputs);
 }
 
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
@@ -657,6 +659,15 @@ function stopAutoSummaryTimer(): void {
   autoSummaryTimer = null;
 }
 
+/**
+ * Whether a final summary can be produced if the user exits right now: the
+ * auto-summary feature is enabled AND at least one intermediate tick has fired.
+ * Drives the Menu page's Exit-row label.
+ */
+function canGenerateFinalSummary(): boolean {
+  return settings().autoSummaryEnabled && intermediateSummaries.length > 0;
+}
+
 
 async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;
@@ -691,37 +702,52 @@ async function runAutoSummary(): Promise<void> {
   }
 }
 
+interface FinalSummaryInputs {
+  sessionId: string;
+  intermediates: Array<{ summary: string; quote?: string }>;
+  wav: Uint8Array | null;
+  apiKey: string;
+  language: LanguageCode;
+  model: string;
+}
+
+/**
+ * Snapshots the data needed for an end-of-session summary while the buffer
+ * and module-level session state are still live. Returns null when no
+ * intermediates accumulated (the "session shorter than autoSummaryInterval"
+ * gate) or when the API key is unset.
+ */
+function captureFinalSummaryInputs(): FinalSummaryInputs | null {
+  if (intermediateSummaries.length === 0) return null;
+  const s = settings();
+  if (!s.geminiApiKey) return null;
+  return {
+    sessionId: currentSessionId,
+    intermediates: intermediateSummaries.slice(),
+    wav: buffer && buffer.bytesBuffered > 0 ? buffer.snapshotWav() : null,
+    apiKey: s.geminiApiKey,
+    language: s.responseLanguage,
+    model: s.geminiModel,
+  };
+}
+
 /**
  * Generates one consolidated end-of-session summary using accumulated
- * intermediate summaries as prior context plus whatever audio is still in the
- * ring buffer. Pushes exactly one history entry (lensId='session-summary',
- * badge='SUMMARY') on success.
+ * intermediate summaries as prior context plus whatever audio was buffered
+ * when the user exited. Pushes exactly one history entry on success.
  *
- * Skipped when no intermediate ever fired — this also implements the
- * "session shorter than autoSummaryInterval" gate, because the first timer
- * tick lands at exactly that boundary.
+ * All inputs are captured by the caller synchronously before buffer teardown,
+ * so this can safely run in the background after leaveActiveSession returns.
  *
- * Best-effort; failures land in pushDebugEvent and never throw, so the caller
- * (leaveActiveSession) can always complete its cleanup.
+ * Best-effort; failures land in pushDebugEvent and never throw.
  */
-async function runFinalSummary(): Promise<void> {
-  if (intermediateSummaries.length === 0) return;
-  const apiKey = settings().geminiApiKey;
-  if (!apiKey) return;
+async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
   const persona = getPersona('session-summary');
   if (!persona) return;
   try {
-    const previousSummaries = intermediateSummaries.map((i) => i.summary);
-    const prompt = buildSessionSummaryPrompt(
-      settings().responseLanguage,
-      { previousSummaries },
-    );
-    // If the buffer was cleared between the last tick and exit (defensive —
-    // leaveActiveSession clears it after this call returns), fall through to a
-    // text-only synthesis by sending a tiny silent WAV. Skipping the call
-    // would lose the work entirely.
-    const wav = buffer && buffer.bytesBuffered > 0 ? buffer.snapshotWav() : null;
-    if (!wav) {
+    const previousSummaries = inputs.intermediates.map((i) => i.summary);
+    const prompt = buildSessionSummaryPrompt(inputs.language, { previousSummaries });
+    if (!inputs.wav) {
       pushDebugEvent({
         label: 'final-summary-skip',
         detail: 'no audio buffer at session end',
@@ -729,21 +755,21 @@ async function runFinalSummary(): Promise<void> {
       return;
     }
     const rawText = await callLens({
-      apiKey,
-      wav,
+      apiKey: inputs.apiKey,
+      wav: inputs.wav,
       prompt,
       schema: persona.schema,
-      model: settings().geminiModel,
+      model: inputs.model,
     });
     const result = persona.parse(rawText);
     if (result.type !== 'session-summary') return;
     // Fall back to the most-recent intermediate quote if the final response
     // didn't include one — keeps the history row from rendering with an empty
     // quote column when prior ticks already captured a salient line.
-    const lastIntermediate = intermediateSummaries[intermediateSummaries.length - 1];
+    const lastIntermediate = inputs.intermediates[inputs.intermediates.length - 1];
     const quote = result.quote ?? lastIntermediate?.quote ?? '';
     pushHistoryEntry({
-      sessionId: currentSessionId,
+      sessionId: inputs.sessionId,
       lensId: persona.id,
       lensName: persona.name,
       question: extractQuestion(result),
@@ -770,7 +796,7 @@ function extractQuestion(result: LensResult): string {
       return c ? (c.direction || c.verdict) : '';
     }
     case 'eli5': return (result.claims[0]?.explanation ?? '').slice(0, 80);
-    case 'session-summary': return result.summary.slice(0, 80);
+    case 'session-summary': return (result.title || result.summary).slice(0, 80);
     case 'meeting-prep': return result.claims[0]?.text ?? '';
   }
 }

@@ -103,6 +103,11 @@ export const MENU_OPTIONS = [
 ] as const;
 export type MenuOptionId = (typeof MENU_OPTIONS)[number]['id'];
 
+export const EXIT_LABEL_WITH_SUMMARY = 'Exit - generate summary';
+// Captured at showMenuPage() time; consumed by buildMenuPage() so the Exit row
+// reflects whether leaveActiveSession will fire a final summary.
+let exitGeneratesSummary = false;
+
 const DETAIL_PAGE_CHARS = 200;
 const ACTIVE_PAGE_CHARS = 200;
 let detailReasonFull = '';
@@ -211,8 +216,9 @@ export async function showActivePage(persona: Persona): Promise<void> {
   }
 }
 
-export async function showMenuPage(): Promise<void> {
+export async function showMenuPage(opts: { exitGeneratesSummary?: boolean } = {}): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showMenuPage().');
+  exitGeneratesSummary = opts.exitGeneratesSummary === true;
   const ok = await getBridge().rebuildPageContainer(buildMenuPage());
   if (!ok) throw new Error('rebuildPageContainer (menu) failed.');
   currentPage = 'menu';
@@ -612,7 +618,7 @@ function buildMenuPage(): RebuildPageContainer {
     width: SCREEN_W - 32, height: SCREEN_H - 48, borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
       itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
-      itemName: MENU_OPTIONS.map((o) => o.label),
+      itemName: MENU_OPTIONS.map((o) => (o.id === 'exit' && exitGeneratesSummary ? EXIT_LABEL_WITH_SUMMARY : o.label)),
     }),
     isEventCapture: 1,
   });

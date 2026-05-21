@@ -194,9 +194,11 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
         ? r
         : { type, claims: wrap({ explanation: r['explanation'] }), autoSelected: r['autoSelected'] };
       break;
-    case 'session-summary':
-      migratedResult = { quote: '', ...r };
+    case 'session-summary': {
+      const existingTitle = typeof r['title'] === 'string' ? r['title'].trim() : '';
+      migratedResult = { quote: '', ...r, title: existingTitle.length > 0 ? existingTitle : 'Summary of conversation' };
       break;
+    }
     case 'meeting-prep':
       // No legacy shape exists for meeting-prep; require the claims array.
       if (!Array.isArray(r['claims'])) return null;

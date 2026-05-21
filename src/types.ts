@@ -38,7 +38,7 @@ export type LensResult = (
   | { type: 'stats-check'; claims: StatsClaim[] }
   | { type: 'bias'; claims: BiasClaim[] }
   | { type: 'eli5'; claims: Eli5Claim[] }
-  | { type: 'session-summary'; summary: string; quote?: string }
+  | { type: 'session-summary'; title: string; summary: string; quote?: string }
   | { type: 'meeting-prep'; claims: MeetingPrepClaim[] }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
