@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.0 — 2026-05-21
+- New **Meeting Prep** lens: ground answers in context you write on your phone before a meeting — general notes plus optional labeled attachments (contracts, prepared questions) the assistant can cite as sources.
+
 ## 0.5.0 — 2026-05-20
 - Multi-claim per tap (up to 5) for Fact, Stats, Fallacy, Bias, Trivia, and ELI5. One Gemini call now covers several distinct claims/questions/terms when present.
 - Per-claim verbatim source quote (≤140 chars) attached to every result. Most recent claim returned first.

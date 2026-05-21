@@ -1,7 +1,7 @@
 {
   "name": "veritaslens",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "description": "Silent Intelligence layer for Even Realities G2 — fact-check the last 30 seconds with a gesture.",
   "scripts": {
