@@ -67,7 +67,13 @@ let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
 // timer. Cleared on session enter / leave / runtime stop. Never persisted on
 // their own — they are folded into the single end-of-session entry by
 // runFinalSummary().
-let intermediateSummaries: Array<{ summary: string; quote?: string }> = [];
+let intermediateSummaries: Array<{
+  title?: string;
+  summary: string;
+  topics?: string[];
+  keyPoints?: string[];
+  quote?: string;
+}> = [];
 
 let lastPickerIndex = 0;
 let lastMenuIndex = 0;
@@ -694,7 +700,13 @@ async function runAutoSummary(): Promise<void> {
     // session call folds these into one history entry; intermediates never
     // appear in History on their own.
     if (result.type === 'session-summary' && result.summary.trim().length > 0) {
-      intermediateSummaries.push({ summary: result.summary, quote: result.quote });
+      intermediateSummaries.push({
+        title: result.title,
+        summary: result.summary,
+        topics: result.topics,
+        keyPoints: result.keyPoints,
+        quote: result.quote,
+      });
     }
   } catch (err) {
     // Auto-summary is best-effort, but failures should be observable in the
@@ -709,7 +721,13 @@ async function runAutoSummary(): Promise<void> {
 
 interface FinalSummaryInputs {
   sessionId: string;
-  intermediates: Array<{ summary: string; quote?: string }>;
+  intermediates: Array<{
+    title?: string;
+    summary: string;
+    topics?: string[];
+    keyPoints?: string[];
+    quote?: string;
+  }>;
   wav: Uint8Array | null;
   apiKey: string;
   language: LanguageCode;
@@ -750,8 +768,9 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
   const persona = getPersona('session-summary');
   if (!persona) return;
   try {
-    const previousSummaries = inputs.intermediates.map((i) => i.summary);
-    const prompt = buildSessionSummaryPrompt(inputs.language, { previousSummaries });
+    const prompt = buildSessionSummaryPrompt(inputs.language, {
+      previousSummaries: inputs.intermediates,
+    });
     if (!inputs.wav) {
       pushDebugEvent({
         label: 'final-summary-skip',

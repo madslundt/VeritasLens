@@ -536,7 +536,7 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       return { top: '', middle: '', bottom: c.explanation };
     }
     case 'session-summary':
-      return { top: '', middle: '', bottom: result.summary };
+      return { top: '', middle: '', bottom: formatSessionSummaryBody(result) };
     case 'meeting-prep': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       // claim 0 is the primary answer; later claims are follow-up prompts.
@@ -551,6 +551,32 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
 function clip(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
+}
+
+/**
+ * Build the scrollable body for a session-summary entry. Combines the
+ * narrative summary with TOPICS and KEY POINTS sections so the existing
+ * 200-char-per-page pagination on the detail page walks through every
+ * topic and detail captured during the session.
+ *
+ * Sections with no content are omitted (no stray "TOPICS\n" header). When
+ * topics and keyPoints are both empty the body collapses to the summary
+ * alone, preserving the original pre-expansion rendering as a fallback.
+ */
+function formatSessionSummaryBody(result: Extract<LensResult, { type: 'session-summary' }>): string {
+  const sections: string[] = [];
+  if (result.summary && result.summary.trim().length > 0) {
+    sections.push(result.summary.trim());
+  }
+  const topics = (result.topics ?? []).map((t) => t.trim()).filter((t) => t.length > 0);
+  if (topics.length > 0) {
+    sections.push(['TOPICS', ...topics.map((t) => `• ${t}`)].join('\n'));
+  }
+  const keyPoints = (result.keyPoints ?? []).map((k) => k.trim()).filter((k) => k.length > 0);
+  if (keyPoints.length > 0) {
+    sections.push(['KEY POINTS', ...keyPoints.map((k) => `• ${k}`)].join('\n'));
+  }
+  return sections.join('\n\n');
 }
 
 function badgeGlyph(badge: string): string {

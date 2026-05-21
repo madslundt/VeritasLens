@@ -278,15 +278,103 @@ describe('eli5', () => {
   });
 });
 
-import { buildSessionSummaryPrompt, parseSessionSummaryResponse } from '../src/personas/sessionSummary';
+import {
+  buildSessionSummaryPrompt,
+  parseSessionSummaryResponse,
+  SESSION_SUMMARY_LIMITS,
+} from '../src/personas/sessionSummary';
 
 describe('session-summary', () => {
-  it('parses a valid summary response', () => {
+  it('parses a valid summary response with topics and key points', () => {
     const result = parseSessionSummaryResponse(
-      JSON.stringify({ summary: 'Discussed project timeline and budget.' }),
+      JSON.stringify({
+        title: 'Summary of bank meeting',
+        summary: 'Discussed project timeline and budget across three topics.',
+        topics: ['Project timeline', 'Q3 budget', 'Hiring plan'],
+        keyPoints: [
+          'Decision: ship beta by July 15',
+          'Maria owns the budget proposal',
+          'Risk: backend headcount short',
+        ],
+        quote: 'We need to ship by July 15.',
+      }),
     );
     expect(result.type).toBe('session-summary');
-    if (result.type === 'session-summary') expect(result.summary).toContain('project');
+    if (result.type === 'session-summary') {
+      expect(result.title).toBe('Summary of bank meeting');
+      expect(result.summary).toContain('project');
+      expect(result.topics).toEqual(['Project timeline', 'Q3 budget', 'Hiring plan']);
+      expect(result.keyPoints).toHaveLength(3);
+      expect(result.keyPoints[1]).toContain('Maria');
+      expect(result.quote).toContain('July 15');
+    }
+  });
+
+  it('falls back to defaults when required fields are missing', () => {
+    const result = parseSessionSummaryResponse(JSON.stringify({ summary: 'Just some prose.' }));
+    if (result.type === 'session-summary') {
+      expect(result.title).toBe('Summary of conversation');
+      expect(result.topics).toEqual([]);
+      expect(result.keyPoints).toEqual([]);
+    }
+  });
+
+  it('filters empty/whitespace-only entries from topics and keyPoints', () => {
+    const result = parseSessionSummaryResponse(
+      JSON.stringify({
+        summary: 'x',
+        topics: ['  ', 'Real topic', '', '   '],
+        keyPoints: ['', 'Real point', '   ', 'Another'],
+      }),
+    );
+    if (result.type === 'session-summary') {
+      expect(result.topics).toEqual(['Real topic']);
+      expect(result.keyPoints).toEqual(['Real point', 'Another']);
+    }
+  });
+
+  it('caps topics at MAX_TOPICS and keyPoints at MAX_KEY_POINTS', () => {
+    const topics = Array.from({ length: SESSION_SUMMARY_LIMITS.MAX_TOPICS + 5 }, (_, i) => `t${i}`);
+    const keyPoints = Array.from({ length: SESSION_SUMMARY_LIMITS.MAX_KEY_POINTS + 5 }, (_, i) => `k${i}`);
+    const result = parseSessionSummaryResponse(
+      JSON.stringify({ summary: 'x', topics, keyPoints }),
+    );
+    if (result.type === 'session-summary') {
+      expect(result.topics).toHaveLength(SESSION_SUMMARY_LIMITS.MAX_TOPICS);
+      expect(result.keyPoints).toHaveLength(SESSION_SUMMARY_LIMITS.MAX_KEY_POINTS);
+    }
+  });
+
+  it('trims over-long title/summary/topic/keyPoint to their caps', () => {
+    const huge = 'x'.repeat(5000);
+    const result = parseSessionSummaryResponse(
+      JSON.stringify({
+        title: huge,
+        summary: huge,
+        topics: [huge],
+        keyPoints: [huge],
+      }),
+    );
+    if (result.type === 'session-summary') {
+      expect(result.title.length).toBeLessThanOrEqual(SESSION_SUMMARY_LIMITS.MAX_TITLE_CHARS);
+      expect(result.summary.length).toBeLessThanOrEqual(SESSION_SUMMARY_LIMITS.MAX_SUMMARY_CHARS);
+      expect(result.topics[0]!.length).toBeLessThanOrEqual(SESSION_SUMMARY_LIMITS.MAX_TOPIC_CHARS);
+      expect(result.keyPoints[0]!.length).toBeLessThanOrEqual(SESSION_SUMMARY_LIMITS.MAX_KEY_POINT_CHARS);
+    }
+  });
+
+  it('ignores non-string entries in topics/keyPoints arrays', () => {
+    const result = parseSessionSummaryResponse(
+      JSON.stringify({
+        summary: 'x',
+        topics: ['ok', 42, null, 'also ok'],
+        keyPoints: [{}, 'bullet'],
+      }),
+    );
+    if (result.type === 'session-summary') {
+      expect(result.topics).toEqual(['ok', 'also ok']);
+      expect(result.keyPoints).toEqual(['bullet']);
+    }
   });
 
   it('buildSessionSummaryPrompt omits the prior-context block when no previous summaries are supplied', () => {
@@ -300,24 +388,59 @@ describe('session-summary', () => {
     expect(prompt).not.toContain('PRIOR CONTEXT');
   });
 
-  it('buildSessionSummaryPrompt drops empty/whitespace-only entries before deciding whether to include the prior-context block', () => {
-    const prompt = buildSessionSummaryPrompt('en', { previousSummaries: ['', '   '] });
+  it('buildSessionSummaryPrompt drops empty/whitespace-only segments before deciding whether to include the prior-context block', () => {
+    const prompt = buildSessionSummaryPrompt('en', {
+      previousSummaries: [
+        { summary: '' },
+        { summary: '   ', topics: ['  '], keyPoints: ['', '  '] },
+      ],
+    });
     expect(prompt).not.toContain('PRIOR CONTEXT');
   });
 
-  it('buildSessionSummaryPrompt embeds each previous summary in a numbered list under PRIOR CONTEXT', () => {
+  it('buildSessionSummaryPrompt renders each prior segment with header, summary, topics line, and key points bullets', () => {
     const prompt = buildSessionSummaryPrompt('en', {
-      previousSummaries: ['first half of meeting', 'second half discussion'],
+      previousSummaries: [
+        {
+          title: 'Summary of opening',
+          summary: 'first half of meeting',
+          topics: ['intros', 'agenda'],
+          keyPoints: ['kickoff at 10:00', 'Anna joined late'],
+        },
+        {
+          title: 'Summary of close',
+          summary: 'second half discussion',
+          topics: ['budget'],
+          keyPoints: ['ship by July 15'],
+        },
+      ],
     });
     expect(prompt).toContain('PRIOR CONTEXT');
-    expect(prompt).toContain('1. first half of meeting');
-    expect(prompt).toContain('2. second half discussion');
+    expect(prompt).toContain('=== Segment 1: Summary of opening ===');
+    expect(prompt).toContain('first half of meeting');
+    expect(prompt).toContain('Topics: intros · agenda');
+    expect(prompt).toContain('- kickoff at 10:00');
+    expect(prompt).toContain('- Anna joined late');
+    expect(prompt).toContain('=== Segment 2: Summary of close ===');
+    expect(prompt).toContain('Topics: budget');
+    expect(prompt).toContain('- ship by July 15');
   });
 
   it('buildSessionSummaryPrompt still applies the language directive when prior context is provided', () => {
-    const prompt = buildSessionSummaryPrompt('da', { previousSummaries: ['en ting'] });
+    const prompt = buildSessionSummaryPrompt('da', {
+      previousSummaries: [{ summary: 'en ting', topics: [], keyPoints: [] }],
+    });
     expect(prompt).toContain('Dansk');
     expect(prompt).toContain('PRIOR CONTEXT');
+  });
+
+  it('buildSessionSummaryPrompt directs the model to capture topics and key points exhaustively', () => {
+    const prompt = buildSessionSummaryPrompt('en');
+    // The "do not just conclude" anti-instruction is the load-bearing piece
+    // that prevents the model from regressing to a one-paragraph wrap-up.
+    expect(prompt).toMatch(/topics/i);
+    expect(prompt).toMatch(/key ?points/i);
+    expect(prompt).toMatch(/(not\s+just\s+conclude|whole\s+conversation|entire\s+conversation)/i);
   });
 });
 
