@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 — 2026-05-21
+- **Meeting Prep** swaps the 0–3 follow-up array for a verbatim **evidence** excerpt from the cited attachment plus at most one follow-up. Follow-ups are now opt-in by the model — emitted only when prep is genuinely silent on a decision-changing detail, eliminating generic "What's your timeline?" padding.
+- HUD swipes through three claim kinds — **answer → evidence → follow-up** — each visually distinct (evidence in quotes, follow-up with `→`).
+- History search now indexes the verbatim evidence quote instead of a paraphrased detail line.
+- Picker **auto-summary** badge now reflects final-summary state: `summarizing…` while the end-of-session summary is generating, `summary ready` briefly when it lands, then back to `auto-summary`.
+
 ## 0.6.0 — 2026-05-21
 - New **Meeting Prep** lens: ground answers in context you write on your phone before a meeting — general notes plus optional labeled attachments (contracts, prepared questions) the assistant can cite as sources.
 - **Auto-summary** rewired to one consolidated entry per session: interval ticks accumulate in memory as context and a single summary is written to History when you exit the session. Sessions shorter than the interval produce no entry. In the phone History view the summary sits at the top of each session with a muted style so claim-style results below keep visual focus.
