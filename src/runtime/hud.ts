@@ -430,32 +430,27 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
     return;
   }
 
-  const wasEmpty = sessionPages.length === 0;
-
   if (context) {
-    // Lifecycle path — full session view with cross-analysis scroll.
+    // Lifecycle path — full session view with cross-analysis scroll. Every
+    // new analysis jumps the cursor to its first claim so the wearer
+    // immediately sees the question they just asked, regardless of what
+    // historical entry they were last viewing. `activeHidden` is intentionally
+    // preserved: a wearer who had hidden the previous result will reveal to
+    // see the new latest (reveal lands at session-end / Y/Y).
     sessionEntries = context.sessionEntries;
     recomputeSessionPages();
     latestAnalysisRange = computeRangeFromIds(sessionEntries, context.newEntryIds);
-    if (wasEmpty && latestAnalysisRange) {
-      // First analysis of the session: jump cursor to the first page of the
-      // new analysis and start in within-analysis mode (today's behavior).
+    if (latestAnalysisRange) {
       sessionPageIndex = firstPageIndexForEntry(latestAnalysisRange.firstEntry);
       useWithinAnalysisIndicator = latestAnalysisClaimCount() > 1;
-      activeHidden = false;
     } else {
-      // Subsequent analysis: preserve the cursor. The user stays on whatever
-      // entry they were reading. The new analysis is reachable by swiping
-      // down. activeHidden is preserved (reveal jumps to session end).
-      // New entries were appended → existing sessionPageIndex still points to
-      // the same entry/page. Clamp in case the prior cursor was past-end.
+      // Defensive: no new ids matched any entry — shouldn't happen in the
+      // real flow, but clamp the cursor and fall back to session-relative
+      // indicator so we don't hand back a stale "1/N" tag.
       if (sessionPageIndex >= sessionPages.length) {
         sessionPageIndex = Math.max(0, sessionPages.length - 1);
       }
-      // Indicator mode: only stay within-analysis if the preserved cursor
-      // happens to sit inside the new latest range (effectively never, since
-      // those entries are brand new and the cursor predates them).
-      useWithinAnalysisIndicator = cursorInLatestRange();
+      useWithinAnalysisIndicator = false;
     }
   } else {
     // Direct-call path (tests, menu replay): synthesize a 1-entry session
@@ -619,9 +614,12 @@ function summaryBadgeBaseline(): string {
  * Drive the picker page's top-right summary badge through final-summary states.
  * No-op when the picker isn't on screen; safe to call from lifecycle hooks.
  *
- * - 'generating' → "generating summary..."
- * - 'ready'      → "summary ready!", auto-reverts to baseline after 2.5 s
+ * - 'generating' → "summarizing..."
+ * - 'ready'      → "summary ready", auto-reverts to baseline after 2.5 s
  * - 'idle'       → baseline ("auto-summary" if enabled, blank otherwise)
+ *
+ * Strings are sized to match "auto-summary" (12 chars) — the badge container
+ * is 180 px wide and longer text clips on hardware.
  *
  * When autoSummaryEnabled is false the slot stays blank regardless of state —
  * the feature isn't surfaced to the wearer so progress shouldn't be either.
@@ -637,11 +635,11 @@ export async function setSummaryBadgeState(state: SummaryBadgeState): Promise<vo
     return;
   }
   if (state === 'generating') {
-    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'generating summary...');
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'summarizing...');
     return;
   }
   if (state === 'ready') {
-    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'summary ready!');
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'summary ready');
     summaryBadgeReadyTimer = setTimeout(() => {
       summaryBadgeReadyTimer = null;
       if (currentPage !== 'picker') return;
@@ -740,11 +738,24 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       return { top: '', middle: '', bottom: formatSessionSummaryBody(result) };
     case 'meeting-prep': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      // claim 0 is the primary answer; later claims are follow-up prompts.
-      // The "→" prefix distinguishes follow-ups from the answer at a glance.
-      const text = claimIdx === 0 ? c.text : `→ ${c.text}`;
-      const middle = c.source ? `From: ${c.source}` : '';
-      return { top: clip(text, 140), middle, bottom: c.detail };
+      // Each claim kind gets its own visual treatment so the user can tell
+      // answer / supporting evidence / follow-up apart while swiping.
+      switch (c.kind) {
+        case 'answer':
+          return {
+            top: clip(c.text, 140),
+            middle: c.source ? `From: ${c.source}` : '',
+            bottom: c.detail,
+          };
+        case 'evidence':
+          return {
+            top: clip(`"${c.text}"`, 140),
+            middle: c.source ? `From: ${c.source}` : '',
+            bottom: '',
+          };
+        case 'followup':
+          return { top: clip(`→ ${c.text}`, 140), middle: '', bottom: '' };
+      }
     }
   }
 }

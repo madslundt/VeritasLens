@@ -267,25 +267,25 @@ describe('setSummaryBadgeState', () => {
       .map((c) => c[0].payload.content);
   }
 
-  it('writes "generating summary..." when auto-summary is enabled', async () => {
+  it('writes "summarizing..." when auto-summary is enabled', async () => {
     await saveAutoSummaryEnabled(fakeSetLs, true);
     await bootstrapHud('picker');
     bridge.textContainerUpgrade.mockClear();
     await setSummaryBadgeState('generating');
-    expect(badgeWrites()).toEqual(['generating summary...']);
+    expect(badgeWrites()).toEqual(['summarizing...']);
   });
 
-  it('flashes "summary ready!" then reverts to "auto-summary" after 2.5s', async () => {
+  it('flashes "summary ready" then reverts to "auto-summary" after 2.5s', async () => {
     vi.useFakeTimers();
     try {
       await saveAutoSummaryEnabled(fakeSetLs, true);
       await bootstrapHud('picker');
       bridge.textContainerUpgrade.mockClear();
       await setSummaryBadgeState('ready');
-      expect(badgeWrites()).toEqual(['summary ready!']);
+      expect(badgeWrites()).toEqual(['summary ready']);
       vi.advanceTimersByTime(2500);
       await Promise.resolve();
-      expect(badgeWrites()).toEqual(['summary ready!', 'auto-summary']);
+      expect(badgeWrites()).toEqual(['summary ready', 'auto-summary']);
     } finally {
       vi.useRealTimers();
     }
@@ -861,7 +861,7 @@ describe('session-wide swipe scroll', () => {
     expect(outcome).toBe('noop');
   });
 
-  it('crosses into older history: indicator flips from 1/2 within-analysis to X/Y session', async () => {
+  it('subsequent analysis jumps cursor to its first claim; swipe-up crosses to session indicator', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -871,61 +871,54 @@ describe('session-wide swipe scroll', () => {
     const eNew2 = entry({ id: 'n2', verdict: 'FALSE', claim: 'NEW-2' });
     // First analysis: 2 old entries.
     await setLensResult(eOld2.result, { sessionEntries: [eOld1, eOld2], newEntryIds: new Set(['o1', 'o2']) });
-    // Subsequent analysis: append 2 new entries (cursor preserved at first
-    // old entry per the "stay where the user was" rule).
+    // Subsequent analysis: 2 new entries appended. Cursor jumps to the new
+    // first claim (NEW-1) so the wearer sees the new question immediately.
     await setLensResult(eNew2.result, { sessionEntries: [eOld1, eOld2, eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
 
-    // Subsequent analysis preserves cursor at entry 0 (OLD-1). Indicator
-    // is session-relative since cursor is outside the new latest range.
-    expect(lastUpgradeByName('vl-claim')).toBe('1/4 · OLD-1');
-
-    // Swipe down advances through session.
-    bridge.textContainerUpgrade.mockClear();
-    await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-claim')).toBe('2/4 · OLD-2');
-    await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-claim')).toBe('3/4 · NEW-1');
-    await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-claim')).toBe('4/4 · NEW-2');
-
-    // Swipe down past the last page hides (session end).
-    const outcome = await scrollActiveReason(1);
-    expect(outcome).toBe('hidden');
-    expect(isActiveHidden()).toBe(true);
-
-    // Reveal jumps to the last session page (Y/Y).
-    bridge.textContainerUpgrade.mockClear();
-    const reveal = await scrollActiveReason(-1);
-    expect(reveal).toBe('revealed');
-    expect(lastUpgradeByName('vl-claim')).toBe('4/4 · NEW-2');
-  });
-
-  it('within-analysis 1/N for fresh single multi-claim analysis crosses to session X/Y on swipe-up', async () => {
-    await bootstrapHud('picker');
-    await showActivePage(getPersona('fact-checker')!);
-
-    const eOld = entry({ id: 'o', verdict: 'TRUE', claim: 'OLD' });
-    const eNew1 = entry({ id: 'n1', verdict: 'TRUE',  claim: 'NEW-1' });
-    const eNew2 = entry({ id: 'n2', verdict: 'FALSE', claim: 'NEW-2' });
-
-    // Prior single-claim entry already exists in this session; user then
-    // analyzed and got 2 new claims (split into 2 entries).
-    await setLensResult(eOld.result, { sessionEntries: [eOld], newEntryIds: new Set(['o']) });
-    // Mid-session-scroll cursor isn't important — what matters is the new
-    // analysis's first claim should land at the cursor only on first-analysis.
-    // Since this isn't first-analysis, the cursor stays at OLD. We need to
-    // get the cursor onto the latest analysis to see 1/2 within-analysis.
-    // Simulate that the user is on the latest analysis fresh by clearing first.
-    await setLensResult(null);
-    // First analysis of the session: the 2-claim analysis lands.
-    await setLensResult(eNew2.result, { sessionEntries: [eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
-    // Cursor at first new claim → within-analysis 1/2.
+    // Within-analysis indicator: 1/2 across the just-pushed entries.
     expect(lastUpgradeByName('vl-claim')).toBe('1/2 · NEW-1');
 
     // Swipe down stays within-analysis → 2/2.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
     expect(lastUpgradeByName('vl-claim')).toBe('2/2 · NEW-2');
+
+    // Swipe down past the last page hides (session end).
+    const outcome = await scrollActiveReason(1);
+    expect(outcome).toBe('hidden');
+    expect(isActiveHidden()).toBe(true);
+
+    // Reveal jumps to the last session page (Y/Y) in session mode.
+    bridge.textContainerUpgrade.mockClear();
+    const reveal = await scrollActiveReason(-1);
+    expect(reveal).toBe('revealed');
+    expect(lastUpgradeByName('vl-claim')).toBe('4/4 · NEW-2');
+  });
+
+  it('swipe-up from first claim of latest analysis crosses to session X/Y and sticks', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const eOld1 = entry({ id: 'o1', verdict: 'TRUE',  claim: 'OLD-1' });
+    const eOld2 = entry({ id: 'o2', verdict: 'FALSE', claim: 'OLD-2' });
+    const eNew1 = entry({ id: 'n1', verdict: 'TRUE',  claim: 'NEW-1' });
+    const eNew2 = entry({ id: 'n2', verdict: 'FALSE', claim: 'NEW-2' });
+    await setLensResult(eOld2.result, { sessionEntries: [eOld1, eOld2], newEntryIds: new Set(['o1', 'o2']) });
+    await setLensResult(eNew2.result, { sessionEntries: [eOld1, eOld2, eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
+
+    // Cursor sits on the new first claim — within-analysis 1/2.
+    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · NEW-1');
+
+    // Swipe up exits the latest range → indicator flips to session X/Y.
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(-1);
+    expect(lastUpgradeByName('vl-claim')).toBe('2/4 · OLD-2');
+
+    // Swipe back down: session mode sticks even though we re-enter the
+    // latest range (per spec: "the number would now be X/Y instead of 1/2").
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-claim')).toBe('3/4 · NEW-1');
   });
 
   it('no indicator on a single-claim, single-entry session', async () => {
