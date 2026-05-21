@@ -1165,6 +1165,12 @@ export function resetHudSessionState(): void {
   activeLayout = 'baseline';
   pendingActiveResult = null;
   pendingMenuSpinnerFrame = '';
+  // Cancel any pending picker-hint flash so its 2.5s callback can't fire after
+  // the session has been torn down and attempt to upgradeText on a stale page.
+  if (pickerHintFlashTimer) {
+    clearTimeout(pickerHintFlashTimer);
+    pickerHintFlashTimer = null;
+  }
 }
 
 export function _resetHudBootstrapForTesting(): void {

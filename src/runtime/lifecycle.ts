@@ -70,6 +70,11 @@ let unsubscribeEvents: (() => void) | null = null;
 let inflight: AbortController | null = null;
 let analyzing = false;
 let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
+// Abort handle for the in-flight auto-summary tick. Separate from `inflight`
+// (which tracks the foreground analysis) so an exit during a periodic tick can
+// cancel its fetch + base64 work instead of letting it run to completion and
+// push stale state into the next session.
+let autoSummaryInflight: AbortController | null = null;
 // In-memory running summaries accumulated during a session by the auto-summary
 // timer. Cleared on session enter / leave / runtime stop. Never persisted on
 // their own — they are folded into the single end-of-session entry by
@@ -135,6 +140,11 @@ export async function stopHudRuntime(): Promise<void> {
   if (!running) return;
   running = false;
   stopSpinner();
+  // Abort the auto-summary tick BEFORE clearing the timer, so a tick already
+  // mid-fetch when shutdown begins doesn't keep its network call (and the WAV
+  // / base64 closures behind it) alive past teardown.
+  autoSummaryInflight?.abort();
+  autoSummaryInflight = null;
   stopAutoSummaryTimer();
   // System shutdown deliberately discards any accumulated intermediate
   // summaries — firing a Gemini call here would race the runtime teardown
@@ -362,10 +372,14 @@ async function leaveActiveSession(): Promise<void> {
   inflight = null;
   analyzing = false;
   stopSpinner();
-  // Stop the periodic timer FIRST, synchronously, so a tick can't fire during
-  // any of the awaits below (audioControl, runFinalSummary) and race a second
-  // Gemini call against the final one — that wasted call's result would be
-  // discarded by the intermediates clear at the end of this function.
+  // Abort any auto-summary tick already in flight, then stop the periodic
+  // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
+  // base64 encoding) terminates immediately and frees its WAV/base64 closures
+  // before the final-summary path snapshots the buffer. Without the abort, a
+  // stray tick could complete after teardown and push a stale intermediate
+  // into the next session's accumulator.
+  autoSummaryInflight?.abort();
+  autoSummaryInflight = null;
   stopAutoSummaryTimer();
   try { await getBridge().audioControl(false); } catch { /* ignore */ }
   // Snapshot the inputs for the end-of-session summary while the buffer and
@@ -705,16 +719,28 @@ async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;
   const apiKey = settings().geminiApiKey;
   if (!apiKey) return;
+  // Per-tick abort handle so leaveActiveSession / stopHudRuntime can cancel
+  // a tick mid-fetch. The identity check on success ensures we don't push a
+  // result that arrived after an exit reset the accumulator.
+  autoSummaryInflight?.abort();
+  const controller = new AbortController();
+  autoSummaryInflight = controller;
+  let wav: Uint8Array | null = buffer.snapshotWav();
   try {
-    const wav = buffer.snapshotWav();
     const rawText = await callLens({
       apiKey,
       wav,
       prompt: buildSessionSummaryPrompt(settings().responseLanguage),
       schema: SESSION_SUMMARY_SCHEMA,
       model: settings().geminiModel,
+      signal: controller.signal,
     });
+    // Release the WAV reference as soon as the network call resolves so GC can
+    // reclaim it during JSON parsing rather than holding it across the parse.
+    wav = null;
+    if (controller.signal.aborted) return;
     const result = parseSessionSummaryResponse(rawText);
+    if (autoSummaryInflight !== controller) return; // stale tick — discard
     // Intermediate tick — accumulate text in memory only. The final end-of-
     // session call folds these into one history entry; intermediates never
     // appear in History on their own.
@@ -728,6 +754,8 @@ async function runAutoSummary(): Promise<void> {
       });
     }
   } catch (err) {
+    wav = null;
+    if ((err as Error)?.name === 'AbortError') return;
     // Auto-summary is best-effort, but failures should be observable in the
     // debug log so the user can see why the timer is firing without producing
     // entries (network down, quota, etc.).
@@ -735,6 +763,8 @@ async function runAutoSummary(): Promise<void> {
       label: 'auto-summary-fail',
       detail: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    if (autoSummaryInflight === controller) autoSummaryInflight = null;
   }
 }
 
@@ -747,6 +777,7 @@ interface FinalSummaryInputs {
     keyPoints?: string[];
     quote?: string;
   }>;
+  /** Mutable so runFinalSummary can null it after handing off to callLens, releasing the ~36 MB WAV for GC during the network wait. */
   wav: Uint8Array | null;
   apiKey: string;
   language: LanguageCode;
@@ -795,9 +826,15 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
       });
       return;
     }
+    // Pull wav off the inputs object so the network call holds the last
+    // reference. After callLens resolves we drop it immediately, freeing the
+    // ~36 MB linear PCM / WAV pair for GC during JSON parsing rather than
+    // pinning it through the parse + history-write path.
+    const wav = inputs.wav;
+    inputs.wav = null;
     const rawText = await callLens({
       apiKey: inputs.apiKey,
-      wav: inputs.wav,
+      wav,
       prompt,
       schema: SESSION_SUMMARY_SCHEMA,
       model: inputs.model,

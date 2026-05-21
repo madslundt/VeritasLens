@@ -53,22 +53,29 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     },
   };
 
-  const body = {
-    contents: [
-      {
-        role: 'user',
-        parts: [
-          { text: opts.prompt },
-          { inlineData: { mimeType: 'audio/wav', data: uint8ToBase64(opts.wav) } },
-        ],
+  // Build the request body once and serialize to JSON immediately so the WAV
+  // → base64 string and the intermediate `body` object can be GC'd before the
+  // first fetch even leaves the function. Without this, retries hold the body
+  // object alive (with its multi-MB base64 string) across every retry-delay.
+  const bodyJson = ((): string => {
+    const body = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: opts.prompt },
+            { inlineData: { mimeType: 'audio/wav', data: uint8ToBase64(opts.wav) } },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+        responseSchema: augmentedSchema,
       },
-    ],
-    generationConfig: {
-      temperature: 0.2,
-      responseMimeType: 'application/json',
-      responseSchema: augmentedSchema,
-    },
-  };
+    };
+    return JSON.stringify(body);
+  })();
 
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
@@ -84,7 +91,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
+        body: bodyJson,
         signal: opts.signal,
       },
     );
@@ -119,11 +126,18 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
 function retryDelay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     if (signal?.aborted) { reject(Object.assign(new Error('Aborted'), { name: 'AbortError' })); return; }
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener('abort', () => {
+    const onAbort = (): void => {
       clearTimeout(timer);
       reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
-    }, { once: true });
+    };
+    const timer = setTimeout(() => {
+      // Detach the abort listener on normal completion so its closure (which
+      // captures `timer` and `reject`) can be GC'd. Without this, up to
+      // MAX_RETRIES stale listeners accumulate on the signal during a session.
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 

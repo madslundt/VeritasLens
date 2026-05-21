@@ -30,7 +30,7 @@ const SETTINGS_KEY_AUTO_SUMMARY_INTERVAL = 'veritaslens.autoSummaryInterval';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 
 const HISTORY_KEY = 'veritaslens.history';
-const HISTORY_BYTE_BUDGET = 300 * 1024;
+const HISTORY_BYTE_BUDGET = 200 * 1024;
 const HISTORY_MAX_ENTRIES = 500;
 
 const MEETING_PREP_KEY = 'veritaslens.meetingPrep';
@@ -226,18 +226,24 @@ async function persistHistory(
   entries: HistoryEntry[]
 ): Promise<void> {
   let json = JSON.stringify(entries);
-  if (json.length > HISTORY_BYTE_BUDGET && entries.length > 0) {
+  // Compare against UTF-8 byte length, not `.length` (UTF-16 code units), so
+  // non-ASCII summaries (Dansk, Norsk, Deutsch) can't sneak past the cap —
+  // some characters cost 2-3 bytes but only one code unit each.
+  let bytes = utf8ByteLength(json);
+  if (bytes > HISTORY_BYTE_BUDGET && entries.length > 0) {
     // Estimate the surviving tail length from the size ratio, then linearly
     // fine-tune by chunks of 10 % to absorb estimation error. This keeps trim
     // work effectively O(log n) on the byte count instead of O(n) re-stringifies.
-    const ratio = HISTORY_BYTE_BUDGET / json.length;
+    const ratio = HISTORY_BYTE_BUDGET / bytes;
     let keep = Math.max(1, Math.floor(entries.length * ratio * 0.9));
     let trimmed = entries.slice(-keep);
     json = JSON.stringify(trimmed);
-    while (json.length > HISTORY_BYTE_BUDGET && trimmed.length > 1) {
+    bytes = utf8ByteLength(json);
+    while (bytes > HISTORY_BYTE_BUDGET && trimmed.length > 1) {
       keep = Math.max(1, Math.floor(trimmed.length * 0.9));
       trimmed = trimmed.slice(-keep);
       json = JSON.stringify(trimmed);
+      bytes = utf8ByteLength(json);
     }
   }
   await setLs(HISTORY_KEY, json);
