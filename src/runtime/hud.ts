@@ -10,8 +10,8 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import { measureTextWrap } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
-import { getPickerPersonas, type Persona } from '@/personas';
-import { settings } from '@/state/store';
+import { getPersona, getPickerPersonas, type Persona } from '@/personas';
+import { activePersona, settings } from '@/state/store';
 import type { HistoryEntry, LensResult } from '@/types';
 
 /**
@@ -1228,12 +1228,14 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
 }
 
 function buildMenuPage(): RebuildPageContainer {
-  // Title sized tight around "Menu" so LVGL's end-of-label caret sits outside
-  // the container clip. Clock sized tight around "HH:MM" for the same reason.
+  // Title shows the active lens name so the wearer knows which lens this
+  // menu belongs to. Clock sized tight around "HH:MM" so LVGL's end-of-label
+  // caret sits outside the container clip.
+  const titleText = getPersona(activePersona())?.name ?? 'Menu';
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
-    width: 64, height: 32, borderWidth: 0, paddingLength: 0,
-    content: 'Menu', isEventCapture: 0,
+    width: SCREEN_W - 112, height: 32, borderWidth: 0, paddingLength: 0,
+    content: titleText, isEventCapture: 0,
   });
   // Spinner sits immediately left of the clock; populated by setMenuSpinner
   // while an analysis is in flight, empty otherwise.
