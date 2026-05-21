@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.10",
+    "@evenrealities/pretext": "^0.1.4",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {

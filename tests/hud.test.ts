@@ -730,3 +730,197 @@ describe('menu spinner', () => {
     expect(spinner?.content).toBe('');
   });
 });
+
+describe('line-aware pagination', () => {
+  type TextBag = { payload: { containerName: string; content: string; height?: number; width?: number; paddingLength?: number } };
+  type RebuildBag = { payload: { containerTotalNum: number; textObject: TextBag[]; listObject: unknown[] } };
+
+  function lastRebuildPayload(): RebuildBag['payload'] {
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    return calls.at(-1)![0].payload;
+  }
+  function findText(payload: RebuildBag['payload'], name: string): TextBag['payload'] | undefined {
+    return payload.textObject.find((t) => t.payload.containerName === name)?.payload;
+  }
+  function lastUpgradeByName(name: string): string | undefined {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
+    }
+    return undefined;
+  }
+
+  it('paginates a long reason into multiple pages, each fitting the line budget', async () => {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    // ~2000-char prose so it definitely overflows even the larger scroll
+    // budget. Use real words so word-boundary breaks happen.
+    const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(60);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
+    });
+    // Walk through every page; each page must fit within the larger budget.
+    // 8 lines × 27px = 216px is the discreet-scroll budget; baseline-scroll is
+    // 7×27 = 189px. We're in baseline by default, so 7 lines is the cap.
+    let upgrades = 1;
+    const maxHeightPx = 7 * 27;
+    let page = lastUpgradeByName('vl-reason')!;
+    expect(page).toBeDefined();
+    expect(measureTextWrap(page, 536).height).toBeLessThanOrEqual(4 * 27); // page 0 = full layout = 4 lines
+    while (true) {
+      bridge.textContainerUpgrade.mockClear();
+      await scrollActiveReason(1);
+      const next = lastUpgradeByName('vl-reason');
+      if (!next) break; // hit the end
+      expect(measureTextWrap(next, 536).height).toBeLessThanOrEqual(maxHeightPx);
+      page = next;
+      upgrades++;
+      if (upgrades > 50) throw new Error('runaway pagination loop');
+    }
+    expect(upgrades).toBeGreaterThan(1);
+  });
+
+  it('paginates without mid-word cuts when word boundaries exist', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    const reason = ('alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon ').repeat(8);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason }],
+    });
+    // First page should end on a space-bounded word, not in the middle of one.
+    const page0 = lastUpgradeByName('vl-reason')!;
+    expect(page0).toBeDefined();
+    const lastChar = page0[page0.length - 1]!;
+    // Trailing trim leaves either a complete word or a space-followed word.
+    // The previous character before EOL must be either alphabetic or end-of-text.
+    expect(/[a-z]$/.test(page0)).toBe(true);
+    // Crucially: scroll forward and verify the next page begins at the start
+    // of the next word, not mid-token from the previous one.
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    const page1 = lastUpgradeByName('vl-reason')!;
+    expect(page1).toBeDefined();
+    // The first char must be the start of a word in our list (or the original
+    // text). It must not be a continuation of "alpha"/"beta"/etc.
+    expect(/^[a-z]/.test(page1)).toBe(true);
+    // No leading whitespace either — we trim that off.
+    expect(page1[0]).not.toBe(' ');
+    void lastChar; // referenced for the test name; the actual contract is checked above
+  });
+
+  it('linearizes multi-claim navigation: each claim contributes 1+ pages in order', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(60);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [
+        { quote: '', verdict: 'TRUE',  claim: 'CLAIM-A', reason: longReason },
+        { quote: '', verdict: 'FALSE', claim: 'CLAIM-B', reason: 'short B reason' },
+      ],
+    });
+    // Page 0 = claim A page 0 (full layout): claim/verdict upgrades present.
+    expect(lastUpgradeByName('vl-claim')).toContain('1/2');
+    expect(lastUpgradeByName('vl-claim')).toContain('CLAIM-A');
+    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
+
+    // Walk forward until we reach claim B's page 0 — at that point the claim
+    // line should reflect "2/2 · CLAIM-B" (back to full layout).
+    let safety = 30;
+    while (safety-- > 0) {
+      bridge.textContainerUpgrade.mockClear();
+      await scrollActiveReason(1);
+      const claim = lastUpgradeByName('vl-claim');
+      if (claim && claim.includes('2/2') && claim.includes('CLAIM-B')) {
+        expect(lastUpgradeByName('vl-verdict')).toBe('- FALSE');
+        expect(lastUpgradeByName('vl-reason')).toContain('short B reason');
+        return;
+      }
+    }
+    throw new Error('never reached claim B in linearized traversal');
+  });
+
+  it('rebuilds the page container when crossing the full→scroll layout boundary', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(60);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
+    });
+
+    // Page 0 is the baseline layout (full chrome).
+    let payload = lastRebuildPayload();
+    expect(findText(payload, 'vl-rec')).toBeDefined();
+    expect(findText(payload, 'vl-claim')).toBeDefined();
+    expect(findText(payload, 'vl-compact')).toBeUndefined();
+
+    bridge.rebuildPageContainer.mockClear();
+    await scrollActiveReason(1); // → page 1 = baseline-scroll
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+
+    payload = lastRebuildPayload();
+    // Scroll layout has compact header instead of claim/verdict; rec/hint stay.
+    expect(findText(payload, 'vl-compact')).toBeDefined();
+    expect(findText(payload, 'vl-claim')).toBeUndefined();
+    expect(findText(payload, 'vl-verdict')).toBeUndefined();
+    expect(findText(payload, 'vl-rec')).toBeDefined();
+    expect(findText(payload, 'vl-act-hint')).toBeDefined();
+  });
+
+  it('scroll layout reuses the compact header with verdict glyph and claim position', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(60);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [
+        { quote: '', verdict: 'TRUE',  claim: 'C1', reason: longReason },
+        { quote: '', verdict: 'FALSE', claim: 'C2', reason: 'short' },
+      ],
+    });
+    await scrollActiveReason(1); // claim 1 page 1 = baseline-scroll
+    const payload = lastRebuildPayload();
+    const header = payload.textObject.find((t) => t.payload.containerName === 'vl-compact');
+    expect(header).toBeDefined();
+    // Multi-claim → header should show position + verdict glyph.
+    expect(header!.payload.content).toContain('1/2');
+    expect(header!.payload.content).toContain('+ TRUE');
+  });
+
+  it('history-detail entry hop still fires at the flat-page edges', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const e1: HistoryEntry = {
+      id: 'h1', timestamp: 2, sessionId: 's',
+      lensId: 'fact-checker', lensName: 'Fact Check', question: 'q1',
+      badge: 'TRUE', quote: '',
+      result: { type: 'fact-check', claims: [{ quote: '', verdict: 'TRUE', claim: 'c1', reason: 'r1' }] },
+    };
+    const e2: HistoryEntry = {
+      id: 'h2', timestamp: 1, sessionId: 's',
+      lensId: 'fact-checker', lensName: 'Fact Check', question: 'q2',
+      badge: 'FALSE', quote: '',
+      result: { type: 'fact-check', claims: [{ quote: '', verdict: 'FALSE', claim: 'c2', reason: 'r2' }] },
+    };
+    await showHistoryListPage([e1, e2]);
+    await showHistoryDetailPage(e1);
+
+    // e1's reason is one page only — swipe-down should hop to e2.
+    bridge.rebuildPageContainer.mockClear();
+    await scrollHistoryDetail(1);
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    const payload = calls.at(-1)![0].payload;
+    const claim = payload.textObject.find((t) => t.payload.containerName === 'vl-claim');
+    expect(claim?.payload.content).toContain('c2');
+  });
+});

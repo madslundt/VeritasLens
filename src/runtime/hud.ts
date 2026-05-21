@@ -8,6 +8,7 @@ import {
   TextContainerProperty,
   TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
+import { measureTextWrap } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
 import { getPickerPersonas, type Persona } from '@/personas';
 import { settings } from '@/state/store';
@@ -58,6 +59,8 @@ export const CONTAINER = {
   activeHint: 26,
   clock: 27,
   menuSpinner: 28,
+  // compact header (used on scroll layouts: page 2+ of a claim)
+  compactHeader: 29,
   // history pages
   historyList: 30,
   historyHint: 31,
@@ -77,6 +80,7 @@ const NAME = {
   activeHint: 'vl-act-hint',
   clock: 'vl-clock',
   menuSpinner: 'vl-menu-spin',
+  compactHeader: 'vl-compact',
   historyList: 'vl-hist-lst',
   historyHint: 'vl-hist-hint',
 } as const;
@@ -108,21 +112,38 @@ export const EXIT_LABEL_WITH_SUMMARY = 'Exit - generate summary';
 // reflects whether leaveActiveSession will fire a final summary.
 let exitGeneratesSummary = false;
 
-const DETAIL_PAGE_CHARS = 200;
-const ACTIVE_PAGE_CHARS = 200;
-let detailReasonFull = '';
-let detailReasonOffset = 0;
+// Line-aware pagination constants. The reason container is the only scrollable
+// region. Inner width = container width 544 minus 2*padding (4) = 536px.
+// Line height is sourced from pretext (a single-line measurement) so a font
+// bump in @evenrealities/pretext doesn't silently break pagination.
+const LINE_PX = measureTextWrap('X', 1000).height;
+const REASON_INNER_W = SCREEN_W - 32 - 2 * 4; // 536
+// On page 0 of a claim (full header layout), reason height varies by mode but
+// inner area accommodates ~4 lines of 27px in both baseline (134-8=126px → 4)
+// and discreet-result (126-8=118px → 4).
+const FULL_HEADER_REASON_LINES = 4;
+// On page 1+ of a claim (compact header layout), reason expands. Baseline
+// keeps REC + hint chrome so gets 7 lines; discreet drops chrome for 8 lines.
+const BASELINE_SCROLL_REASON_LINES = 7;
+const DISCREET_SCROLL_REASON_LINES = 8;
+
+/**
+ * One screen-worth of result content. Multi-claim results and long reasons
+ * expand into a flat list of these — swipe-down increments the index,
+ * swipe-up decrements. `pageWithinClaim === 0` is the full-header page
+ * (claim + verdict + reason); higher values are scroll pages with a thin
+ * header and expanded reason.
+ */
+type PageRef = { claimIdx: number; pageWithinClaim: number; text: string };
+
+let activePages: PageRef[] = [];
+let activePageIndex = 0;
+let detailPages: PageRef[] = [];
+let detailPageIndex = 0;
+/** Tracks which history-detail layout is currently on screen (full vs scroll). */
+let detailIsFullLayout = true;
 /** Index into cachedHistoryEntries of the entry currently shown on history-detail. */
 let historyDetailIndex = -1;
-let activeReasonFull = '';
-let activeReasonOffset = 0;
-/**
- * For multi-claim results (fact / stats / fallacy / bias), tracks which claim
- * is currently rendered on the active page (0 or 1). Reset on every
- * setLensResult; scroll-down advances, scroll-up reverses. Single-claim
- * results leave this at 0 and fall back to reason pagination as before.
- */
-let activeClaimIndex = 0;
 let currentActiveResult: LensResult | null = null;
 // Stash for results that arrive while the user is off the active page (e.g.
 // they opened the menu while analysis was in flight). Consumed when the
@@ -140,11 +161,18 @@ let menuPersona: Persona | null = null;
 let cachedHistoryEntries: HistoryEntry[] = [];
 /**
  * Sub-mode for the active page. Driven by the lifecycle, read by buildActivePage.
- *   - 'baseline'         : current default; REC + hint + full layout
+ *   - 'baseline'         : default with chrome; full claim/verdict/reason (page 0)
+ *   - 'baseline-scroll'  : page 1+ of a claim with chrome — compact header + tall reason
  *   - 'discreet-minimal' : single recording dot only (no claim/REC/hint)
- *   - 'discreet-result'  : status + claim/verdict/reason + dot, no REC/hint
+ *   - 'discreet-result'  : pure question/answer, no chrome (page 0)
+ *   - 'discreet-scroll'  : page 1+ of a claim, no chrome — compact header + full-height reason
  */
-export type ActiveLayout = 'baseline' | 'discreet-minimal' | 'discreet-result';
+export type ActiveLayout =
+  | 'baseline'
+  | 'baseline-scroll'
+  | 'discreet-minimal'
+  | 'discreet-result'
+  | 'discreet-scroll';
 let activeLayout: ActiveLayout = 'baseline';
 export function getActiveLayout(): ActiveLayout { return activeLayout; }
 export function setActiveLayout(layout: ActiveLayout): void { activeLayout = layout; }
@@ -244,34 +272,32 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     cachedHistoryEntries = [entry];
     historyDetailIndex = 0;
   }
-  detailReasonFull = formatLensResult(entry.result).bottom;
-  detailReasonOffset = 0;
-  const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry));
+  detailPages = computePagesForResult(entry.result, /*scrollLines*/ DISCREET_SCROLL_REASON_LINES);
+  detailPageIndex = 0;
+  const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
   currentPage = 'history-detail';
 }
 
 export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
   if (currentPage !== 'history-detail') return;
-  // Mirror the multi-claim active-page pattern: swipe walks between entries
-  // first (most-recent-first ordering, so scroll-down advances to an older
-  // entry). When you're already at the first/last entry, fall through to
-  // reason pagination so a long single reason is still scrollable.
-  const nextIdx = historyDetailIndex + dir;
-  if (nextIdx >= 0 && nextIdx < cachedHistoryEntries.length) {
-    historyDetailIndex = nextIdx;
-    const entry = cachedHistoryEntries[nextIdx]!;
-    detailReasonFull = formatLensResult(entry.result).bottom;
-    detailReasonOffset = 0;
-    const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry));
-    if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
+  // Within the current entry, walk the flat page list (linearized across
+  // claims + reason sub-pages). When we fall off either edge, hop to the
+  // neighbour entry — preserving the cross-entry behaviour.
+  const nextIdx = detailPageIndex + dir;
+  if (nextIdx >= 0 && nextIdx < detailPages.length) {
+    detailPageIndex = nextIdx;
+    await renderHistoryDetailPage();
     return;
   }
-  const maxOffset = Math.max(0, detailReasonFull.length - DETAIL_PAGE_CHARS);
-  const newOffset = Math.max(0, Math.min(maxOffset, detailReasonOffset + dir * DETAIL_PAGE_CHARS));
-  if (newOffset === detailReasonOffset) return;
-  detailReasonOffset = newOffset;
-  await upgradeText(CONTAINER.reason, NAME.reason, detailReasonFull.slice(detailReasonOffset, detailReasonOffset + DETAIL_PAGE_CHARS));
+  const nextEntry = historyDetailIndex + dir;
+  if (nextEntry < 0 || nextEntry >= cachedHistoryEntries.length) return;
+  historyDetailIndex = nextEntry;
+  const entry = cachedHistoryEntries[nextEntry]!;
+  detailPages = computePagesForResult(entry.result, DISCREET_SCROLL_REASON_LINES);
+  detailPageIndex = 0;
+  const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
+  if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
 }
 
 export async function restoreHistoryListPage(): Promise<void> {
@@ -303,29 +329,28 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     if (result) pendingActiveResult = result;
     return;
   }
-  // Reset the claim cursor on every new result so the user always sees claim
-  // 1 first; scroll-down can then walk to claim 2 when present.
-  activeClaimIndex = 0;
   currentActiveResult = result;
-  // Discreet swaps between two page layouts depending on whether an answer is
-  // on screen: dot-only while listening/thinking, full-screen question+answer
-  // once a result arrives. Promote/demote here so callers don't have to.
-  if (currentPage === 'active' && activeLayout === 'discreet-minimal') {
-    if (!result) return; // nothing to show — keep the dot
-    setActiveLayout('discreet-result');
-    const ok = await getBridge().rebuildPageContainer(buildActivePage());
-    if (!ok) throw new Error('rebuildPageContainer (discreet-result) failed.');
-  } else if (currentPage === 'active' && activeLayout === 'discreet-result' && !result) {
-    setActiveLayout('discreet-minimal');
-    const ok = await getBridge().rebuildPageContainer(buildActivePage());
-    if (!ok) throw new Error('rebuildPageContainer (discreet-minimal) failed.');
-    activeReasonFull = '';
-    activeReasonOffset = 0;
-    return;
-  }
+
+  // Null result paths — clear or demote, matching prior behaviour. Discreet
+  // demotes to the dot-only idle layout; baseline-scroll falls back to baseline
+  // (so the claim/verdict containers exist again); baseline just clears text.
   if (!result) {
-    activeReasonFull = '';
-    activeReasonOffset = 0;
+    activePages = [];
+    activePageIndex = 0;
+    if (currentPage !== 'active') return;
+    if (activeLayout === 'discreet-minimal') return; // already idle
+    if (isDiscreetLayout(activeLayout)) {
+      setActiveLayout('discreet-minimal');
+      const ok = await getBridge().rebuildPageContainer(buildActivePage());
+      if (!ok) throw new Error('rebuildPageContainer (discreet-minimal) failed.');
+      return;
+    }
+    if (activeLayout === 'baseline-scroll') {
+      setActiveLayout('baseline');
+      const ok = await getBridge().rebuildPageContainer(buildActivePage());
+      if (!ok) throw new Error('rebuildPageContainer (baseline) failed.');
+      return;
+    }
     await Promise.all([
       upgradeText(CONTAINER.claim, NAME.claim, ''),
       upgradeText(CONTAINER.verdict, NAME.verdict, ''),
@@ -333,49 +358,27 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     ]);
     return;
   }
-  const { top, middle, bottom } = formatLensResult(result);
-  let reasonContent = bottom;
+
+  // Compute the flat page list for this result. Line budget for page 2+ depends
+  // on whether the current mode is discreet (no chrome) or baseline (REC+hint).
+  const scrollLines = isDiscreetLayout(activeLayout) ? DISCREET_SCROLL_REASON_LINES : BASELINE_SCROLL_REASON_LINES;
+  activePages = computePagesForResult(result, scrollLines);
+  activePageIndex = 0;
   if (currentPage === 'active') {
-    activeReasonFull = bottom;
-    activeReasonOffset = 0;
-    reasonContent = bottom.slice(0, ACTIVE_PAGE_CHARS);
+    await renderActivePage();
+  } else {
+    // history-detail: setLensResult is unused on this page in practice (the
+    // history flow uses showHistoryDetailPage). Nothing to do.
   }
-  await Promise.all([
-    upgradeText(CONTAINER.claim, NAME.claim, top),
-    upgradeText(CONTAINER.verdict, NAME.verdict, middle),
-    upgradeText(CONTAINER.reason, NAME.reason, reasonContent),
-  ]);
 }
 
 export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
   if (currentPage !== 'active') return;
-  // Multi-claim swap takes precedence over reason pagination. Scroll-down
-  // walks claim 1 → claim 2; scroll-up reverses. When the requested move
-  // would fall outside the claim range, fall through to reason pagination so
-  // a long single claim's reason can still be scrolled.
-  if (currentActiveResult) {
-    const total = claimCount(currentActiveResult);
-    if (total > 1) {
-      const next = activeClaimIndex + dir;
-      if (next >= 0 && next < total) {
-        activeClaimIndex = next;
-        const { top, middle, bottom } = formatLensResult(currentActiveResult, activeClaimIndex);
-        activeReasonFull = bottom;
-        activeReasonOffset = 0;
-        await Promise.all([
-          upgradeText(CONTAINER.claim, NAME.claim, top),
-          upgradeText(CONTAINER.verdict, NAME.verdict, middle),
-          upgradeText(CONTAINER.reason, NAME.reason, bottom.slice(0, ACTIVE_PAGE_CHARS)),
-        ]);
-        return;
-      }
-    }
-  }
-  const maxOffset = Math.max(0, activeReasonFull.length - ACTIVE_PAGE_CHARS);
-  const newOffset = Math.max(0, Math.min(maxOffset, activeReasonOffset + dir * ACTIVE_PAGE_CHARS));
-  if (newOffset === activeReasonOffset) return;
-  activeReasonOffset = newOffset;
-  await upgradeText(CONTAINER.reason, NAME.reason, activeReasonFull.slice(activeReasonOffset, activeReasonOffset + ACTIVE_PAGE_CHARS));
+  if (activePages.length === 0) return;
+  const next = activePageIndex + dir;
+  if (next < 0 || next >= activePages.length) return;
+  activePageIndex = next;
+  await renderActivePage();
 }
 
 /** Toggle the recording indicator in the bottom-right of the active page. */
@@ -481,23 +484,23 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       return {
         top: clip(c.claim, 140),
         middle: c.verdict === 'TRUE' ? '+ TRUE' : c.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED',
-        bottom: clip(c.reason, 240),
+        bottom: c.reason,
       };
     }
     case 'trivia': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: clip(c.question, 140), middle: clip(c.answer, 60), bottom: clip(c.description, 240) };
+      return { top: clip(c.question, 140), middle: clip(c.answer, 60), bottom: c.description };
     }
     case 'logical-fallacy': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: c.fallacy.toUpperCase(), middle: '', bottom: clip(c.explanation, 240) };
+      return { top: c.fallacy.toUpperCase(), middle: '', bottom: c.explanation };
     }
     case 'stats-check': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       return {
         top: clip(c.stat, 140),
         middle: c.verdict === 'PLAUSIBLE' ? '+ PLAUSIBLE' : '- SUSPICIOUS',
-        bottom: clip(c.reason, 240),
+        bottom: c.reason,
       };
     }
     case 'bias': {
@@ -505,22 +508,22 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       return {
         top: c.direction ? clip(c.direction, 140) : '',
         middle: c.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED',
-        bottom: clip(c.reason, 240),
+        bottom: c.reason,
       };
     }
     case 'eli5': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: '', middle: '', bottom: clip(c.explanation, 240) };
+      return { top: '', middle: '', bottom: c.explanation };
     }
     case 'session-summary':
-      return { top: '', middle: '', bottom: clip(result.summary, 240) };
+      return { top: '', middle: '', bottom: result.summary };
     case 'meeting-prep': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       // claim 0 is the primary answer; later claims are follow-up prompts.
       // The "→" prefix distinguishes follow-ups from the answer at a glance.
       const text = claimIdx === 0 ? c.text : `→ ${c.text}`;
       const middle = c.source ? `From: ${c.source}` : '';
-      return { top: clip(text, 140), middle, bottom: clip(c.detail, 240) };
+      return { top: clip(text, 140), middle, bottom: c.detail };
     }
   }
 }
@@ -536,6 +539,170 @@ function badgeGlyph(badge: string): string {
   if (u === 'FALSE' || u === 'SUSPICIOUS' || u === 'BIASED') return '- ';
   if (u === 'UNVERIFIED') return '? ';
   return '';
+}
+
+// ------- line-aware pagination -------------------------------------------
+
+/**
+ * Split a reason string into screen-sized chunks. Page 0 uses the smaller
+ * `FULL_HEADER_REASON_LINES` budget (full header above); subsequent pages
+ * use the larger `scrollLines` budget (compact header above). Word boundaries
+ * are preferred; unbreakable runs fall back to character splits.
+ */
+function paginateReason(text: string, scrollLines: number): string[] {
+  const pages: string[] = [];
+  let remaining = text;
+  let isFirst = true;
+  while (remaining.length > 0) {
+    const maxLines = isFirst ? FULL_HEADER_REASON_LINES : scrollLines;
+    const { chunk, rest } = takeLines(remaining, REASON_INNER_W, maxLines);
+    pages.push(chunk);
+    if (rest.length === remaining.length) break; // safety: no forward progress
+    remaining = rest;
+    isFirst = false;
+  }
+  return pages.length > 0 ? pages : [''];
+}
+
+function takeLines(text: string, innerW: number, maxLines: number): { chunk: string; rest: string } {
+  const wholeFits = measureTextWrap(text, innerW);
+  if (wholeFits.lineCount <= maxLines) return { chunk: text, rest: '' };
+
+  // Binary search over word boundaries for the largest prefix that fits.
+  // `split(/(\s+)/)` preserves separators, so we can rejoin losslessly.
+  const words = text.split(/(\s+)/);
+  let lo = 0;
+  let hi = words.length;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const candidate = words.slice(0, mid).join('');
+    if (candidate.length === 0) {
+      best = Math.max(best, mid);
+      lo = mid + 1;
+      continue;
+    }
+    if (measureTextWrap(candidate, innerW).lineCount <= maxLines) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  if (best === 0) {
+    // No word boundary works — the first token alone exceeds the line budget.
+    // Fall back to splitting on the codepoint that fits.
+    return charSplitFallback(text, innerW, maxLines);
+  }
+  const chunk = words.slice(0, best).join('').replace(/\s+$/, '');
+  const rest = words.slice(best).join('').replace(/^\s+/, '');
+  return { chunk, rest };
+}
+
+function charSplitFallback(text: string, innerW: number, maxLines: number): { chunk: string; rest: string } {
+  let lo = 1;
+  let hi = text.length;
+  let best = 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (measureTextWrap(text.slice(0, mid), innerW).lineCount <= maxLines) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return { chunk: text.slice(0, best), rest: text.slice(best) };
+}
+
+/** Build a flat page list spanning every claim and every reason sub-page. */
+function computePagesForResult(result: LensResult, scrollLines: number): PageRef[] {
+  const total = claimCount(result);
+  const out: PageRef[] = [];
+  for (let i = 0; i < total; i++) {
+    const { bottom } = formatLensResult(result, i);
+    const chunks = paginateReason(bottom, scrollLines);
+    chunks.forEach((text, idx) => out.push({ claimIdx: i, pageWithinClaim: idx, text }));
+  }
+  return out;
+}
+
+function formatCompactHeader(result: LensResult, claimIdx: number): string {
+  const { middle } = formatLensResult(result, claimIdx);
+  const count = claimCount(result);
+  const pos = count > 1 ? `${claimIdx + 1}/${count}` : '';
+  if (pos && middle) return `${pos} · ${middle}`;
+  return pos || middle;
+}
+
+function isDiscreetLayout(layout: ActiveLayout): boolean {
+  return layout === 'discreet-minimal' || layout === 'discreet-result' || layout === 'discreet-scroll';
+}
+
+function targetLayoutForActivePage(page: PageRef): ActiveLayout {
+  const discreet = isDiscreetLayout(activeLayout);
+  if (page.pageWithinClaim === 0) return discreet ? 'discreet-result' : 'baseline';
+  return discreet ? 'discreet-scroll' : 'baseline-scroll';
+}
+
+/** Render `activePages[activePageIndex]` on the active page; rebuild if the
+ * target layout differs from the current one. */
+async function renderActivePage(): Promise<void> {
+  if (currentPage !== 'active') return;
+  const page = activePages[activePageIndex];
+  if (!page || !currentActiveResult) return;
+  const target = targetLayoutForActivePage(page);
+  const layoutChanged = target !== activeLayout;
+  if (layoutChanged) {
+    setActiveLayout(target);
+    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    if (!ok) throw new Error('rebuildPageContainer (active) failed.');
+  }
+  if (page.pageWithinClaim === 0) {
+    const { top, middle } = formatLensResult(currentActiveResult, page.claimIdx);
+    await Promise.all([
+      upgradeText(CONTAINER.claim, NAME.claim, top),
+      upgradeText(CONTAINER.verdict, NAME.verdict, middle),
+      upgradeText(CONTAINER.reason, NAME.reason, page.text),
+    ]);
+  } else {
+    // Compact-header layout. The header content is set inline at build time,
+    // so on layout-cross we only need to update the reason. On same-layout
+    // scrolls within the same claim, the header content also doesn't change.
+    await upgradeText(CONTAINER.reason, NAME.reason, page.text);
+  }
+}
+
+/** Render `detailPages[detailPageIndex]` on the history-detail page. */
+async function renderHistoryDetailPage(): Promise<void> {
+  if (currentPage !== 'history-detail') return;
+  const page = detailPages[detailPageIndex];
+  const entry = cachedHistoryEntries[historyDetailIndex];
+  if (!page || !entry) return;
+  const wantsFull = page.pageWithinClaim === 0;
+  const layoutChanged = wantsFull !== detailIsFullLayout;
+  if (layoutChanged) {
+    detailIsFullLayout = wantsFull;
+    const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, page));
+    if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
+    // Build sets compactHeader / claim+verdict content inline. Only the
+    // reason needs an explicit upgrade so callers (and tests) can observe
+    // the scroll firing a textContainerUpgrade.
+    await upgradeText(CONTAINER.reason, NAME.reason, page.text);
+    return;
+  }
+  if (wantsFull) {
+    const { top, middle } = formatLensResult(entry.result, page.claimIdx);
+    const total = cachedHistoryEntries.length;
+    const idxPrefix = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total} · ` : '';
+    await Promise.all([
+      upgradeText(CONTAINER.claim, NAME.claim, `${idxPrefix}${top}`),
+      upgradeText(CONTAINER.verdict, NAME.verdict, middle),
+      upgradeText(CONTAINER.reason, NAME.reason, page.text),
+    ]);
+  } else {
+    await upgradeText(CONTAINER.reason, NAME.reason, page.text);
+  }
 }
 
 // ------- page builders ----------------------------------------------------
@@ -631,9 +798,15 @@ function formatClockTime(): string {
 }
 
 function buildActivePage(): RebuildPageContainer {
-  if (activeLayout === 'discreet-minimal') return buildDiscreetMinimalPage();
-  if (activeLayout === 'discreet-result') return buildDiscreetResultPage();
-  return buildBaselineActivePage();
+  switch (activeLayout) {
+    case 'discreet-minimal': return buildDiscreetMinimalPage();
+    case 'discreet-result': return buildDiscreetResultPage();
+    case 'discreet-scroll': return buildDiscreetScrollPage();
+    case 'baseline-scroll': return buildBaselineScrollPage();
+    case 'baseline':
+    default:
+      return buildBaselineActivePage();
+  }
 }
 
 function buildBaselineActivePage(): RebuildPageContainer {
@@ -724,6 +897,69 @@ function buildDiscreetResultPage(): RebuildPageContainer {
   });
 }
 
+/**
+ * Discreet scroll layout — page 2+ of a claim, no chrome. A 1-line compact
+ * header at the top (claim position + verdict glyph) plus a tall reason area
+ * that holds 8 lines of text. Reason starts at y=36 so the 27px header sits
+ * comfortably without overlap.
+ */
+function buildDiscreetScrollPage(): RebuildPageContainer {
+  const sink = makeFullScreenEventSink();
+  const page = activePages[activePageIndex];
+  const headerContent = page && currentActiveResult ? formatCompactHeader(currentActiveResult, page.claimIdx) : '';
+  const header = new TextContainerProperty({
+    containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
+    borderWidth: 0, paddingLength: 2, content: headerContent, isEventCapture: 0,
+  });
+  // Reason: 8 lines × 27px = 216px text, plus 2×4 padding = 224 container height.
+  const reason = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 40, width: SCREEN_W - 32, height: DISCREET_SCROLL_REASON_LINES * LINE_PX + 8,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: 3, listObject: [],
+    textObject: [sink, header, reason],
+  });
+}
+
+/**
+ * Baseline scroll layout — page 2+ of a claim, keeps REC + hint chrome.
+ * Compact header at the top, reason in the middle (7 lines), REC + hint at
+ * the bottom at the usual y=256 row.
+ */
+function buildBaselineScrollPage(): RebuildPageContainer {
+  const sink = makeFullScreenEventSink();
+  const page = activePages[activePageIndex];
+  const headerContent = page && currentActiveResult ? formatCompactHeader(currentActiveResult, page.claimIdx) : '';
+  const header = new TextContainerProperty({
+    containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
+    borderWidth: 0, paddingLength: 2, content: headerContent, isEventCapture: 0,
+  });
+  // Reason: 7 lines × 27px = 189px text + 2×4 padding = 197 container height.
+  const reason = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 40, width: SCREEN_W - 32, height: BASELINE_SCROLL_REASON_LINES * LINE_PX + 8,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const rec = new TextContainerProperty({
+    containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
+    xPosition: SCREEN_W - 96, yPosition: 256, width: 80, height: 28,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
+    xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
+    borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: 5, listObject: [],
+    textObject: [sink, header, reason, rec, hint],
+  });
+}
+
 function makeFullScreenEventSink(): TextContainerProperty {
   // Full-screen invisible capturer — sits behind all content so SDK has nothing
   // to scroll visually, but still fires textEvents (swipe) and sysEvents (tap).
@@ -774,14 +1010,14 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
   return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
 }
 
-function buildHistoryDetailPage(entry: HistoryEntry): RebuildPageContainer {
-  const { top, middle } = formatLensResult(entry.result);
+function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPageContainer {
+  if (page.pageWithinClaim !== 0) return buildHistoryDetailScrollPage(entry, page);
+  const { top, middle } = formatLensResult(entry.result, page.claimIdx);
   const total = cachedHistoryEntries.length;
   // X/Y position indicator across the current session's entries — only shown
   // when there's more than one, so a single-entry session doesn't get the
   // chrome.
   const idxPrefix = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total} · ` : '';
-  const reasonContent = detailReasonFull.slice(detailReasonOffset, detailReasonOffset + DETAIL_PAGE_CHARS);
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
     xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
@@ -795,7 +1031,7 @@ function buildHistoryDetailPage(entry: HistoryEntry): RebuildPageContainer {
   const reason = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
     xPosition: 16, yPosition: 130, width: SCREEN_W - 32, height: 126,
-    borderWidth: 0, paddingLength: 4, content: reasonContent, isEventCapture: 1,
+    borderWidth: 0, paddingLength: 4, content: page.text, isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeList, containerName: NAME.activeList,
@@ -805,16 +1041,39 @@ function buildHistoryDetailPage(entry: HistoryEntry): RebuildPageContainer {
   return new RebuildPageContainer({ containerTotalNum: 4, listObject: [], textObject: [claim, verdict, reason, hint] });
 }
 
+/** History-detail scroll layout — page 2+ of a claim's reason. Compact header
+ * + tall reason area + bottom hint, with the reason container as the event
+ * sink so swipes register. */
+function buildHistoryDetailScrollPage(entry: HistoryEntry, page: PageRef): RebuildPageContainer {
+  const headerContent = formatCompactHeader(entry.result, page.claimIdx);
+  const header = new TextContainerProperty({
+    containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
+    borderWidth: 0, paddingLength: 2, content: headerContent, isEventCapture: 0,
+  });
+  const reason = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 40, width: SCREEN_W - 32, height: DISCREET_SCROLL_REASON_LINES * LINE_PX + 8,
+    borderWidth: 0, paddingLength: 4, content: page.text, isEventCapture: 1,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList,
+    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
+  });
+  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [], textObject: [header, reason, hint] });
+}
+
 /** Clear per-session HUD state so a fresh session doesn't inherit stale buffers. */
 export function resetHudSessionState(): void {
   menuPersona = null;
   cachedHistoryEntries = [];
-  detailReasonFull = '';
-  detailReasonOffset = 0;
+  detailPages = [];
+  detailPageIndex = 0;
+  detailIsFullLayout = true;
   historyDetailIndex = -1;
-  activeReasonFull = '';
-  activeReasonOffset = 0;
-  activeClaimIndex = 0;
+  activePages = [];
+  activePageIndex = 0;
   currentActiveResult = null;
   activeLayout = 'baseline';
   pendingActiveResult = null;
