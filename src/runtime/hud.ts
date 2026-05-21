@@ -821,9 +821,9 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   });
   const summaryBadge = new TextContainerProperty({
     containerID: CONTAINER.summaryBadge, containerName: NAME.summaryBadge,
-    xPosition: SCREEN_W - 132, yPosition: 8, width: 116, height: 32,
+    xPosition: SCREEN_W - 196, yPosition: 8, width: 180, height: 32,
     borderWidth: 0, paddingLength: 4,
-    content: settings().autoSummaryEnabled ? 'SUMMARY' : '',
+    content: settings().autoSummaryEnabled ? 'auto-summary' : '',
     isEventCapture: 0,
   });
   const list = new ListContainerProperty({
