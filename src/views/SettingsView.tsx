@@ -4,7 +4,9 @@ import {
   MEETING_PREP_BYTE_BUDGET,
   MEETING_PREP_LABEL_MAX,
   availableModels,
+  clearSessionHistory,
   computeMeetingPrepBytes,
+  deleteHistorySession,
   deviceStatus,
   meetingPrepSections,
   modelsLoading,
@@ -186,6 +188,42 @@ export const SettingsView: Component = () => {
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
   const [expandedEntryId, setExpandedEntryId] = createSignal<string | null>(null);
   const [searchQuery, setSearchQuery] = createSignal('');
+  // Two-tap inline confirm for destructive history actions. The first tap on
+  // a row's × stages that row's sessionId; a second tap on the same row's
+  // confirm button calls deleteHistorySession. Same shape for clear-all
+  // (`'__all__'` sentinel). Tapping the cancel half — or any other row's × —
+  // resets the staged id, so only one delete affordance is ever armed at once.
+  const [pendingDeleteId, setPendingDeleteId] = createSignal<string | null>(null);
+  let pendingDeleteTimer: ReturnType<typeof setTimeout> | null = null;
+  const armDelete = (id: string): void => {
+    setPendingDeleteId(id);
+    if (pendingDeleteTimer) clearTimeout(pendingDeleteTimer);
+    // Auto-cancel after 4s if the user walks away without confirming.
+    pendingDeleteTimer = setTimeout(() => setPendingDeleteId(null), 4000);
+  };
+  const cancelDelete = (): void => {
+    setPendingDeleteId(null);
+    if (pendingDeleteTimer) clearTimeout(pendingDeleteTimer);
+    pendingDeleteTimer = null;
+  };
+  onCleanup(() => {
+    if (pendingDeleteTimer) clearTimeout(pendingDeleteTimer);
+  });
+  const getSetLs = (): ((k: string, v: string) => Promise<boolean>) =>
+    (k, v) => getBridge().setLocalStorage(k, v);
+  const confirmDeleteSession = async (sessionId: string): Promise<void> => {
+    cancelDelete();
+    if (selectedSessionId() === sessionId) setSelectedSessionId(null);
+    await deleteHistorySession(sessionId, getSetLs());
+    await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+  };
+  const confirmClearAll = async (): Promise<void> => {
+    cancelDelete();
+    setSelectedSessionId(null);
+    setExpandedEntryId(null);
+    clearSessionHistory(getSetLs());
+    await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+  };
 
   createEffect(() => {
     const key = draftKey();
@@ -465,19 +503,88 @@ export const SettingsView: Component = () => {
         when={sessionGroups().length > 0}
         fallback={<p class="muted">No analyses yet this session.</p>}
       >
+        <Show
+          when={pendingDeleteId() === '__all__'}
+          fallback={
+            <button
+              type="button"
+              class="history-clear-all"
+              onClick={() => armDelete('__all__')}
+            >
+              Clear all history
+            </button>
+          }
+        >
+          <div class="history-clear-all-confirm">
+            <button
+              type="button"
+              class="history-clear-all-yes"
+              onClick={() => void confirmClearAll()}
+            >
+              Clear all history
+            </button>
+            <button
+              type="button"
+              class="history-clear-all-no"
+              onClick={cancelDelete}
+            >
+              Cancel
+            </button>
+          </div>
+        </Show>
         <ul class="history-list">
           <For each={sessionGroups()}>
             {(group) => (
-              <li class="history-row">
+              <li
+                class="history-row history-row--with-remove"
+                classList={{ 'history-row--arming': pendingDeleteId() === group.sessionId }}
+              >
                 <button
                   type="button"
                   class="history-question"
-                  onClick={() => { setSelectedSessionId(group.sessionId); setExpandedEntryId(null); }}
+                  onClick={() => {
+                    if (pendingDeleteId() !== null) { cancelDelete(); return; }
+                    setSelectedSessionId(group.sessionId);
+                    setExpandedEntryId(null);
+                  }}
                 >
                   <span class="history-q">{[...new Set(group.entries.map((e) => e.lensName))].join(', ')}</span>
                   <span class="history-time">{formatSessionDate(group.startTime)}</span>
                   <span class="history-badge">{group.entries.length} {group.entries.length === 1 ? 'check' : 'checks'}</span>
                 </button>
+                <Show
+                  when={pendingDeleteId() === group.sessionId}
+                  fallback={
+                    <button
+                      type="button"
+                      class="history-row-remove"
+                      onClick={(e) => { e.stopPropagation(); armDelete(group.sessionId); }}
+                      aria-label="Delete session"
+                      title="Delete session"
+                    >
+                      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                        <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                      </svg>
+                    </button>
+                  }
+                >
+                  <div class="history-row-confirm">
+                    <button
+                      type="button"
+                      class="history-row-confirm-yes"
+                      onClick={(e) => { e.stopPropagation(); void confirmDeleteSession(group.sessionId); }}
+                    >
+                      Delete
+                    </button>
+                    <button
+                      type="button"
+                      class="history-row-confirm-no"
+                      onClick={(e) => { e.stopPropagation(); cancelDelete(); }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </Show>
               </li>
             )}
           </For>

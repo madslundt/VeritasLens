@@ -11,6 +11,7 @@ import {
   clearDebugEvents,
   clearSessionHistory,
   debugEvents,
+  deleteHistorySession,
   loadHistory,
   loadSettings,
   pushDebugEvent,
@@ -28,7 +29,7 @@ import {
 import { DEFAULT_BUFFER_DURATION, DEFAULT_GEMINI_AUTO_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_LANGUAGE } from '../src/types';
 import type { HistoryEntry } from '../src/types';
 
-const HISTORY_BYTE_BUDGET = 300 * 1024;
+const HISTORY_BYTE_BUDGET = 400 * 1024;
 
 function fakeLocalStorage(): {
   get: (k: string) => Promise<string>;
@@ -180,6 +181,38 @@ describe('clearSessionHistory', () => {
     expect(sessionHistory()).toEqual([]);
     await Promise.resolve();
     expect(ls.data.get('veritaslens.history')).toBe('[]');
+  });
+});
+
+describe('deleteHistorySession', () => {
+  it('removes only entries with the matching sessionId', async () => {
+    // fatEntry uses `session-${i % 5}` so we get sessions 0..4.
+    for (let i = 0; i < 10; i++) await pushHistoryEntry(fatEntry(i));
+    expect(sessionHistory().length).toBe(10);
+    await deleteHistorySession('session-2');
+    const remaining = sessionHistory();
+    expect(remaining.length).toBe(8);
+    expect(remaining.every((e) => e.sessionId !== 'session-2')).toBe(true);
+    // Other sessions are untouched.
+    expect(remaining.filter((e) => e.sessionId === 'session-0').length).toBe(2);
+  });
+
+  it('persists the filtered list via the provided setLs', async () => {
+    const ls = fakeLocalStorage();
+    for (let i = 0; i < 4; i++) await pushHistoryEntry(fatEntry(i), ls.set);
+    await deleteHistorySession('session-1', ls.set);
+    const raw = ls.data.get('veritaslens.history') ?? '[]';
+    const parsed = JSON.parse(raw) as HistoryEntry[];
+    expect(parsed.every((e) => e.sessionId !== 'session-1')).toBe(true);
+    expect(parsed.length).toBe(sessionHistory().length);
+  });
+
+  it('is a no-op when no entries match', async () => {
+    const ls = fakeLocalStorage();
+    for (let i = 0; i < 3; i++) await pushHistoryEntry(fatEntry(i), ls.set);
+    const before = sessionHistory().length;
+    await deleteHistorySession('session-does-not-exist', ls.set);
+    expect(sessionHistory().length).toBe(before);
   });
 });
 

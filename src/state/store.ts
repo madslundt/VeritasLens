@@ -30,7 +30,7 @@ const SETTINGS_KEY_AUTO_SUMMARY_INTERVAL = 'veritaslens.autoSummaryInterval';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 
 const HISTORY_KEY = 'veritaslens.history';
-const HISTORY_BYTE_BUDGET = 200 * 1024;
+const HISTORY_BYTE_BUDGET = 400 * 1024;
 const HISTORY_MAX_ENTRIES = 500;
 
 const MEETING_PREP_KEY = 'veritaslens.meetingPrep';
@@ -318,6 +318,20 @@ export async function pushHistoryEntries(
 export function clearSessionHistory(setLs?: (k: string, v: string) => Promise<boolean>): void {
   setSessionHistory([]);
   if (setLs) void setLs(HISTORY_KEY, '[]');
+}
+
+/**
+ * Drop every history entry sharing `sessionId` and persist the trimmed list.
+ * Re-uses `persistHistory` so the byte-budget logic stays applied (a delete
+ * followed by another append still settles inside the cap).
+ */
+export async function deleteHistorySession(
+  sessionId: string,
+  setLs?: (k: string, v: string) => Promise<boolean>,
+): Promise<void> {
+  const next = sessionHistory().filter((e) => e.sessionId !== sessionId);
+  setSessionHistory(next);
+  if (setLs) await persistHistory(setLs, next);
 }
 
 function coerceModel(raw: string | null | undefined): GeminiModel {

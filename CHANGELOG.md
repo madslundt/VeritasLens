@@ -8,6 +8,7 @@
 - **Session-wide swipe scroll**: swipe up/down on the active page walks every answer in the current session, not just the most recent analysis. A new analysis jumps the cursor to its first answer. The `X/Y` indicator counts session entries (questions asked), so Meeting Prep's answer/evidence/follow-up claims share a single position. Swipe-up always crosses one question at a time — from any Meeting Prep sub-claim it jumps straight to the previous entry's first page instead of walking back through evidence/follow-up first.
 - **Previous answer stays on screen during analysis**: the HUD no longer collapses to a dot mid-check — the last result stays visible with a small spinner in the top-right corner.
 - Baseline HUD claim slot grew from one line to two so longer questions wrap instead of being truncated.
+- **History management**: settings History tab gains a per-session delete (round iOS-style × button on each session row, two-tap inline confirm) and a "Clear all history" footer button. History byte budget raised from 200 KB → 400 KB to comfortably hold multi-session auto-summaries; meeting-prep budget unchanged at 50 KB.
 
 ## 0.5.0 — 2026-05-20
 - Multi-claim per tap (up to 5) for Fact, Stats, Fallacy, Bias, Trivia, and ELI5. One Gemini call now covers several distinct claims/questions/terms when present.
