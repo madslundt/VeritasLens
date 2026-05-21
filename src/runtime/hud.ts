@@ -64,6 +64,8 @@ export const CONTAINER = {
   // history pages
   historyList: 30,
   historyHint: 31,
+  // picker badge — visible only when auto-summary is on
+  summaryBadge: 32,
 } as const;
 
 const NAME = {
@@ -83,6 +85,7 @@ const NAME = {
   compactHeader: 'vl-compact',
   historyList: 'vl-hist-lst',
   historyHint: 'vl-hist-hint',
+  summaryBadge: 'vl-sum-badge',
 } as const;
 
 const STATUS_LABEL: Record<string, string> = {
@@ -813,8 +816,15 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   const currentPersonas = getPickerPersonas(settings().bufferDuration);
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
-    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
+    width: 240, height: 36, borderWidth: 0, paddingLength: 4,
     content: 'Pick a lens', isEventCapture: 0,
+  });
+  const summaryBadge = new TextContainerProperty({
+    containerID: CONTAINER.summaryBadge, containerName: NAME.summaryBadge,
+    xPosition: SCREEN_W - 132, yPosition: 8, width: 116, height: 32,
+    borderWidth: 0, paddingLength: 4,
+    content: settings().autoSummaryEnabled ? 'SUMMARY' : '',
+    isEventCapture: 0,
   });
   const list = new ListContainerProperty({
     containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 48,
@@ -832,7 +842,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     isEventCapture: 0,
   });
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
-  return new Ctor({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
+  return new Ctor({ containerTotalNum: 4, listObject: [list], textObject: [title, hint, summaryBadge] });
 }
 
 function buildMenuPage(): RebuildPageContainer {
