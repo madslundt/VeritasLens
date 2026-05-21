@@ -336,10 +336,12 @@ async function leaveActiveSession(): Promise<void> {
   inflight = null;
   analyzing = false;
   stopSpinner();
-  try { await getBridge().audioControl(false); } catch { /* ignore */ }
-  // Stop the periodic timer BEFORE the final summary so a tick can't fire
-  // mid-call and double up against the same buffer.
+  // Stop the periodic timer FIRST, synchronously, so a tick can't fire during
+  // any of the awaits below (audioControl, runFinalSummary) and race a second
+  // Gemini call against the final one — that wasted call's result would be
+  // discarded by the intermediates clear at the end of this function.
   stopAutoSummaryTimer();
+  try { await getBridge().audioControl(false); } catch { /* ignore */ }
   // Best-effort end-of-session summary. runFinalSummary is internally guarded
   // and never throws, so this can't block the cleanup that follows. It runs
   // before buffer.clear() so the most-recent audio is still available.

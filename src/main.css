@@ -858,12 +858,13 @@ button:disabled {
 }
 
 /* End-of-session summary entries are de-emphasised so the eye lands on the
-   claim-style answers above them. The row is dimmer and the question text is
-   muted; the expanded body still gets the full theme so the summary is
-   readable when opened. */
+   claim-style answers above them. Only the collapsed button is dimmed — the
+   expanded body uses normal styling so the actual summary stays readable. */
 .history-row-summary {
   background: transparent;
   border-color: rgba(255, 255, 255, 0.06);
+}
+.history-row-summary > .history-question {
   opacity: 0.72;
 }
 .history-row-summary .history-q {
