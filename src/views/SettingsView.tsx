@@ -603,11 +603,10 @@ export const SettingsView: Component = () => {
                       <Show when={prepExpanded()}>
                         <div class="meeting-prep-inline">
                           <p class="field-hint">
-                            Lead with your <strong class="meeting-prep-hint-strong">goal</strong> — the first sentence
-                            sets the assistant's focus. Add background after.
+                            Lead with your <strong class="meeting-prep-hint-strong">goal</strong> in one sentence,
+                            then the background that matters — who you are, who you're meeting, key numbers.
                             <strong class="meeting-prep-hint-strong">Attachments</strong> are labeled chunks
-                            (contract excerpts, prepared questions, source documents) the assistant can cite
-                            as the source of an answer.
+                            (contracts, prepared questions, source documents) the assistant can cite.
                           </p>
                           <ul class="meeting-prep-list">
                             {/* General context — fixed first slot, no label,
@@ -630,7 +629,7 @@ export const SettingsView: Component = () => {
                               </div>
                               <textarea
                                 class="meeting-prep-body"
-                                placeholder={`What you want out of this meeting + background.\n\ne.g. As the buyer, negotiate the rate below 4.2% with no prepayment penalty. Current rate 4.8%, 25y term. Counterparty is the bank.`}
+                                placeholder={`e.g.\nNegotiate my mortgage rate below 4.2%.\n\nI'm the borrower; meeting with my bank's relationship manager. Current rate 4.8% fixed, 25y term started 2023. No prepayment penalty in original contract.`}
                                 rows={6}
                                 value={prepDraft()[0]?.body ?? ''}
                                 onInput={(e) => updateGeneralBody(e.currentTarget.value)}
