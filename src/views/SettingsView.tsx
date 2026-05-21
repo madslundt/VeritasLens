@@ -118,18 +118,23 @@ function formatResultText(result: LensResult): string {
       return result.summary;
     }
     case 'meeting-prep': {
-      // Primary answer first, then any follow-ups labeled with their source.
-      // The header on the row already shows entry.question (= primary text),
-      // so only the supporting detail + follow-ups are emitted here.
-      const primary = result.claims[0];
-      const followUps = result.claims.slice(1);
+      // Primary answer first, then the evidence excerpt (when present), then
+      // the gap-driven follow-up (when present). The header on the row already
+      // shows entry.question (= primary answer text), so the answer's own text
+      // is not repeated here — only the supporting detail and trailing claims.
+      const primary = result.claims.find((c) => c.kind === 'answer');
+      const evidence = result.claims.find((c) => c.kind === 'evidence');
+      const followUp = result.claims.find((c) => c.kind === 'followup');
       const blocks: string[] = [];
       if (primary?.detail) blocks.push(primary.detail);
       if (primary?.source) blocks.push(`From: ${primary.source}`);
-      followUps.forEach((c, i) => {
-        const src = c.source ? ` · From: ${c.source}` : '';
-        blocks.push(`→ Follow-up ${i + 1}${src}\n${c.text}`);
-      });
+      if (evidence) {
+        const src = evidence.source ? ` · From: ${evidence.source}` : '';
+        blocks.push(`"${evidence.text}"${src}`);
+      }
+      if (followUp) {
+        blocks.push(`→ Follow-up\n${followUp.text}`);
+      }
       return blocks.join('\n\n');
     }
   }

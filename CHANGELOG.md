@@ -1,16 +1,12 @@
 # Changelog
 
-## 0.6.1 — 2026-05-21
-- **Meeting Prep** swaps the 0–3 follow-up array for a verbatim **evidence** excerpt from the cited attachment plus at most one follow-up. Follow-ups are now opt-in by the model — emitted only when prep is genuinely silent on a decision-changing detail, eliminating generic "What's your timeline?" padding.
-- HUD swipes through three claim kinds — **answer → evidence → follow-up** — each visually distinct (evidence in quotes, follow-up with `→`).
-- History search now indexes the verbatim evidence quote instead of a paraphrased detail line.
-- Picker **auto-summary** badge now reflects final-summary state: `summarizing…` while the end-of-session summary is generating, `summary ready` briefly when it lands, then back to `auto-summary`.
-
 ## 0.6.0 — 2026-05-21
-- New **Meeting Prep** lens: ground answers in context you write on your phone before a meeting — general notes plus optional labeled attachments (contracts, prepared questions) the assistant can cite as sources.
-- **Auto-summary** rewired to one consolidated entry per session: interval ticks accumulate in memory as context and a single summary is written to History when you exit the session. Sessions shorter than the interval produce no entry. In the phone History view the summary sits at the top of each session with a muted style so claim-style results below keep visual focus.
+- New **Meeting Prep** lens: ground answers in context you write on your phone before a meeting — general notes plus optional labeled attachments (contracts, prepared questions) the assistant can cite as sources. Every answer is grounded in a verbatim **evidence** excerpt from the cited attachment; follow-up questions are opt-in by the model — emitted only when prep is silent on a decision-changing detail. HUD swipes through three distinct claim kinds — **answer → evidence → follow-up** (evidence in quotes, follow-up with `→`).
+- **Auto-summary** rewired to one consolidated entry per session: interval ticks accumulate in memory as context and a single summary is written to History when you exit the session. Sessions shorter than the interval produce no entry. In the phone History view the summary sits at the top of each session with a muted style so claim-style results below keep visual focus. Picker top-right badge reflects final-summary state: `summarizing…` while the end-of-session summary is generating, `summary ready` briefly when it lands, then back to `auto-summary`.
 - Remove the **Summary** lens from the picker. Auto-summary still produces an end-of-session entry in History; per-tap summaries no longer compete with claim-style lenses, since any model can include a summary in its own output.
 - **Hide / re-reveal** via swipe gestures: swipe down past the last answer page hides the result and returns the HUD to recording; a follow-up swipe up brings the same last page back. Tap → Back uses the same hidden state, so swipe-up after dismissing via the menu now reveals the last page you were viewing (previously jumped one back).
+- **Session-wide swipe scroll**: swipe up/down on the active page walks every answer in the current session, not just the most recent analysis. A new analysis jumps the cursor to its first answer. The `X/Y` indicator counts session entries (questions asked), so Meeting Prep's answer/evidence/follow-up claims share a single position. Swipe-up always crosses one question at a time — from any Meeting Prep sub-claim it jumps straight to the previous entry's first page instead of walking back through evidence/follow-up first.
+- **Previous answer stays on screen during analysis**: the HUD no longer collapses to a dot mid-check — the last result stays visible with a small spinner in the top-right corner.
 - Baseline HUD claim slot grew from one line to two so longer questions wrap instead of being truncated.
 
 ## 0.5.0 — 2026-05-20

@@ -13,7 +13,7 @@ The user just provided a short audio clip of recent conversation. Listen careful
    - "FALSE" : Contradicted by reliable knowledge.
    - "UNVERIFIED" : Cannot confidently classify (opinion, future event, niche fact, ambiguous wording).
 3. For each claim, include a short verbatim quote (≤140 chars) from the audio that the verdict is responding to. The quote must come straight from the audio in its original spoken language.
-4. For each claim, produce a one-sentence claim summary (≤110 chars), and a 2-3 sentence justification (≤240 chars).
+4. For each claim, produce a one-sentence claim summary (≤140 chars), and a 2-3 sentence justification (≤240 chars).
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.
 Do not invent facts. Prefer "UNVERIFIED" over guessing.
@@ -67,7 +67,7 @@ const CLAIM_ITEM_SCHEMA = {
   properties: {
     quote: { type: 'string', description: 'Verbatim audio snippet for this claim (max 140 chars).' },
     verdict: { type: 'string', enum: ['TRUE', 'FALSE', 'UNVERIFIED'] },
-    claim: { type: 'string', description: 'One concise sentence summarizing the claim (max 110 chars).' },
+    claim: { type: 'string', description: 'One concise sentence summarizing the claim (max 140 chars).' },
     reason: { type: 'string', description: '2-3 short sentences justifying the verdict (max 240 chars).' },
   },
   required: ['quote', 'verdict', 'claim', 'reason'],
@@ -92,7 +92,7 @@ export function parseFactCheckerResponse(text: string): LensResult {
   const claims: FactClaim[] = items.map((c) => ({
     quote: coerceQuote(c['quote']),
     verdict: normalizeFactVerdict(c['verdict']),
-    claim: trimTo(typeof c['claim'] === 'string' ? c['claim'] : '', 110),
+    claim: trimTo(typeof c['claim'] === 'string' ? c['claim'] : '', 140),
     reason: trimTo(typeof c['reason'] === 'string' ? c['reason'] : '', 240),
   }));
   if (claims.length === 0) {

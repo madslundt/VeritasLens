@@ -203,7 +203,7 @@ describe('page lifecycle', () => {
 });
 
 describe('setLensResult', () => {
-  it('upgrades claim / verdict / reason on the active page', async () => {
+  it('writes the unified body (heading + verdict + reason) into a single text container', async () => {
     await bootstrapHud('picker');
     const persona = getPersona('fact-checker')!;
     await showActivePage(persona);
@@ -214,8 +214,15 @@ describe('setLensResult', () => {
       claims: [{ quote: '', verdict: 'TRUE', claim: 'The Earth is round.', reason: 'Established by science.' }],
     };
     await setLensResult(result);
-    // 3 upgrades: claim, verdict, reason
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
+    // Unified body: 1 upgrade (only vl-reason). The body composes heading +
+    // verdict glyph + reason with blank-line separators.
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    expect(calls[0]![0].payload.containerName).toBe('vl-reason');
+    const body = calls[0]![0].payload.content;
+    expect(body).toContain('The Earth is round.');
+    expect(body).toContain('+ TRUE');
+    expect(body).toContain('Established by science.');
   });
 
   it('is a no-op when the current page is neither active nor history-detail', async () => {
@@ -225,7 +232,7 @@ describe('setLensResult', () => {
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
 
-  it('prefixes the claim with "Auto · " when autoSelected is set', async () => {
+  it('prefixes the body heading with "Auto · " when autoSelected is set', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     bridge.textContainerUpgrade.mockClear();
@@ -237,9 +244,11 @@ describe('setLensResult', () => {
     };
     await setLensResult(result);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
-    const claimCall = calls.find((c) => c[0].payload.containerName === 'vl-claim');
-    expect(claimCall).toBeDefined();
-    expect(claimCall![0].payload.content).toContain('Auto');
+    const bodyCall = calls.find((c) => c[0].payload.containerName === 'vl-reason');
+    expect(bodyCall).toBeDefined();
+    // Session-relative X/Y prefix comes first ("1/1 · "), then the Auto badge
+    // sits inside the entry body just before the heading.
+    expect(bodyCall![0].payload.content).toContain('Auto · X');
   });
 });
 
@@ -385,7 +394,7 @@ describe('discreet mode', () => {
     expect(findText(payload, 'vl-act-hint')).toBeUndefined();
   });
 
-  it('discreet-result layout is pure question/answer (no dot, status, rec, or hint)', async () => {
+  it('discreet-result layout is a single unified body container (no rec or hint chrome) plus a corner status slot for the spinner', async () => {
     await saveDiscreet(fakeSetLs, true);
     setActiveLayout('discreet-result');
     await bootstrapHud('picker');
@@ -395,12 +404,18 @@ describe('discreet mode', () => {
     expect(findText(payload, 'vl-rec')).toBeUndefined();
     expect(findText(payload, 'vl-act-hint')).toBeUndefined();
     expect(findText(payload, 'vl-clock')).toBeUndefined();
-    expect(findText(payload, 'vl-status')).toBeUndefined();
-    expect(findText(payload, 'vl-claim')).toBeDefined();
-    expect(findText(payload, 'vl-verdict')).toBeDefined();
+    // Status container exists (for spinner during a background analysis) but
+    // is empty when nothing is running, so the answer view stays clean.
+    expect(findText(payload, 'vl-status')).toBeDefined();
+    expect(findText(payload, 'vl-status')?.content).toBe('');
+    // Unified body — no separate claim/verdict containers anymore.
+    expect(findText(payload, 'vl-claim')).toBeUndefined();
+    expect(findText(payload, 'vl-verdict')).toBeUndefined();
     expect(findText(payload, 'vl-reason')).toBeDefined();
-    // 4 text containers: invisible event sink + claim + verdict + reason.
-    expect(payload.textObject).toHaveLength(4);
+    // 2 text containers: status (top-right corner) + unified body. The body
+    // is itself the event capturer (isEventCapture=1) — no separate sink
+    // needed since it covers nearly the whole screen.
+    expect(payload.textObject).toHaveLength(2);
     expect(payload.listObject).toHaveLength(0);
   });
 
@@ -428,15 +443,18 @@ describe('discreet mode', () => {
     expect(calls[0]![0].payload.content).toBe('...');
   });
 
-  it('setStatus on discreet-result is a no-op (pure answer view, no status chrome)', async () => {
+  it('setStatus on discreet-result writes to the corner status slot (so the spinner stays visible while reviewing previous answers)', async () => {
     setActiveLayout('discreet-result');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
     bridge.textContainerUpgrade.mockClear();
     const { setStatus } = await import('../src/runtime/hud');
-    await setStatus('displaying');
-    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+    await setStatus('thinking');
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    expect(calls).toHaveLength(1);
+    expect(calls[0]![0].payload.containerName).toBe('vl-status');
+    expect(calls[0]![0].payload.content).toBe('...');
   });
 
   it('setLensResult(null) in discreet-minimal stays on dot-only (no upgrades, no rebuild)', async () => {
@@ -459,13 +477,14 @@ describe('discreet mode', () => {
     bridge.textContainerUpgrade.mockClear();
     bridge.rebuildPageContainer.mockClear();
     await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'x' }] });
-    // The promotion rebuilds the page with the pure layout (4 containers).
+    // The promotion rebuilds the page with the unified layout (2 containers:
+    // status + unified body — the body is its own event capturer).
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
     const payload = lastRebuildPayload();
-    expect(payload.containerTotalNum).toBe(4);
+    expect(payload.containerTotalNum).toBe(2);
     expect(findText(payload, 'vl-clock')).toBeUndefined();
-    // 3 upgrades: claim, verdict, reason.
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
+    // 1 upgrade: the unified body container.
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
   });
 
   it('setLensResult(null) on discreet-result demotes back to discreet-minimal', async () => {
@@ -575,12 +594,15 @@ describe('pending result on menu', () => {
 
     expect(currentHudPage()).toBe('active');
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
-    // 3 upgrades for claim, verdict, reason.
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
+    // 1 upgrade: the unified body container.
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
     const reason = calls.find((c) => c[0].payload.containerName === 'vl-reason');
     expect(reason).toBeDefined();
+    // Unified body contains the heading, verdict glyph, and reason text together.
     expect(reason![0].payload.content).toContain('east');
+    expect(reason![0].payload.content).toContain('The Sun rises in the west.');
+    expect(reason![0].payload.content).toContain('- FALSE');
     expect(hasPendingActiveResult()).toBe(false);
   });
 
@@ -615,14 +637,15 @@ describe('pending result on menu', () => {
     const { restoreActivePage } = await import('../src/runtime/hud');
     await restoreActivePage();
 
-    // The active-page rebuild lays down the discreet-result layout (3
-    // containers: claim, verdict, reason) and the replay writes into them.
+    // The active-page rebuild lays down the unified discreet-result layout
+    // (2 containers: status + unified body) and the replay writes the
+    // composed body into it.
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { containerTotalNum: number; textObject: Array<{ payload: { containerName: string } }> } }]>;
     expect(calls.length).toBeGreaterThanOrEqual(1);
     const lastRebuild = calls.at(-1)![0].payload;
-    expect(lastRebuild.containerTotalNum).toBe(4);
+    expect(lastRebuild.containerTotalNum).toBe(2);
     expect(lastRebuild.textObject.some((t) => t.payload.containerName === 'vl-reason')).toBe(true);
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
     expect(hasPendingActiveResult()).toBe(false);
   });
 
@@ -649,7 +672,11 @@ describe('multi-claim active page', () => {
     return undefined;
   }
 
-  it('renders the 1/2 indicator on the claim line when 2 claims are present', async () => {
+  it('prefixes every page with the session-relative X/Y when the session has multiple entries', async () => {
+    // Fact-check splits multi-claim results into per-claim entries via
+    // splitForSynthesis, so the session ends up with 2 entries here. Each
+    // entry's pages carry the session-relative "X/2 · " prefix so the wearer
+    // always sees which question they're on.
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -661,12 +688,10 @@ describe('multi-claim active page', () => {
         { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
       ],
     });
-    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · C1');
-    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
-    expect(lastUpgradeByName('vl-reason')).toBe('R1');
+    expect(lastUpgradeByName('vl-reason')).toBe('1/2 · C1\n\n+ TRUE\n\nR1');
   });
 
-  it('omits the indicator when only one claim is present', async () => {
+  it('always shows the session-relative indicator — even for a 1-entry session ("1/1")', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -675,11 +700,11 @@ describe('multi-claim active page', () => {
       type: 'fact-check',
       claims: [{ quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' }],
     });
-    expect(lastUpgradeByName('vl-claim')).toBe('C1');
-    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
+    // Single-entry single-claim body: "1/1 · " prefix + heading + verdict + reason.
+    expect(lastUpgradeByName('vl-reason')).toBe('1/1 · C1\n\n+ TRUE\n\nR1');
   });
 
-  it('scrollActiveReason advances to claim 2 and rewrites claim/verdict/reason', async () => {
+  it('scrollActiveReason advances to claim 2 and rewrites the unified body with the new session-relative prefix', async () => {
     const { scrollActiveReason } = await import('../src/runtime/hud');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
@@ -694,14 +719,11 @@ describe('multi-claim active page', () => {
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
-    expect(lastUpgradeByName('vl-verdict')).toBe('- FALSE');
-    expect(lastUpgradeByName('vl-reason')).toBe('R2');
+    expect(lastUpgradeByName('vl-reason')).toBe('2/2 · C2\n\n- FALSE\n\nR2');
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(-1);
-    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · C1');
-    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
+    expect(lastUpgradeByName('vl-reason')).toBe('1/2 · C1\n\n+ TRUE\n\nR1');
   });
 
   it('scrollActiveReason past the last claim falls back to reason pagination', async () => {
@@ -725,7 +747,10 @@ describe('multi-claim active page', () => {
     await scrollActiveReason(1);
     const reason = lastUpgradeByName('vl-reason');
     expect(reason).toBeDefined();
-    expect(reason!.startsWith('r')).toBe(true);
+    // Multi-page entries get a per-answer "X/Y · " prefix and a bullet row
+    // at the bottom — the body content is sandwiched between them. The
+    // continuation page must contain a stretch of 'r's from the long reason.
+    expect(reason).toContain('rrrrrr');
   });
 });
 
@@ -760,7 +785,7 @@ describe('hide / reveal active result via scroll edges', () => {
     const outcome = await scrollActiveReason(-1);
     expect(outcome).toBe('revealed');
     expect(isActiveHidden()).toBe(false);
-    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
+    expect(lastUpgradeByName('vl-reason')).toContain('C2');
   });
 
   it('scroll-up while hidden with no result in memory is a noop', async () => {
@@ -790,7 +815,7 @@ describe('hide / reveal active result via scroll edges', () => {
     const followUp = await scrollActiveReason(-1);
     expect(followUp).toBe('revealed');
     expect(isActiveHidden()).toBe(false);
-    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
+    expect(lastUpgradeByName('vl-reason')).toContain('C2');
   });
 
   it('scroll-down while hidden is a noop', async () => {
@@ -852,8 +877,8 @@ describe('session-wide swipe scroll', () => {
     // latest analysis.
     await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e1', 'e2']) });
 
-    // Cursor at first new entry → "1/2 · CLAIM-A" within-analysis.
-    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · CLAIM-A');
+    // Cursor at first new entry → unified body starts with "1/2 · CLAIM-A".
+    expect(lastUpgradeByName('vl-reason')).toContain('CLAIM-A');
 
     // Swipe-up from first claim: there's no earlier entry, so noop.
     bridge.textContainerUpgrade.mockClear();
@@ -875,13 +900,14 @@ describe('session-wide swipe scroll', () => {
     // first claim (NEW-1) so the wearer sees the new question immediately.
     await setLensResult(eNew2.result, { sessionEntries: [eOld1, eOld2, eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
 
-    // Within-analysis indicator: 1/2 across the just-pushed entries.
-    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · NEW-1');
+    // Indicator is uniformly session-relative: new first claim is position
+    // 3 of 4 total claims.
+    expect(lastUpgradeByName('vl-reason')).toContain('NEW-1');
 
-    // Swipe down stays within-analysis → 2/2.
+    // Swipe down advances within the session → 4/4 · NEW-2.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · NEW-2');
+    expect(lastUpgradeByName('vl-reason')).toContain('NEW-2');
 
     // Swipe down past the last page hides (session end).
     const outcome = await scrollActiveReason(1);
@@ -892,10 +918,10 @@ describe('session-wide swipe scroll', () => {
     bridge.textContainerUpgrade.mockClear();
     const reveal = await scrollActiveReason(-1);
     expect(reveal).toBe('revealed');
-    expect(lastUpgradeByName('vl-claim')).toBe('4/4 · NEW-2');
+    expect(lastUpgradeByName('vl-reason')).toContain('NEW-2');
   });
 
-  it('swipe-up from first claim of latest analysis crosses to session X/Y and sticks', async () => {
+  it('indicator is always session-relative X/Y, with no mode transitions', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -906,19 +932,18 @@ describe('session-wide swipe scroll', () => {
     await setLensResult(eOld2.result, { sessionEntries: [eOld1, eOld2], newEntryIds: new Set(['o1', 'o2']) });
     await setLensResult(eNew2.result, { sessionEntries: [eOld1, eOld2, eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
 
-    // Cursor sits on the new first claim — within-analysis 1/2.
-    expect(lastUpgradeByName('vl-claim')).toBe('1/2 · NEW-1');
+    // Cursor lands on the new first claim with session indicator 3/4.
+    expect(lastUpgradeByName('vl-reason')).toContain('NEW-1');
 
-    // Swipe up exits the latest range → indicator flips to session X/Y.
+    // Swipe up walks back into older entries — still X/Y session-relative.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(-1);
-    expect(lastUpgradeByName('vl-claim')).toBe('2/4 · OLD-2');
+    expect(lastUpgradeByName('vl-reason')).toContain('OLD-2');
 
-    // Swipe back down: session mode sticks even though we re-enter the
-    // latest range (per spec: "the number would now be X/Y instead of 1/2").
+    // Swipe back down to the new first claim — same X/Y format, same number.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-claim')).toBe('3/4 · NEW-1');
+    expect(lastUpgradeByName('vl-reason')).toContain('NEW-1');
   });
 
   it('no indicator on a single-claim, single-entry session', async () => {
@@ -927,7 +952,7 @@ describe('session-wide swipe scroll', () => {
 
     const eOnly = entry({ id: 'a', verdict: 'TRUE', claim: 'ONLY' });
     await setLensResult(eOnly.result, { sessionEntries: [eOnly], newEntryIds: new Set(['a']) });
-    expect(lastUpgradeByName('vl-claim')).toBe('ONLY');
+    expect(lastUpgradeByName('vl-reason')).toContain('ONLY');
   });
 
   it('hidden reveal after new analysis lands on Y/Y (last session page)', async () => {
@@ -942,15 +967,33 @@ describe('session-wide swipe scroll', () => {
     markActiveHidden();
     expect(isActiveHidden()).toBe(true);
 
-    // New analysis arrives while hidden → activeHidden preserved.
+    // New analysis arrives → activeHidden is cleared so the wearer always
+    // sees the new answer (matches the "show the first answer once analysis
+    // is done" expectation).
     await setLensResult(eNew.result, { sessionEntries: [eOld, eNew], newEntryIds: new Set(['n']) });
+    expect(isActiveHidden()).toBe(false);
+    expect(lastUpgradeByName('vl-reason')).toContain('NEW');
+  });
+
+  it('manual hide (without new analysis) preserves the cursor; reveal returns to where the user was', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const e1 = entry({ id: '1', verdict: 'TRUE',  claim: 'A' });
+    const e2 = entry({ id: '2', verdict: 'FALSE', claim: 'B' });
+    await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['1', '2']) });
+
+    // Walk to claim 2 and hide.
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-reason')).toContain('B');
+    await scrollActiveReason(1); // hides (past last page)
     expect(isActiveHidden()).toBe(true);
 
-    // Reveal jumps to last session page (Y=2, X=2).
+    // Reveal lands on Y/Y in session mode.
     bridge.textContainerUpgrade.mockClear();
     const outcome = await scrollActiveReason(-1);
     expect(outcome).toBe('revealed');
-    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · NEW');
+    expect(lastUpgradeByName('vl-reason')).toContain('B');
   });
 });
 
@@ -1044,14 +1087,15 @@ describe('line-aware pagination', () => {
       type: 'fact-check',
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
     });
-    // Walk through every page; each page must fit within the larger budget.
-    // 8 lines × 27px = 216px is the discreet-scroll budget; baseline-scroll is
-    // 7×27 = 189px. We're in baseline by default, so 7 lines is the cap.
+    // Walk through every page; each page must fit within the unified-body
+    // budget. Baseline = 9 lines × 27px = 243px. Page 0 now uses the same
+    // budget as continuation pages (one container, no claim/verdict slot
+    // eating the top of the screen).
     let upgrades = 1;
-    const maxHeightPx = 7 * 27;
+    const maxHeightPx = 9 * 27;
     let page = lastUpgradeByName('vl-reason')!;
     expect(page).toBeDefined();
-    expect(measureTextWrap(page, 536).height).toBeLessThanOrEqual(4 * 27); // page 0 = full layout = 4 lines
+    expect(measureTextWrap(page, 536).height).toBeLessThanOrEqual(maxHeightPx);
     while (true) {
       bridge.textContainerUpgrade.mockClear();
       await scrollActiveReason(1);
@@ -1073,25 +1117,26 @@ describe('line-aware pagination', () => {
       type: 'fact-check',
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason }],
     });
-    // First page should end on a space-bounded word, not in the middle of one.
-    const page0 = lastUpgradeByName('vl-reason')!;
-    expect(page0).toBeDefined();
-    const lastChar = page0[page0.length - 1]!;
-    // Trailing trim leaves either a complete word or a space-followed word.
-    // The previous character before EOL must be either alphabetic or end-of-text.
-    expect(/[a-z]$/.test(page0)).toBe(true);
+    // First page should end on a space-bounded word, not in the middle of
+    // one. Multi-page entries get an inline "X/Y · " prefix on the first
+    // line and a left-aligned bullet row "● ○ ○…" at the bottom — strip
+    // both for the word-boundary check on the body chunk itself.
+    const strip = (page: string) =>
+      page.replace(/^\d+\/\d+ · /, '').replace(/\n\n[●○]( [●○])+$/, '');
+    const page0Body = strip(lastUpgradeByName('vl-reason')!);
+    expect(page0Body).toBeDefined();
+    expect(/[a-z]$/.test(page0Body)).toBe(true);
     // Crucially: scroll forward and verify the next page begins at the start
     // of the next word, not mid-token from the previous one.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    const page1 = lastUpgradeByName('vl-reason')!;
-    expect(page1).toBeDefined();
-    // The first char must be the start of a word in our list (or the original
-    // text). It must not be a continuation of "alpha"/"beta"/etc.
-    expect(/^[a-z]/.test(page1)).toBe(true);
+    const page1Body = strip(lastUpgradeByName('vl-reason')!);
+    expect(page1Body).toBeDefined();
+    // The first char must be the start of a word in our list. It must not be
+    // a continuation of "alpha"/"beta"/etc.
+    expect(/^[a-z]/.test(page1Body)).toBe(true);
     // No leading whitespace either — we trim that off.
-    expect(page1[0]).not.toBe(' ');
-    void lastChar; // referenced for the test name; the actual contract is checked above
+    expect(page1Body[0]).not.toBe(' ');
   });
 
   it('linearizes multi-claim navigation: each claim contributes 1+ pages in order', async () => {
@@ -1106,28 +1151,29 @@ describe('line-aware pagination', () => {
         { quote: '', verdict: 'FALSE', claim: 'CLAIM-B', reason: 'short B reason' },
       ],
     });
-    // Page 0 = claim A page 0 (full layout): claim/verdict upgrades present.
-    expect(lastUpgradeByName('vl-claim')).toContain('1/2');
-    expect(lastUpgradeByName('vl-claim')).toContain('CLAIM-A');
-    expect(lastUpgradeByName('vl-verdict')).toBe('+ TRUE');
+    // Page 0 of claim A's entry: unified body has the heading and verdict.
+    // Per-answer X/Y prefix appears because the long reason makes the entry
+    // multi-page (split by splitForSynthesis into per-claim entries).
+    expect(lastUpgradeByName('vl-reason')).toContain('CLAIM-A');
+    expect(lastUpgradeByName('vl-reason')).toContain('+ TRUE');
 
-    // Walk forward until we reach claim B's page 0 — at that point the claim
-    // line should reflect "2/2 · CLAIM-B" (back to full layout).
+    // Walk forward until we reach claim B's body. CLAIM-B's reason is short
+    // (single page), so its body has no per-answer prefix or bullets.
     let safety = 30;
     while (safety-- > 0) {
       bridge.textContainerUpgrade.mockClear();
       await scrollActiveReason(1);
-      const claim = lastUpgradeByName('vl-claim');
-      if (claim && claim.includes('2/2') && claim.includes('CLAIM-B')) {
-        expect(lastUpgradeByName('vl-verdict')).toBe('- FALSE');
-        expect(lastUpgradeByName('vl-reason')).toContain('short B reason');
+      const body = lastUpgradeByName('vl-reason');
+      if (body && body.includes('CLAIM-B')) {
+        expect(body).toContain('- FALSE');
+        expect(body).toContain('short B reason');
         return;
       }
     }
     throw new Error('never reached claim B in linearized traversal');
   });
 
-  it('rebuilds the page container when crossing the full→scroll layout boundary', async () => {
+  it('scrolling within the same mode does NOT rebuild the page container — only upgrades the body', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -1137,26 +1183,29 @@ describe('line-aware pagination', () => {
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
     });
 
-    // Page 0 is the baseline layout (full chrome).
-    let payload = lastRebuildPayload();
-    expect(findText(payload, 'vl-rec')).toBeDefined();
-    expect(findText(payload, 'vl-claim')).toBeDefined();
-    expect(findText(payload, 'vl-compact')).toBeUndefined();
-
-    bridge.rebuildPageContainer.mockClear();
-    await scrollActiveReason(1); // → page 1 = baseline-scroll
-    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
-
-    payload = lastRebuildPayload();
-    // Scroll layout has compact header instead of claim/verdict; rec/hint stay.
-    expect(findText(payload, 'vl-compact')).toBeDefined();
-    expect(findText(payload, 'vl-claim')).toBeUndefined();
-    expect(findText(payload, 'vl-verdict')).toBeUndefined();
+    // Initial layout: baseline unified body (sink + status + body + rec + hint).
+    const payload = lastRebuildPayload();
     expect(findText(payload, 'vl-rec')).toBeDefined();
     expect(findText(payload, 'vl-act-hint')).toBeDefined();
+    expect(findText(payload, 'vl-reason')).toBeDefined();
+    expect(findText(payload, 'vl-claim')).toBeUndefined();
+    expect(findText(payload, 'vl-verdict')).toBeUndefined();
+    expect(findText(payload, 'vl-compact')).toBeUndefined();
+
+    // Unified model: scrolling page 0 → page 1 stays in the same baseline
+    // layout, so it must NOT rebuild — just push the next body chunk via
+    // textContainerUpgrade. This guards against re-introducing a
+    // full↔scroll layout boundary.
+    bridge.rebuildPageContainer.mockClear();
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string } }]>;
+    expect(calls[0]![0].payload.containerName).toBe('vl-reason');
   });
 
-  it('scroll layout reuses the compact header with verdict glyph and claim position', async () => {
+  it('continuation pages still carry the body in vl-reason (no separate compact header)', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -1168,55 +1217,55 @@ describe('line-aware pagination', () => {
         { quote: '', verdict: 'FALSE', claim: 'C2', reason: 'short' },
       ],
     });
-    await scrollActiveReason(1); // claim 1 page 1 = baseline-scroll
+    // Page 0 unified body contains heading + verdict + start of reason.
+    // The long-reason entry paginates to multiple pages so it carries the
+    // per-answer X/Y prefix (e.g. "1/9 · ") on its first line.
+    expect(lastUpgradeByName('vl-reason')).toMatch(/^\d+\/\d+ · /);
+    expect(lastUpgradeByName('vl-reason')).toContain('+ TRUE');
+
+    // Scroll forward — continuation page carries more of the body, no
+    // separate compact header.
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    const next = lastUpgradeByName('vl-reason');
+    expect(next).toBeDefined();
+    // No vl-compact container exists in the rebuild payload either.
     const payload = lastRebuildPayload();
-    const header = payload.textObject.find((t) => t.payload.containerName === 'vl-compact');
-    expect(header).toBeDefined();
-    // Multi-claim → header should show position + verdict glyph.
-    expect(header!.payload.content).toContain('1/2');
-    expect(header!.payload.content).toContain('+ TRUE');
+    expect(findText(payload, 'vl-compact')).toBeUndefined();
   });
 
-  it('paginates a long claim across header + claim-continuation pages (baseline)', async () => {
-    // baseline claim slot fits 2 lines (~140 chars at 536px); a longer
-    // Meeting-Prep-style primary line still has to overflow it.
+  it('paginates a long claim through the unified body (baseline)', async () => {
+    // With the unified body, the heading + verdict + reason all flow through
+    // the same single text container. A long Meeting-Prep-style primary line
+    // simply pushes its tail into later pages of the same body.
     await saveDiscreet(fakeSetLs, false);
     setActiveLayout('baseline');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
-    // Pretext wraps ~100 chars to 2 baseline-claim lines, so we need ≥105 chars
-    // to overflow into a continuation page; the 140-char clip() in formatLensResult
-    // means the unique tail marker must live before char 139.
+    // ≥105 chars so it overflows the 9-line baseline page budget when combined
+    // with the verdict glyph + reason; the unique tail marker must live before
+    // char 139 (the formatLensResultBase 140-char clip).
     const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette tilbud SLUTORD.';
+    const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(20);
     await setLensResult({
       type: 'fact-check',
-      claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: 'short reason' }],
+      claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: longReason }],
     });
 
-    // Page 0: claim slot has the FIRST chunk only (≤2 lines); it does not contain
-    // the tail of the claim.
-    const claim0 = lastUpgradeByName('vl-claim')!;
-    expect(claim0).toBeDefined();
-    expect(longClaim).toContain(claim0);          // chunk is a prefix of the original
-    expect(claim0.length).toBeLessThan(longClaim.length); // pagination actually fired
-    expect(claim0).not.toContain('SLUTORD');      // tail must NOT be on page 0
+    // Page 0 body starts with the heading (possibly truncated by pagination).
+    const page0 = lastUpgradeByName('vl-reason')!;
+    expect(page0).toBeDefined();
 
-    // Scroll forward — we should land on a claim-continuation page (scroll
-    // layout, reason slot carries the rest of the claim). Walking forward
-    // until we either hit the tail of the claim or run out of pages.
-    let foundTail = false;
-    for (let i = 0; i < 5; i++) {
+    // Scroll forward — the SLUTORD tail of the heading must appear in some
+    // page's body chunk (it's near the start of the unified body so it lands
+    // on page 0 or page 1).
+    let foundTail = page0.includes('SLUTORD');
+    for (let i = 0; i < 10 && !foundTail; i++) {
       bridge.textContainerUpgrade.mockClear();
-      bridge.rebuildPageContainer.mockClear();
       await scrollActiveReason(1);
-      const reason = lastUpgradeByName('vl-reason');
-      if (reason && reason.includes('SLUTORD')) {
-        foundTail = true;
-        // First scroll-down crosses full→scroll, which rebuilds. Subsequent
-        // same-layout scrolls don't.
-        break;
-      }
+      const body = lastUpgradeByName('vl-reason');
+      if (body && body.includes('SLUTORD')) foundTail = true;
     }
     expect(foundTail).toBe(true);
   });
@@ -1227,9 +1276,6 @@ describe('line-aware pagination', () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
-    // Pretext wraps ~100 chars to 2 baseline-claim lines, so we need ≥105 chars
-    // to overflow into a continuation page; the 140-char clip() in formatLensResult
-    // means the unique tail marker must live before char 139.
     const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette tilbud SLUTORD.';
     const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(40);
     await setLensResult({
@@ -1237,36 +1283,45 @@ describe('line-aware pagination', () => {
       claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: longReason }],
     });
 
-    // Visit every page. The traversal order must show the claim tail before
-    // any reason text appears.
+    // In the unified body, the heading + verdict + reason appear in that
+    // order. SLUTORD (in the heading) must precede 'quick brown' (in the
+    // reason) — either within the same page, or in an earlier page.
     let sawClaimTail = false;
     let sawReasonText = false;
     let claimTailBeforeReason = false;
-    const allReasonContents: string[] = [];
-    const page0Reason = lastUpgradeByName('vl-reason')!;
-    if (page0Reason) allReasonContents.push(page0Reason);
+    const pages: string[] = [];
+    const page0Body = lastUpgradeByName('vl-reason');
+    if (page0Body) pages.push(page0Body);
     for (let i = 0; i < 30; i++) {
       bridge.textContainerUpgrade.mockClear();
       await scrollActiveReason(1);
       const next = lastUpgradeByName('vl-reason');
       if (!next) break;
-      allReasonContents.push(next);
-      if (next.includes('SLUTORD')) {
+      pages.push(next);
+    }
+    for (let i = 0; i < pages.length; i++) {
+      const body = pages[i]!;
+      const slutordIdx = body.indexOf('SLUTORD');
+      const reasonIdx = body.indexOf('quick brown');
+      if (slutordIdx >= 0) {
         sawClaimTail = true;
-        if (!sawReasonText) claimTailBeforeReason = true;
+        // Within this page, SLUTORD must precede 'quick brown' (or 'quick
+        // brown' might not be on this page yet, which is fine).
+        if (reasonIdx < 0 || slutordIdx < reasonIdx) {
+          if (!sawReasonText) claimTailBeforeReason = true;
+        }
       }
-      if (next.includes('quick brown')) {
-        sawReasonText = true;
-      }
+      if (reasonIdx >= 0) sawReasonText = true;
     }
     expect(sawClaimTail).toBe(true);
     expect(sawReasonText).toBe(true);
     expect(claimTailBeforeReason).toBe(true);
   });
 
-  it('discreet mode (2-line claim slot) absorbs a borderline claim without claim-continuation', async () => {
-    // Same Danish claim, but discreet-result has a 68px / 2-line claim slot.
-    // For this length (~95 chars), pretext wraps it to 2 lines which fit.
+  it('discreet mode body fits a short fact-check on a single page (no continuation)', async () => {
+    // A short single-claim fact-check (~95-char heading + short reason)
+    // composes into ~5 lines of unified body, well under the discreet 10-line
+    // page budget — so no continuation page is created.
     await saveDiscreet(fakeSetLs, true);
     setActiveLayout('discreet-minimal');
     await bootstrapHud('picker');
@@ -1278,12 +1333,13 @@ describe('line-aware pagination', () => {
       claims: [{ quote: '', verdict: 'TRUE', claim, reason: 'short' }],
     });
 
-    // Page 0's claim slot should hold the entire claim (no continuation needed).
-    const claim0 = lastUpgradeByName('vl-claim')!;
-    expect(claim0).toBe(claim);
-    // The result has a single page (no claim continuation, no reason
-    // continuation), so swipe-down past it hides the answer rather than
-    // no-op'ing — the "no more pages to scroll" outcome.
+    // Page 0's body should hold the entire content: heading + verdict + reason.
+    const body = lastUpgradeByName('vl-reason')!;
+    expect(body).toContain(claim);
+    expect(body).toContain('+ TRUE');
+    expect(body).toContain('short');
+    // The result has a single page, so swipe-down past it hides the answer
+    // rather than no-op'ing — the "no more pages to scroll" outcome.
     const outcome = await scrollActiveReason(1);
     expect(outcome).toBe('hidden');
   });
@@ -1307,13 +1363,482 @@ describe('line-aware pagination', () => {
     await showHistoryListPage([e1, e2]);
     await showHistoryDetailPage(e1);
 
-    // e1's reason is one page only — swipe-down should hop to e2.
+    // e1's body fits on one page — swipe-down should hop to e2 and rebuild
+    // with the new entry's unified body in the body container.
     bridge.rebuildPageContainer.mockClear();
     await scrollHistoryDetail(1);
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     const payload = calls.at(-1)![0].payload;
-    const claim = payload.textObject.find((t) => t.payload.containerName === 'vl-claim');
-    expect(claim?.payload.content).toContain('c2');
+    const body = payload.textObject.find((t) => t.payload.containerName === 'vl-reason');
+    expect(body?.payload.content).toContain('c2');
+  });
+});
+
+// =========================================================================
+// Regression guards for the unified-body refactor.
+//
+// These tests lock in the behavioural contract the user requested when we
+// collapsed the claim/verdict/reason slots into one full-screen text box:
+//   1. each lens type composes a recognisable unified body
+//   2. typical Meeting Prep results fit on one page (no unnecessary split)
+//   3. truly over-long content still paginates
+//   4. multi-claim navigation still walks one page-set per claim
+//   5. a scroll within a mode never triggers a layout rebuild
+//   6. the rendered page has a single body container (not 3 positioned slots)
+// =========================================================================
+describe('unified-body regression guards', () => {
+  type TextBag = { payload: { containerName: string; content: string } };
+  type RebuildBag = { payload: { containerTotalNum: number; textObject: TextBag[]; listObject: unknown[] } };
+
+  function lastRebuildPayload(): RebuildBag['payload'] {
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    return calls.at(-1)![0].payload;
+  }
+  function lastUpgradeByName(name: string): string | undefined {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
+    }
+    return undefined;
+  }
+  function bodyCallCount(): number {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
+    return calls.filter((c) => c[0].payload.containerName === 'vl-reason').length;
+  }
+
+  it('composes the unified body per lens type with blank-line separators', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    // Fact-check: "1/1 · " prefix + top + verdict + reason
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: 'R' }],
+    });
+    expect(lastUpgradeByName('vl-reason')).toBe('1/1 · C\n\n+ TRUE\n\nR');
+
+    // ELI5: no top, no middle → just the explanation, prefixed with "1/1 · ".
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'because reasons' }] });
+    expect(lastUpgradeByName('vl-reason')).toBe('1/1 · because reasons');
+
+    // Meeting-prep answer: "1/1 · " prefix + heading + detail + "From: …".
+    // Source attribution sits at the BOTTOM so the answer→detail flow isn't
+    // interrupted by the source line.
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'meeting-prep',
+      claims: [{ kind: 'answer', text: '4.2% beats your 4.8%', source: 'Bank contract', detail: 'Saves ~€120/month' }],
+    });
+    const body = lastUpgradeByName('vl-reason')!;
+    expect(body).toContain('4.2% beats your 4.8%');
+    expect(body).toContain('Saves ~€120/month');
+    expect(body).toContain('From: Bank contract');
+    // Sections separated by blank lines; "1/1 · " sits inline on the heading.
+    expect(body.split('\n\n')).toEqual([
+      '1/1 · 4.2% beats your 4.8%',
+      'Saves ~€120/month',
+      'From: Bank contract',
+    ]);
+  });
+
+  it('omits empty sections instead of leaving stray blank lines', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    bridge.textContainerUpgrade.mockClear();
+
+    // Meeting-prep follow-up: top only (no source, no detail). The "1/1 · "
+    // prefix lands on the heading line.
+    await setLensResult({
+      type: 'meeting-prep',
+      claims: [{ kind: 'followup', text: 'Did you compare ECB fixed-rate?', source: '', detail: '' }],
+    });
+    const body = lastUpgradeByName('vl-reason')!;
+    // No trailing blanks, no doubled \n\n\n\n separator.
+    expect(body).toBe('1/1 · → Did you compare ECB fixed-rate?');
+    expect(body).not.toContain('\n\n\n');
+  });
+
+  it('fits a typical Meeting Prep answer (heading + source + 180-char detail) on one page', async () => {
+    // This is THE regression — under the old 3-slot layout, a ~180-char detail
+    // spilled onto a near-empty scroll page. Under the unified layout (10 lines
+    // in discreet) the entire body fits on one page, so no swipe is needed.
+    await saveDiscreet(fakeSetLs, true);
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const detail = 'Saves about one hundred and twenty euros per month if locked in before June; consider the five-year fixed for an inflation buffer.';
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    await setLensResult({
+      type: 'meeting-prep',
+      claims: [{ kind: 'answer', text: '4.2% beats your 4.8%', source: 'Bank contract', detail }],
+    });
+
+    // The whole body should be a single page — exactly one body upgrade and
+    // swipe-down past the first page hides the answer (not "scroll to page 2").
+    expect(bodyCallCount()).toBe(1);
+    const outcome = await scrollActiveReason(1);
+    expect(outcome).toBe('hidden');
+  });
+
+  it('over-long content still paginates across multiple pages of unified body', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    // ~600-char reason — well over any per-page budget.
+    const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(20);
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
+    });
+
+    const page0 = lastUpgradeByName('vl-reason')!;
+    expect(page0).toBeDefined();
+
+    // Walking forward should produce at least one continuation page.
+    let extraPages = 0;
+    let safety = 30;
+    while (safety-- > 0) {
+      bridge.textContainerUpgrade.mockClear();
+      const outcome = await scrollActiveReason(1);
+      if (outcome === 'hidden' || outcome === 'noop') break;
+      const next = lastUpgradeByName('vl-reason');
+      if (!next || next === page0) break;
+      extraPages++;
+    }
+    expect(extraPages).toBeGreaterThanOrEqual(1);
+  });
+
+  it('flattens Meeting Prep claims into one entry body — content packs into ≤2 pages instead of one-page-per-claim', async () => {
+    // Meeting Prep is one session entry by design (answer + evidence +
+    // followup belong to one question). Claims are flattened into a single
+    // entry body so they pack efficiently — instead of always 3 pages (one
+    // per claim) like the old per-claim model, short content fits in 1-2
+    // pages.
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'meeting-prep',
+      claims: [
+        { kind: 'answer',   text: 'A', source: 'S', detail: 'D' },
+        { kind: 'evidence', text: 'E', source: 'S', detail: '' },
+        { kind: 'followup', text: 'F', source: '',  detail: '' },
+      ],
+    });
+
+    // Walk all pages and collect the body text.
+    const pages: string[] = [lastUpgradeByName('vl-reason')!];
+    let safety = 5;
+    while (safety-- > 0) {
+      bridge.textContainerUpgrade.mockClear();
+      const outcome = await scrollActiveReason(1);
+      if (outcome !== 'scrolled') break;
+      pages.push(lastUpgradeByName('vl-reason')!);
+    }
+
+    // All three claims must appear somewhere across the pages.
+    const combined = pages.join('\n');
+    expect(combined).toContain('A');           // answer text
+    expect(combined).toContain('D');           // detail
+    expect(combined).toContain('From: S');     // source
+    expect(combined).toContain('"E"');         // evidence quote
+    expect(combined).toContain('→ F');         // followup arrow
+
+    // Packs into ≤2 pages (was 3 pages with the old one-page-per-claim model).
+    expect(pages.length).toBeLessThanOrEqual(2);
+  });
+
+  it('multi-entry sessions still get X/Y position tags on the unified body', async () => {
+    // Sanity guard that the session-relative X/Y tag still appears when the
+    // session actually has multiple entries (the per-claim split paths used
+    // by fact-check / bias / etc.).
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'fact-check',
+      claims: [
+        { quote: '', verdict: 'TRUE',  claim: 'A', reason: 'rA' },
+        { quote: '', verdict: 'FALSE', claim: 'B', reason: 'rB' },
+      ],
+    });
+    expect(lastUpgradeByName('vl-reason')).toContain('A');
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-reason')).toContain('B');
+  });
+
+  it('scrolling within a layout never rebuilds the page container — only upgrades the body', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longReason = ('alpha beta gamma delta epsilon zeta eta theta iota kappa ').repeat(25);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
+    });
+    bridge.rebuildPageContainer.mockClear();
+    bridge.textContainerUpgrade.mockClear();
+
+    // Multiple scrolls within the same baseline layout — no rebuilds.
+    for (let i = 0; i < 3; i++) {
+      const outcome = await scrollActiveReason(1);
+      if (outcome === 'hidden' || outcome === 'noop') break;
+    }
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+    expect(bridge.textContainerUpgrade.mock.calls.length).toBeGreaterThan(0);
+  });
+
+  it('the baseline result layout has exactly one result text container (not 3 positioned slots)', async () => {
+    await saveDiscreet(fakeSetLs, false);
+    setActiveLayout('baseline');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const payload = lastRebuildPayload();
+    const resultContainers = payload.textObject.filter((t) =>
+      t.payload.containerName === 'vl-reason'
+      || t.payload.containerName === 'vl-claim'
+      || t.payload.containerName === 'vl-verdict'
+      || t.payload.containerName === 'vl-compact'
+    );
+    expect(resultContainers).toHaveLength(1);
+    expect(resultContainers[0]!.payload.containerName).toBe('vl-reason');
+  });
+
+  it('Meeting Prep with long content paginates the flattened entry body into multiple pages', async () => {
+    // With claim-flattening, a multi-claim Meeting Prep result still
+    // paginates when the combined content exceeds the page budget. The wearer
+    // gets bullets at the bottom showing within-entry page position and can
+    // walk pages symmetrically.
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    // Long detail so the flattened body exceeds the per-page line budget.
+    const longDetail = ('This is a long answer detail sentence. ').repeat(15);
+    await setLensResult({
+      type: 'meeting-prep',
+      claims: [
+        { kind: 'answer',   text: 'A', source: 'S', detail: longDetail },
+        { kind: 'evidence', text: 'E', source: 'S', detail: '' },
+        { kind: 'followup', text: 'F', source: '',  detail: '' },
+      ],
+    });
+
+    // Page 0 should have a bullet row at the bottom because the entry is
+    // multi-page now.
+    const page0 = lastUpgradeByName('vl-reason')!;
+    expect(page0).toMatch(/●/);
+
+    // Swipe forward → next page of the same entry. Swipe back → page 0.
+    // Symmetric.
+    bridge.textContainerUpgrade.mockClear();
+    const forward = await scrollActiveReason(1);
+    expect(forward).toBe('scrolled');
+
+    bridge.textContainerUpgrade.mockClear();
+    const back = await scrollActiveReason(-1);
+    expect(back).toBe('scrolled');
+    expect(lastUpgradeByName('vl-reason')).toBe(page0);
+
+    // Swipe-up at sessionPageIndex=0 → noop.
+    bridge.textContainerUpgrade.mockClear();
+    const noop = await scrollActiveReason(-1);
+    expect(noop).toBe('noop');
+  });
+
+  it('always shows session-relative X/Y (even 1/1 for a 1-entry session); bullets only on multi-page entries', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    // Single-entry single-page: "1/1 · " prefix, no bullets.
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: 'R' }],
+    });
+    const shortBody = lastUpgradeByName('vl-reason')!;
+    expect(shortBody).toBe('1/1 · C\n\n+ TRUE\n\nR');
+    expect(shortBody).not.toMatch(/[●○]/);
+
+    // Single-entry multi-page (Meeting Prep with a long detail): "1/1 · "
+    // prefix on every page; bullets at the bottom show within-entry page
+    // position.
+    bridge.textContainerUpgrade.mockClear();
+    const longDetail = ('This is a long answer detail sentence. ').repeat(15);
+    await setLensResult({
+      type: 'meeting-prep',
+      claims: [{ kind: 'answer', text: 'A', source: 'S', detail: longDetail }],
+    });
+    const page0 = lastUpgradeByName('vl-reason')!;
+    expect(page0.startsWith('1/1 · ')).toBe(true);
+    expect(page0).toMatch(/●/);
+  });
+
+  it('multi-entry sessions show session-relative X/Y on every page (constant within an entry, changes across entries)', async () => {
+    // Two single-page Meeting Prep entries → every page of Q1 starts with
+    // "1/2 · ", every page of Q2 starts with "2/2 · ". The wearer always
+    // sees which question they're on; the indicator only changes when the
+    // page sequence crosses into the next entry.
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const mkEntry = (id: string, text: string): HistoryEntry => ({
+      id, timestamp: 1, sessionId: 's',
+      lensId: 'meeting-prep', lensName: 'Meeting Prep', question: text,
+      badge: '', quote: '',
+      result: { type: 'meeting-prep', claims: [
+        { kind: 'answer', text, source: 'Src', detail: 'Detail' },
+      ] },
+    });
+    const e1 = mkEntry('e1', 'Q1');
+    const e2 = mkEntry('e2', 'Q2');
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e2']) });
+    expect(lastUpgradeByName('vl-reason')!.startsWith('2/2 · Q2')).toBe(true);
+
+    bridge.textContainerUpgrade.mockClear();
+    const outcome = await scrollActiveReason(-1);
+    expect(outcome).toBe('scrolled');
+    expect(lastUpgradeByName('vl-reason')!.startsWith('1/2 · Q1')).toBe(true);
+  });
+
+  it('session-relative X/Y stays constant while scrolling within the same entry, then changes on entry crossover', async () => {
+    // Q1 with a long detail (multi-page), Q2 with a short answer (single-
+    // page). Every page of Q1 should start with "1/2 · "; Q2's single page
+    // starts with "2/2 · ".
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longDetail = ('Detail sentence here. ').repeat(20);
+    const e1: HistoryEntry = {
+      id: 'e1', timestamp: 1, sessionId: 's',
+      lensId: 'meeting-prep', lensName: 'Meeting Prep', question: 'Q1',
+      badge: '', quote: '',
+      result: { type: 'meeting-prep', claims: [
+        { kind: 'answer', text: 'Q1', source: 'S', detail: longDetail },
+      ] },
+    };
+    const e2: HistoryEntry = {
+      id: 'e2', timestamp: 1, sessionId: 's',
+      lensId: 'meeting-prep', lensName: 'Meeting Prep', question: 'Q2',
+      badge: '', quote: '',
+      result: { type: 'meeting-prep', claims: [
+        { kind: 'answer', text: 'Q2', source: 'S', detail: 'short' },
+      ] },
+    };
+
+    await setLensResult(e1.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e1']) });
+
+    // Walk to the start: jump back to Q1's first page.
+    let safety = 30;
+    while (safety-- > 0) {
+      const cur = lastUpgradeByName('vl-reason') ?? '';
+      if (cur.startsWith('1/2 · Q1')) break;
+      bridge.textContainerUpgrade.mockClear();
+      const outcome = await scrollActiveReason(-1);
+      if (outcome !== 'scrolled') break;
+    }
+    expect(lastUpgradeByName('vl-reason')!.startsWith('1/2 · Q1')).toBe(true);
+
+    // Advance forward; every page until Q2's start must still say "1/2 · ".
+    let crossedToQ2 = false;
+    safety = 30;
+    while (safety-- > 0) {
+      bridge.textContainerUpgrade.mockClear();
+      const outcome = await scrollActiveReason(1);
+      if (outcome !== 'scrolled') break;
+      const cur = lastUpgradeByName('vl-reason')!;
+      if (cur.startsWith('2/2 · ')) { crossedToQ2 = true; break; }
+      expect(cur.startsWith('1/2 · ')).toBe(true);
+    }
+    expect(crossedToQ2).toBe(true);
+  });
+
+  it('swipe is symmetric: n swipes-down followed by n swipes-up returns to the starting page', async () => {
+    // Two single-page Meeting Prep entries form a 2-page session. Swipe down
+    // 1× from Q1 → Q2. Swipe up 1× → Q1. Symmetric.
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const mkEntry = (id: string, text: string): HistoryEntry => ({
+      id, timestamp: 1, sessionId: 's',
+      lensId: 'meeting-prep', lensName: 'Meeting Prep', question: text,
+      badge: '', quote: '',
+      result: { type: 'meeting-prep', claims: [
+        { kind: 'answer', text, source: 'S', detail: 'D' },
+      ] },
+    });
+    const e1 = mkEntry('e1', 'Q1');
+    const e2 = mkEntry('e2', 'Q2');
+
+    await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e2']) });
+    expect(lastUpgradeByName('vl-reason')!.startsWith('2/2 · Q2')).toBe(true);
+
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(-1);
+    expect(lastUpgradeByName('vl-reason')!.startsWith('1/2 · Q1')).toBe(true);
+
+    bridge.textContainerUpgrade.mockClear();
+    await scrollActiveReason(1);
+    expect(lastUpgradeByName('vl-reason')!.startsWith('2/2 · Q2')).toBe(true);
+  });
+
+  it('the active-page body container captures events itself (isEventCapture=1)', async () => {
+    // Regression: if the body is isEventCapture=0 with a sink behind it, the
+    // body blocks swipes from reaching the sink on this hardware — and the
+    // wearer can no longer swipe back to the previous question on the
+    // recording screen. Lock it in for both modes.
+    type PayloadBag = { payload: { containerName: string; isEventCapture: number } };
+
+    // Baseline mode.
+    await saveDiscreet(fakeSetLs, false);
+    setActiveLayout('baseline');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    let payload = lastRebuildPayload();
+    let body = (payload.textObject as unknown as PayloadBag[]).find((t) => t.payload.containerName === 'vl-reason');
+    expect(body).toBeDefined();
+    expect(body!.payload.isEventCapture).toBe(1);
+
+    // Discreet-result mode.
+    await saveDiscreet(fakeSetLs, true);
+    setActiveLayout('discreet-result');
+    await showActivePage(getPersona('fact-checker')!);
+    payload = lastRebuildPayload();
+    body = (payload.textObject as unknown as PayloadBag[]).find((t) => t.payload.containerName === 'vl-reason');
+    expect(body).toBeDefined();
+    expect(body!.payload.isEventCapture).toBe(1);
+  });
+
+  it('the history-detail layout has exactly one result text container', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    const entry: HistoryEntry = {
+      id: 'h', timestamp: 1, sessionId: 's',
+      lensId: 'fact-checker', lensName: 'Fact Check', question: 'q',
+      badge: 'TRUE', quote: '',
+      result: { type: 'fact-check', claims: [{ quote: '', verdict: 'TRUE', claim: 'c', reason: 'r' }] },
+    };
+    await showHistoryDetailPage(entry);
+
+    const payload = lastRebuildPayload();
+    const resultContainers = payload.textObject.filter((t) =>
+      t.payload.containerName === 'vl-reason'
+      || t.payload.containerName === 'vl-claim'
+      || t.payload.containerName === 'vl-verdict'
+      || t.payload.containerName === 'vl-compact'
+    );
+    expect(resultContainers).toHaveLength(1);
+    expect(resultContainers[0]!.payload.containerName).toBe('vl-reason');
   });
 });

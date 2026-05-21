@@ -118,6 +118,12 @@ describe('fact-checker', () => {
     if (result.type === 'fact-check') expect(result.claims[0]!.quote.length).toBeLessThanOrEqual(MAX_QUOTE_CHARS);
   });
 
+  it('truncates over-long claim summaries to 140 chars', () => {
+    const long = 'c'.repeat(500);
+    const result = parseFactCheckerResponse(JSON.stringify({ claims: [{ quote: 'q', verdict: 'TRUE', claim: long, reason: 'r' }] }));
+    if (result.type === 'fact-check') expect(result.claims[0]!.claim.length).toBeLessThanOrEqual(140);
+  });
+
   it('buildFactCheckerPrompt includes the language name', () => {
     const prompt = buildFactCheckerPrompt('de');
     expect(prompt).toContain('Deutsch');
@@ -158,6 +164,12 @@ describe('trivia', () => {
     const long = 'A'.repeat(100);
     const result = parseTriviaResponse(JSON.stringify({ claims: [{ quote: '', question: 'Q?', answer: long, description: 'ok' }] }));
     if (result.type === 'trivia') expect(result.claims[0]!.answer.length).toBeLessThanOrEqual(60);
+  });
+
+  it('truncates over-long questions to 140 chars', () => {
+    const long = 'Q'.repeat(500);
+    const result = parseTriviaResponse(JSON.stringify({ claims: [{ quote: '', question: long, answer: 'A', description: 'ok' }] }));
+    if (result.type === 'trivia') expect(result.claims[0]!.question.length).toBeLessThanOrEqual(140);
   });
 
   it('synthesizes an empty claim when the response has no claims array', () => {
@@ -496,9 +508,9 @@ import {
   buildMeetingPrepSchema,
   parseMeetingPrepResponse,
   resolveAttachmentLabels,
-  MAX_FOLLOW_UPS,
   MAX_ANSWER_CHARS,
   MAX_FOLLOW_UP_CHARS,
+  MAX_EVIDENCE_CHARS,
 } from '../src/personas/meetingPrep';
 import type { MeetingPrepSection } from '../src/types';
 
@@ -536,21 +548,32 @@ describe('meeting-prep / buildMeetingPrepSchema', () => {
     expect(schema['required']).toEqual(['answer']);
   });
 
-  it('omits source entirely when no attachments are configured (general only)', () => {
+  it('omits source and evidence entirely when no attachments are configured (general only)', () => {
     const schema = buildMeetingPrepSchema(GENERAL_ONLY) as Record<string, unknown>;
     const props = schema['properties'] as Record<string, unknown>;
     expect(props['source']).toBeUndefined();
-    const followUps = props['followUps'] as Record<string, unknown>;
-    const items = followUps['items'] as Record<string, unknown>;
-    const itemProps = items['properties'] as Record<string, unknown>;
-    expect(itemProps['source']).toBeUndefined();
+    expect(props['evidence']).toBeUndefined();
   });
 
-  it('caps follow-ups at MAX_FOLLOW_UPS', () => {
+  it('exposes followUp as a single string (no array, no maxItems)', () => {
     const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO) as Record<string, unknown>;
     const props = schema['properties'] as Record<string, unknown>;
-    const followUps = props['followUps'] as Record<string, unknown>;
-    expect(followUps['maxItems']).toBe(MAX_FOLLOW_UPS);
+    const followUp = props['followUp'] as Record<string, unknown>;
+    expect(followUp['type']).toBe('string');
+    expect(followUp['maxItems']).toBeUndefined();
+    expect(followUp['items']).toBeUndefined();
+  });
+
+  it('declares evidence as an object with required source + quote, source bound to attachment enum', () => {
+    const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const evidence = props['evidence'] as Record<string, unknown>;
+    expect(evidence['type']).toBe('object');
+    expect(evidence['required']).toEqual(['source', 'quote']);
+    const evidenceProps = evidence['properties'] as Record<string, unknown>;
+    const evidenceSource = evidenceProps['source'] as Record<string, unknown>;
+    expect(evidenceSource['enum']).toEqual(['Bank contract', 'Questions']);
+    expect((evidenceProps['quote'] as Record<string, unknown>)['type']).toBe('string');
   });
 
   it('uses "Attachment N" defaults in the enum when attachments are unlabeled', () => {
@@ -594,17 +617,19 @@ describe('meeting-prep / buildMeetingPrepPrompt', () => {
     expect(prompt).not.toContain('=== ');
   });
 
-  it('includes the hardcoded few-shot example so the model sees concrete answer/follow-up shape', () => {
-    // Quality-critical: the example anchors rule 3 ("fold answered questions
-    // into `answer` instead of echoing them as follow-ups"). Without it the
-    // model often regresses to redundant follow-ups.
+  it('includes BOTH few-shot examples (no-follow-up and gap cases) so the model sees both cardinalities', () => {
+    // Quality-critical: a single example showing follow-ups anchors the model
+    // to always emit them. The pair (Example A with no followUp, Example B
+    // with one) calibrates against that prior.
     const prompt = buildMeetingPrepPrompt('en', GENERAL_PLUS_TWO);
-    expect(prompt).toContain('EXAMPLE');
+    expect(prompt).toContain('EXAMPLE A');
+    expect(prompt).toContain('EXAMPLE B');
+    expect(prompt).toContain('evidence');
   });
 });
 
 describe('meeting-prep / parseMeetingPrepResponse', () => {
-  it('parses a primary answer with detail and an attachment source', () => {
+  it('parses a primary answer with detail and an attachment source as a single answer claim', () => {
     const result = parseMeetingPrepResponse(
       JSON.stringify({
         answer: 'They are offering 4.2% — lower than your current 4.8%.',
@@ -616,6 +641,7 @@ describe('meeting-prep / parseMeetingPrepResponse', () => {
     expect(result.type).toBe('meeting-prep');
     if (result.type === 'meeting-prep') {
       expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.kind).toBe('answer');
       expect(result.claims[0]!.text).toContain('4.2%');
       expect(result.claims[0]!.source).toBe('Bank contract');
       expect(result.claims[0]!.detail).toContain('€120');
@@ -642,64 +668,119 @@ describe('meeting-prep / parseMeetingPrepResponse', () => {
     }
   });
 
-  it('parses follow-ups and preserves their order', () => {
-    const result = parseMeetingPrepResponse(
-      JSON.stringify({
-        answer: 'Primary',
-        followUps: [
-          { prompt: 'Ask about prepayment.', source: 'Questions' },
-          { prompt: 'Ask about reset windows.' },
-        ],
-      }),
-      GENERAL_PLUS_TWO,
-    );
-    if (result.type === 'meeting-prep') {
-      expect(result.claims).toHaveLength(3);
-      expect(result.claims[1]!.text).toBe('Ask about prepayment.');
-      expect(result.claims[1]!.source).toBe('Questions');
-      expect(result.claims[2]!.text).toBe('Ask about reset windows.');
-      expect(result.claims[2]!.source).toBe('');
-    }
-  });
-
-  it('clamps follow-ups at MAX_FOLLOW_UPS even when the model returns more', () => {
-    const followUps = Array.from({ length: 6 }, (_, i) => ({ prompt: `F${i}` }));
-    const result = parseMeetingPrepResponse(
-      JSON.stringify({ answer: 'A', followUps }),
-      GENERAL_PLUS_TWO,
-    );
-    if (result.type === 'meeting-prep') {
-      expect(result.claims).toHaveLength(1 + MAX_FOLLOW_UPS);
-    }
-  });
-
-  it('skips follow-ups with empty prompts but keeps valid ones', () => {
+  it('parses evidence into a kind:"evidence" claim with the verbatim quote and attachment source', () => {
     const result = parseMeetingPrepResponse(
       JSON.stringify({
         answer: 'A',
-        followUps: [
-          { prompt: '' },
-          { prompt: 'Real follow-up' },
-          { other: 'malformed' },
-        ],
+        source: 'Bank contract',
+        evidence: { source: 'Bank contract', quote: 'Current rate 4.8%, 25-year term.' },
       }),
       GENERAL_PLUS_TWO,
     );
     if (result.type === 'meeting-prep') {
       expect(result.claims).toHaveLength(2);
-      expect(result.claims[1]!.text).toBe('Real follow-up');
+      expect(result.claims[1]!.kind).toBe('evidence');
+      expect(result.claims[1]!.text).toBe('Current rate 4.8%, 25-year term.');
+      expect(result.claims[1]!.source).toBe('Bank contract');
     }
   });
 
-  it('truncates over-long answer and follow-up text', () => {
-    const huge = 'x'.repeat(500);
+  it('drops evidence when its source is not a valid attachment label', () => {
     const result = parseMeetingPrepResponse(
-      JSON.stringify({ answer: huge, followUps: [{ prompt: huge }] }),
+      JSON.stringify({
+        answer: 'A',
+        evidence: { source: 'Made-up', quote: 'something' },
+      }),
       GENERAL_PLUS_TWO,
     );
     if (result.type === 'meeting-prep') {
-      expect(result.claims[0]!.text.length).toBeLessThanOrEqual(MAX_ANSWER_CHARS);
-      expect(result.claims[1]!.text.length).toBeLessThanOrEqual(MAX_FOLLOW_UP_CHARS);
+      expect(result.claims).toHaveLength(1);
+    }
+  });
+
+  it('drops evidence when its quote is missing or empty', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'A',
+        evidence: { source: 'Bank contract', quote: '' },
+      }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims).toHaveLength(1);
+    }
+  });
+
+  it('parses a single followUp into a kind:"followup" claim with empty source', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'A',
+        followUp: 'Is 4.2% fixed, and for how many years?',
+      }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims).toHaveLength(2);
+      expect(result.claims[1]!.kind).toBe('followup');
+      expect(result.claims[1]!.text).toBe('Is 4.2% fixed, and for how many years?');
+      expect(result.claims[1]!.source).toBe('');
+    }
+  });
+
+  it('omits the followup claim entirely when followUp is missing — the default path', () => {
+    // Central behavior change: the model is expected to leave followUp unset
+    // for the common case where prep already covers the answer.
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({ answer: 'A', source: 'Bank contract' }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims.some((c) => c.kind === 'followup')).toBe(false);
+    }
+  });
+
+  it('omits the followup claim when followUp is an empty string', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({ answer: 'A', followUp: '' }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims).toHaveLength(1);
+    }
+  });
+
+  it('emits answer + evidence + followup in stable order when all three are present', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'A',
+        source: 'Bank contract',
+        evidence: { source: 'Bank contract', quote: 'Q' },
+        followUp: 'F',
+      }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims.map((c) => c.kind)).toEqual(['answer', 'evidence', 'followup']);
+    }
+  });
+
+  it('truncates over-long answer, evidence, and follow-up text', () => {
+    const huge = 'x'.repeat(500);
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: huge,
+        evidence: { source: 'Bank contract', quote: huge },
+        followUp: huge,
+      }),
+      GENERAL_PLUS_TWO,
+    );
+    if (result.type === 'meeting-prep') {
+      const answer = result.claims.find((c) => c.kind === 'answer')!;
+      const evidence = result.claims.find((c) => c.kind === 'evidence')!;
+      const followup = result.claims.find((c) => c.kind === 'followup')!;
+      expect(answer.text.length).toBeLessThanOrEqual(MAX_ANSWER_CHARS);
+      expect(evidence.text.length).toBeLessThanOrEqual(MAX_EVIDENCE_CHARS);
+      expect(followup.text.length).toBeLessThanOrEqual(MAX_FOLLOW_UP_CHARS);
     }
   });
 

@@ -9,7 +9,7 @@ The user just provided an audio clip likely containing one or more trivia or fac
 
 1. Identify the trivia or factual questions being asked. Return up to FIVE distinct questions, but ONLY include one if you clearly understand what was asked and it has a definitive factual answer. Skip mid-sentences, unclear phrases, repeated points, and questions you can't answer with confidence — fewer high-confidence answers is always better than padding the list.
 2. For each, include a short verbatim quote (≤140 chars) from the audio that captures how the question was asked.
-3. For each, restate the question (max 120 chars), provide the correct definitive answer in one short phrase (max 60 chars), and one brief explanatory sentence (max 180 chars).
+3. For each, restate the question (max 140 chars), provide the correct definitive answer in one short phrase (max 60 chars), and one brief explanatory sentence (max 180 chars).
 4. ORDER MATTERS: list the MOST RECENT question first (the one spoken closest to the end of the audio).
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.`;
@@ -23,7 +23,7 @@ const ITEM_SCHEMA = {
   type: 'object',
   properties: {
     quote: { type: 'string', description: 'Verbatim audio snippet (max 140 chars).' },
-    question: { type: 'string', description: 'The trivia question as asked (max 120 chars).' },
+    question: { type: 'string', description: 'The trivia question as asked (max 140 chars).' },
     answer: { type: 'string', description: 'The correct answer (max 60 chars).' },
     description: { type: 'string', description: 'One interesting supporting fact (max 180 chars).' },
   },
@@ -43,7 +43,7 @@ export function parseTriviaResponse(text: string): LensResult {
   const items = readClaimsArray(raw);
   const claims: TriviaClaim[] = items.map((c) => ({
     quote: coerceQuote(c['quote']),
-    question: trimTo(typeof c['question'] === 'string' ? c['question'] : '', 120),
+    question: trimTo(typeof c['question'] === 'string' ? c['question'] : '', 140),
     answer: trimTo(typeof c['answer'] === 'string' ? c['answer'] : '', 60),
     description: trimTo(typeof c['description'] === 'string' ? c['description'] : '', 180),
   }));

@@ -590,6 +590,7 @@ async function runAnalysis(): Promise<void> {
     const guidance: LensResult = {
       type: 'meeting-prep',
       claims: [{
+        kind: 'answer',
         text: 'Add meeting context in phone settings to use this lens.',
         source: '',
         detail: '',
@@ -607,20 +608,13 @@ async function runAnalysis(): Promise<void> {
     return;
   }
 
-  // Clear the previous answer and rebuild the active page before starting a
-  // new check. Without this, a double-tap from the result screen leaves '...'
-  // stuck and the spinner never animates — the SDK does not refresh containers
-  // that are already populated with the prior result. The Menu → Check path
-  // already worked because it does its own restoreActivePage before calling
-  // runAnalysis; the bug only surfaced via the direct double-tap path.
-  // In discreet mode drop back to the dot-only layout so the user has
-  // something on screen during thinking; setLensResult will promote to
-  // discreet-result once the answer arrives.
+  // Clear the store signal for sibling components (settings WebView). The HUD
+  // intentionally keeps the previous answer on screen during analysis so the
+  // wearer can review it while the spinner animates in the corner status slot
+  // (added to every active-page layout). Only rebuild the page when there is
+  // nothing meaningful to keep — e.g. on the first analysis of a session where
+  // the layout is still discreet-minimal/baseline idle.
   setStateResult(null);
-  if (settings().discreet && getActiveLayout() !== 'discreet-minimal') {
-    setActiveLayout('discreet-minimal');
-  }
-  await restoreActivePage();
 
   inflight?.abort();
   const controller = new AbortController();
@@ -664,7 +658,7 @@ async function runAnalysis(): Promise<void> {
       const result = parseMeetingPrepResponse(rawText, sections);
       stopSpinner();
       setStateResult(result);
-      await pushHistoryEntry({
+      const newEntryId = await pushHistoryEntry({
         sessionId: currentSessionId,
         lensId: persona.id,
         lensName: persona.name,
@@ -674,7 +668,12 @@ async function runAnalysis(): Promise<void> {
         result,
       }, (k, v) => getBridge().setLocalStorage(k, v));
       await reloadHistoryFromStorage();
-      await setLensResult(result);
+      // Pass the full session context so multiple Meeting Prep questions in
+      // the same session accumulate as separate entries — without this, the
+      // direct-call path in setLensResult would replace sessionEntries with a
+      // synthetic one-entry list, breaking cross-question swipe-up navigation.
+      const sessionEntriesNext = sessionHistory().filter((e) => e.sessionId === currentSessionId);
+      await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set([newEntryId]) });
       await setStatus('displaying');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('displaying');
@@ -1132,10 +1131,14 @@ export function extractQuote(result: LensResult): string {
       return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'session-summary':
       return result.quote ?? '';
-    case 'meeting-prep':
-      // Primary answer's detail line — the closest thing this lens has to a
-      // verbatim audio quote, since Gemini isn't asked to echo the heard text.
+    case 'meeting-prep': {
+      // Prefer the verbatim evidence excerpt so history search hits the real
+      // prep text. Fall back to the answer's detail line when no evidence claim
+      // was produced (e.g. answer drawn from general notes or no attachments).
+      const evidence = result.claims.find((c) => c.kind === 'evidence');
+      if (evidence?.text) return evidence.text;
       return result.claims[0]?.detail ?? '';
+    }
   }
 }
 

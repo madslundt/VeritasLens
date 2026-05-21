@@ -92,7 +92,9 @@ const STATUS_LABEL: Record<string, string> = {
   idle: 'OK',
   listening: '',
   thinking: '...',
-  displaying: '✓',
+  // Clear the status slot once an answer is on screen so the corner spinner
+  // disappears — the answer itself is the "done!" signal on every layout.
+  displaying: '',
   sleeping: 'ZZZ',
   error: 'ERR',
 };
@@ -115,44 +117,36 @@ export const EXIT_LABEL_WITH_SUMMARY = 'Exit - generate summary';
 // reflects whether leaveActiveSession will fire a final summary.
 let exitGeneratesSummary = false;
 
-// Line-aware pagination constants. The reason container is the only scrollable
+// Line-aware pagination constants. The body container is the only scrollable
 // region. Inner width = container width 544 minus 2*padding (4) = 536px.
 // Line height is sourced from pretext (a single-line measurement) so a font
 // bump in @evenrealities/pretext doesn't silently break pagination.
 const LINE_PX = measureTextWrap('X', 1000).height;
-const REASON_INNER_W = SCREEN_W - 32 - 2 * 4; // 536
-// Claim-slot inner heights:
-//   baseline claim       = 62px container, padding 4 → inner 54px = 2 × 27 lines
-//   discreet-result claim = 68px container, padding 4 → inner 60px = 2 × 27 lines
-// Claim text wider than the slot overflows visually into the verdict row, so
-// we paginate any excess into compact-header continuation pages.
-const BASELINE_CLAIM_LINES = 2;
-const DISCREET_CLAIM_LINES = 2;
-// On page 0 of a claim (full header layout), reason height varies by mode but
-// inner area accommodates ~4 lines of 27px in both baseline (134-8=126px → 4)
-// and discreet-result (126-8=118px → 4).
-const FULL_HEADER_REASON_LINES = 4;
-// On page 1+ of a claim (compact header layout), reason expands. Baseline
-// keeps REC + hint chrome so gets 7 lines; discreet drops chrome for 8 lines.
-const BASELINE_SCROLL_REASON_LINES = 7;
-const DISCREET_SCROLL_REASON_LINES = 8;
+const BODY_INNER_W = SCREEN_W - 32 - 2 * 4; // 536
+// Per-mode line budget for one body page. Each layout has a single unified
+// text container that spans from y=4 to the bottom limit allowed by the
+// chrome row (REC/hint at y=256 on baseline, hint at y=260 on history detail,
+// nothing on discreet). Body container height = lines × LINE_PX + 2×padding.
+//   discreet result: y=4, h=280 → 10 × 27 + 8 = 278 px ≤ 280; bottom y=284
+//   baseline:        y=4, h=252 → 9 × 27 + 8  = 251 px ≤ 252; bottom y=256
+//   history detail:  y=4, h=256 → 9 × 27 + 8  = 251 px ≤ 256; bottom y=260
+const DISCREET_PAGE_LINES = 10;
+const BASELINE_PAGE_LINES = 9;
+const HISTORY_DETAIL_PAGE_LINES = 9;
 
 /**
- * One screen-worth of result content. Multi-claim results and long claim/
- * reason text expand into a flat list of these — swipe-down increments the
- * index, swipe-up decrements. `pageWithinClaim === 0` is the full-header
- * page; higher values are compact-header scroll pages.
- *
- * `claimChunk` is set on the header page only — it carries the chunk of the
- * claim that fits the (small) claim slot. `text` is what goes in the reason
- * slot: the first reason chunk for the header page, or a claim-continuation
- * or reason-continuation chunk for scroll pages.
+ * One screen-worth of result content. Multi-claim results and long body text
+ * expand into a flat list of these — swipe-down increments the index, swipe-up
+ * decrements. The unified body (heading + verdict + reason with blank-line
+ * separators) is paginated into one or more pages per claim; `text` carries
+ * the chunk for this page. `pageWithinClaim === 0` is the first page of a
+ * claim (includes the heading + position tag); higher values are continuation
+ * chunks of the same claim's body.
  */
 type PageRef = {
   claimIdx: number;
   pageWithinClaim: number;
   text: string;
-  claimChunk?: string;
 };
 
 /** A page in the session-wide flat list spanning every entry in the current
@@ -162,8 +156,8 @@ type SessionPageRef = PageRef & { entryIdx: number };
 // Session-wide flat scroll model. The cursor walks across every entry in the
 // current session (split per claim by the lifecycle), so a swipe-up at the
 // first claim of the latest analysis hops to the previous question rather
-// than no-op'ing. `latestAnalysisRange` + `useWithinAnalysisIndicator` track
-// the indicator format (1/N within-analysis vs X/Y session-relative).
+// than no-op'ing. The indicator is uniformly session-relative ("X/Y" across
+// every claim in the session) so the wearer always knows where they are.
 let sessionEntries: HistoryEntry[] = [];
 let sessionPages: SessionPageRef[] = [];
 let sessionPageIndex = 0;
@@ -172,17 +166,11 @@ let sessionPageIndex = 0;
 // preserved so the next scroll-up can reveal the last session page; the
 // visible layout is demoted to baseline / discreet-minimal in the meantime.
 let activeHidden = false;
-/** First/last entry index of the most recent analysis. Drives the "within
- *  analysis" indicator scope: when the cursor sits inside this range the
- *  indicator counts within-analysis claims; outside, it counts session-wide. */
+/** First/last entry index of the most recent analysis. Used to jump the
+ *  cursor to the new first claim when a result lands. */
 let latestAnalysisRange: { firstEntry: number; lastEntry: number } | null = null;
-/** Indicator mode. Flips to false the first time the cursor leaves
- *  `latestAnalysisRange` (sticks until the next first-analysis-of-session). */
-let useWithinAnalysisIndicator = true;
 let detailPages: PageRef[] = [];
 let detailPageIndex = 0;
-/** Tracks which history-detail layout is currently on screen (full vs scroll). */
-let detailIsFullLayout = true;
 /** Index into cachedHistoryEntries of the entry currently shown on history-detail. */
 let historyDetailIndex = -1;
 // Stash for results that arrive while the user is off the active page (e.g.
@@ -194,6 +182,11 @@ let pendingActiveResult: LensResult | null = null;
 // buildMenuPage so the spinner is visible immediately when the user opens the
 // menu mid-analysis (rather than waiting up to one ticker interval).
 let pendingMenuSpinnerFrame = '';
+// Last status frame written by setStatus. Used to seed the vl-status container
+// of any active-page layout that gets rebuilt during analysis (e.g. when the
+// wearer scrolls to a previous answer mid-check), so the spinner stays visible
+// instead of vanishing until the next ticker tick.
+let pendingStatusFrame = '';
 
 let bootstrapped = false;
 let currentPage: HudPage = 'none';
@@ -201,18 +194,18 @@ let menuPersona: Persona | null = null;
 let cachedHistoryEntries: HistoryEntry[] = [];
 /**
  * Sub-mode for the active page. Driven by the lifecycle, read by buildActivePage.
- *   - 'baseline'         : default with chrome; full claim/verdict/reason (page 0)
- *   - 'baseline-scroll'  : page 1+ of a claim with chrome — compact header + tall reason
- *   - 'discreet-minimal' : single recording dot only (no claim/REC/hint)
- *   - 'discreet-result'  : pure question/answer, no chrome (page 0)
- *   - 'discreet-scroll'  : page 1+ of a claim, no chrome — compact header + full-height reason
+ *   - 'baseline'         : full-screen unified body container + REC/hint chrome
+ *   - 'discreet-minimal' : single recording dot only (no body container)
+ *   - 'discreet-result'  : full-screen unified body container, no bottom chrome
+ *
+ * Page 0 vs continuation pages now share the same container layout (one body
+ * box that fills the screen); they differ only in the body text composed for
+ * the page. So no separate 'baseline-scroll' / 'discreet-scroll' modes.
  */
 export type ActiveLayout =
   | 'baseline'
-  | 'baseline-scroll'
   | 'discreet-minimal'
-  | 'discreet-result'
-  | 'discreet-scroll';
+  | 'discreet-result';
 let activeLayout: ActiveLayout = 'baseline';
 export function getActiveLayout(): ActiveLayout { return activeLayout; }
 export function setActiveLayout(layout: ActiveLayout): void { activeLayout = layout; }
@@ -312,8 +305,20 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     cachedHistoryEntries = [entry];
     historyDetailIndex = 0;
   }
-  // history-detail uses the discreet-result-style claim slot (68px / 2 lines).
-  detailPages = computePagesForResult(entry.result, DISCREET_SCROLL_REASON_LINES, DISCREET_CLAIM_LINES);
+  // history-detail uses its own per-page line budget (9 lines, capped by the
+  // bottom hint row at y=260). Session-relative X/Y reflects the cached
+  // history list (which the user can walk via edge swipes); bullets show
+  // within-entry page position when this entry spans multiple pages. The
+  // X/Y tag is shown even when there's only one cached entry ("1/1") so the
+  // wearer never wonders whether the indicator is missing.
+  const cachedTotal = cachedHistoryEntries.length;
+  const sessionTag = cachedTotal > 0 && historyDetailIndex >= 0
+    ? `${historyDetailIndex + 1}/${cachedTotal}`
+    : '';
+  detailPages = computePagesForResult(entry.result, HISTORY_DETAIL_PAGE_LINES, {
+    autoSelected: entry.result.autoSelected === true,
+    sessionTag,
+  });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
@@ -335,7 +340,14 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
   if (nextEntry < 0 || nextEntry >= cachedHistoryEntries.length) return;
   historyDetailIndex = nextEntry;
   const entry = cachedHistoryEntries[nextEntry]!;
-  detailPages = computePagesForResult(entry.result, DISCREET_SCROLL_REASON_LINES, DISCREET_CLAIM_LINES);
+  const cachedTotal = cachedHistoryEntries.length;
+  const sessionTag = cachedTotal > 0
+    ? `${historyDetailIndex + 1}/${cachedTotal}`
+    : '';
+  detailPages = computePagesForResult(entry.result, HISTORY_DETAIL_PAGE_LINES, {
+    autoSelected: entry.result.autoSelected === true,
+    sessionTag,
+  });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
@@ -352,14 +364,17 @@ export async function restoreActivePage(): Promise<void> {
 }
 
 export async function setStatus(label: keyof typeof STATUS_LABEL | string): Promise<void> {
-  if (currentPage !== 'active') return;
-  // Discreet-result is the pure full-screen answer view — no status chrome.
-  if (activeLayout === 'discreet-result') return;
   const content = STATUS_LABEL[label] ?? label;
   // On discreet-minimal the status slot doubles as the recording dot — when
   // status clears (e.g. 'listening'), restore '•' so the user always sees a
-  // recording indicator. Baseline keeps the slot empty as before.
+  // recording indicator. Other layouts (baseline, discreet-result, scroll)
+  // keep the slot empty when content is empty so the wearer doesn't see
+  // chrome on the "pure answer" views unless an analysis is actually running.
   const text = activeLayout === 'discreet-minimal' && content === '' ? '•' : content;
+  // Record the frame even when off the active page so the next rebuild can
+  // seed the status container with the current spinner state.
+  pendingStatusFrame = text;
+  if (currentPage !== 'active') return;
   await upgradeText(CONTAINER.status, NAME.status, text);
 }
 
@@ -376,9 +391,9 @@ export interface SetLensResultContext {
  *  entry deterministically (rather than accumulating ghost entries). */
 const SYNTHETIC_ENTRY_ID = '__veritaslens_synthetic_active__';
 
-function synthesizeEntryFromResult(result: LensResult): HistoryEntry {
+function synthesizeEntryFromResult(result: LensResult, idx = 0): HistoryEntry {
   return {
-    id: SYNTHETIC_ENTRY_ID,
+    id: `${SYNTHETIC_ENTRY_ID}-${idx}`,
     sessionId: '',
     timestamp: 0,
     lensId: '',
@@ -390,6 +405,36 @@ function synthesizeEntryFromResult(result: LensResult): HistoryEntry {
   };
 }
 
+/** Mirrors `splitResultByClaim` from the lifecycle, inlined here to avoid a
+ *  circular import. Used only by the direct-call `setLensResult` path (tests,
+ *  menu replay) so the synthetic session has the same per-entry shape lifecycle
+ *  produces — keeping the X/Y indicator consistent across both code paths. */
+function splitForSynthesis(result: LensResult): LensResult[] {
+  switch (result.type) {
+    case 'fact-check':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'fact-check', claims: [c], autoSelected: result.autoSelected }));
+    case 'stats-check':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'stats-check', claims: [c], autoSelected: result.autoSelected }));
+    case 'logical-fallacy':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'logical-fallacy', claims: [c], autoSelected: result.autoSelected }));
+    case 'bias':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'bias', claims: [c], autoSelected: result.autoSelected }));
+    case 'trivia':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'trivia', claims: [c], autoSelected: result.autoSelected }));
+    case 'eli5':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'eli5', claims: [c], autoSelected: result.autoSelected }));
+    case 'session-summary':
+    case 'meeting-prep':
+      return [result];
+  }
+}
+
 export async function setLensResult(result: LensResult | null, context?: SetLensResultContext): Promise<void> {
   if (currentPage !== 'active' && currentPage !== 'history-detail') {
     // User is off the active page (typically on the menu after opening it
@@ -399,15 +444,13 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
   }
 
   // Null result paths — clear or demote, matching prior behaviour. Discreet
-  // demotes to the dot-only idle layout; baseline-scroll falls back to baseline
-  // (so the claim/verdict containers exist again); baseline just clears text.
+  // demotes to the dot-only idle layout; baseline just clears the unified body.
   if (!result) {
     sessionEntries = [];
     sessionPages = [];
     sessionPageIndex = 0;
     activeHidden = false;
     latestAnalysisRange = null;
-    useWithinAnalysisIndicator = true;
     if (currentPage !== 'active') return;
     if (activeLayout === 'discreet-minimal') return; // already idle
     if (isDiscreetLayout(activeLayout)) {
@@ -416,51 +459,36 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
       if (!ok) throw new Error('rebuildPageContainer (discreet-minimal) failed.');
       return;
     }
-    if (activeLayout === 'baseline-scroll') {
-      setActiveLayout('baseline');
-      const ok = await getBridge().rebuildPageContainer(buildActivePage());
-      if (!ok) throw new Error('rebuildPageContainer (baseline) failed.');
-      return;
-    }
-    await Promise.all([
-      upgradeText(CONTAINER.claim, NAME.claim, ''),
-      upgradeText(CONTAINER.verdict, NAME.verdict, ''),
-      upgradeText(CONTAINER.reason, NAME.reason, ''),
-    ]);
+    await upgradeText(CONTAINER.reason, NAME.reason, '');
     return;
   }
 
   if (context) {
     // Lifecycle path — full session view with cross-analysis scroll. Every
-    // new analysis jumps the cursor to its first claim so the wearer
-    // immediately sees the question they just asked, regardless of what
-    // historical entry they were last viewing. `activeHidden` is intentionally
-    // preserved: a wearer who had hidden the previous result will reveal to
-    // see the new latest (reveal lands at session-end / Y/Y).
+    // new analysis jumps the cursor to its first claim and clears the hidden
+    // flag so the wearer always sees the question they just asked, regardless
+    // of what historical entry they were last viewing or whether they had
+    // previously hidden the prior answer.
     sessionEntries = context.sessionEntries;
     recomputeSessionPages();
     latestAnalysisRange = computeRangeFromIds(sessionEntries, context.newEntryIds);
     if (latestAnalysisRange) {
       sessionPageIndex = firstPageIndexForEntry(latestAnalysisRange.firstEntry);
-      useWithinAnalysisIndicator = latestAnalysisClaimCount() > 1;
-    } else {
-      // Defensive: no new ids matched any entry — shouldn't happen in the
-      // real flow, but clamp the cursor and fall back to session-relative
-      // indicator so we don't hand back a stale "1/N" tag.
-      if (sessionPageIndex >= sessionPages.length) {
-        sessionPageIndex = Math.max(0, sessionPages.length - 1);
-      }
-      useWithinAnalysisIndicator = false;
+    } else if (sessionPageIndex >= sessionPages.length) {
+      // Defensive: no new ids matched any entry — clamp the cursor.
+      sessionPageIndex = Math.max(0, sessionPages.length - 1);
     }
+    activeHidden = false;
   } else {
-    // Direct-call path (tests, menu replay): synthesize a 1-entry session
-    // holding the multi-claim result whole. Within-analysis indicator uses
-    // the claim count of the result, matching today's "1/N" behavior.
-    sessionEntries = [synthesizeEntryFromResult(result)];
+    // Direct-call path (tests, menu replay): split the result the same way
+    // lifecycle does (per-claim for fact-check / stats-check / etc., one-entry
+    // for Meeting Prep / Session Summary) so the synthetic session has the
+    // same entry shape and the X/Y indicator behaves identically.
+    const splits = splitForSynthesis(result);
+    sessionEntries = splits.map((r, i) => synthesizeEntryFromResult(r, i));
     recomputeSessionPages();
-    latestAnalysisRange = { firstEntry: 0, lastEntry: 0 };
+    latestAnalysisRange = { firstEntry: 0, lastEntry: sessionEntries.length - 1 };
     sessionPageIndex = 0;
-    useWithinAnalysisIndicator = claimCount(result) > 1;
     activeHidden = false;
   }
 
@@ -483,7 +511,6 @@ export async function scrollActiveReason(dir: 1 | -1): Promise<ScrollActiveResul
     if (dir === -1 && sessionPages.length > 0) {
       activeHidden = false;
       sessionPageIndex = sessionPages.length - 1;
-      useWithinAnalysisIndicator = false;
       await renderActivePage();
       return 'revealed';
     }
@@ -500,19 +527,27 @@ export async function scrollActiveReason(dir: 1 | -1): Promise<ScrollActiveResul
     return 'hidden';
   }
 
-  const next = sessionPageIndex + dir;
-  if (next < 0 || next >= sessionPages.length) return 'noop';
-  sessionPageIndex = next;
-
-  // Mode flip: any page outside latestAnalysisRange engages session-relative
-  // indicator. Once flipped, stays flipped until the next first-analysis
-  // resets it.
-  if (useWithinAnalysisIndicator && !cursorInLatestRange()) {
-    useWithinAnalysisIndicator = false;
+  if (dir === 1) {
+    // Swipe-down walks page-by-page: continuation pages of the same claim, then
+    // the next claim within the entry (for multi-claim entries like Meeting
+    // Prep), then the first page of the next entry.
+    sessionPageIndex += 1;
+    await renderActivePage();
+    return 'scrolled';
   }
 
-  await renderActivePage();
-  return 'scrolled';
+  // Swipe-up — symmetric counterpart to swipe-down. Walks back exactly one
+  // sessionPage so `n` swipes-down can be reversed by `n` swipes-up. The
+  // per-answer X/Y prefix + bullet row composed by recomputeSessionPages give
+  // the wearer enough context to know when a swipe crosses a question
+  // boundary (indicator visibly resets), so we don't need the old
+  // "skip-to-previous-entry's-first-page" optimization here.
+  if (sessionPageIndex > 0) {
+    sessionPageIndex -= 1;
+    await renderActivePage();
+    return 'scrolled';
+  }
+  return 'noop';
 }
 
 /** Demote the active page to its idle layout (baseline / discreet-minimal)
@@ -528,13 +563,9 @@ async function hideActiveResultInPlace(): Promise<void> {
     if (!ok) throw new Error('rebuildPageContainer (hide) failed.');
     return;
   }
-  // Already on the idle layout (e.g., single-page baseline). Wipe the visible
-  // claim / verdict / reason text but keep the layout containers.
-  await Promise.all([
-    upgradeText(CONTAINER.claim, NAME.claim, ''),
-    upgradeText(CONTAINER.verdict, NAME.verdict, ''),
-    upgradeText(CONTAINER.reason, NAME.reason, ''),
-  ]);
+  // Already on the idle layout (e.g., single-page baseline). Wipe the unified
+  // body so the wearer sees a blank screen between answers.
+  await upgradeText(CONTAINER.reason, NAME.reason, '');
 }
 
 /** Mark the active result as hidden without clearing it. Used by the menu's
@@ -678,24 +709,36 @@ function claimCount(result: LensResult): number {
   }
 }
 
-/** Decorate a claim's top line with the position tag and optional Auto badge.
- *  Position goes inside Auto (`Auto · 1/2 · X`) so the badge always reads
- *  first — matching the pre-session-scroll layout. */
-function applyClaimPrefixes(top: string, posTag: string, autoSelected: boolean): string {
-  let s = top;
-  if (posTag) s = s ? `${posTag} · ${s}` : posTag;
-  if (autoSelected) s = s ? `Auto · ${s}` : 'Auto';
-  return s;
+/** Build the unified body string for a single claim's page-0 — combines the
+ *  heading, verdict/source, and reason/detail into one text block with
+ *  blank-line separators. Empty sections are elided. The position tag (X/Y)
+ *  and optional Auto badge prefix the heading line so the wearer always sees
+ *  where they are in a multi-claim or auto-classifier flow. */
+function formatUnifiedBody(
+  result: LensResult,
+  claimIdx: number,
+  autoSelected: boolean,
+): string {
+  const { top, middle, bottom } = formatLensResultBase(result, claimIdx);
+  // Compose the optional Auto badge prefix for the first line.
+  const firstLine = autoSelected && top
+    ? `Auto · ${top}`
+    : (autoSelected ? 'Auto' : top);
+
+  // Stitch non-empty sections together with a blank line between them so the
+  // visual hierarchy (heading | verdict/source | body) remains legible without
+  // separate positioned containers.
+  const sections: string[] = [];
+  if (firstLine) sections.push(firstLine);
+  if (middle) sections.push(middle);
+  if (bottom) sections.push(bottom);
+  return sections.join('\n\n');
 }
 
-/** Base claim/verdict/reason for a result, *without* position tag or Auto
- *  prefix. The indicator/Auto are stamped in at render-time by
- *  `applyClaimPrefixes` because the format depends on the cursor's session
- *  context (within-analysis "1/N" vs session-relative "X/Y"). */
-function formatLensResult(result: LensResult, claimIdx: number = 0): { top: string; middle: string; bottom: string } {
-  return formatLensResultBase(result, claimIdx);
-}
-
+/** Base heading/verdict/reason triple for a result, *without* position tag or
+ *  Auto prefix. The indicator/Auto are stamped in at unified-body composition
+ *  time by `formatUnifiedBody` because the format depends on the cursor's
+ *  session context (within-analysis "1/N" vs session-relative "X/Y"). */
 function formatLensResultBase(result: LensResult, claimIdx: number): { top: string; middle: string; bottom: string } {
   switch (result.type) {
     case 'fact-check': {
@@ -742,10 +785,13 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       // answer / supporting evidence / follow-up apart while swiping.
       switch (c.kind) {
         case 'answer':
+          // Source attribution lives at the BOTTOM (after the detail) so the
+          // wearer reads answer → detail → "From: …" top-to-bottom without the
+          // source line interrupting the answer→detail flow.
           return {
             top: clip(c.text, 140),
-            middle: c.source ? `From: ${c.source}` : '',
-            bottom: c.detail,
+            middle: c.detail,
+            bottom: c.source ? `From: ${c.source}` : '',
           };
         case 'evidence':
           return {
@@ -895,110 +941,124 @@ function charSplitFallback(text: string, innerW: number, maxLines: number, cache
 }
 
 /**
- * Build a flat page list spanning every claim, every claim continuation, and
- * every reason continuation. Page 0 of each claim is the header page (full
- * claim chunk + verdict + first reason chunk). If the claim doesn't fit the
- * claim slot, the overflow continues on compact-header pages before the
- * reason starts; same compact-header layout, just claim text in the reason
- * slot. After claim continuations come the reason continuations.
+ * Build a flat page list spanning every claim and every continuation chunk.
+ * One unified body string is composed per claim (heading + verdict + reason
+ * joined with blank lines) and then paginated against a single per-page line
+ * budget. Page 0 of each claim carries the heading + position tag; subsequent
+ * pageWithinClaim values are pure body continuations (same claim, more text).
+ *
+ * When the entry expands to more than one page total AND no session-relative
+ * posTag is already present on the heading (i.e., this entry is the only one
+ * in its session, like a single Meeting Prep question with multiple claims),
+ * each page gets an inline "X/Y · " prefix on its first line so the wearer
+ * knows where they are. Pagination is rerun with the budget reduced by one
+ * line in that case so the prefix can't push the visible body past the
+ * container's clip if it forces the first line to wrap.
+ *
+ * For multi-entry sessions, `formatUnifiedBody` already prepends the
+ * session-relative posTag — we skip the within-entry prefix there to avoid
+ * stacking two indicators on one line.
  */
-function computePagesForResult(result: LensResult, scrollLines: number, claimLines: number): PageRef[] {
+/**
+ * Compose the unified body for an entire entry by flattening every claim's
+ * unified body into one string with a single blank-line separator between
+ * claims. This lets short claims (e.g., Meeting Prep's answer + evidence +
+ * followup) share a single page when they fit, instead of each forcing its
+ * own page break. The blank-line separator is the same width as the
+ * separator between sections within a claim — meeting-prep distinguishes
+ * claims by their kind-specific prefix (plain answer, quoted evidence,
+ * arrow-prefixed followup) rather than by extra vertical whitespace, so we
+ * don't pay for double-blank-line claim breaks.
+ */
+function formatEntryBody(result: LensResult, autoSelected: boolean): string {
   const total = claimCount(result);
-  const out: PageRef[] = [];
+  const parts: string[] = [];
   for (let i = 0; i < total; i++) {
-    const { top, bottom } = formatLensResult(result, i);
-    // Paginate the claim against the claim slot first, then the scroll slot
-    // for any continuations.
-    const claimChunks = paginateText(top, REASON_INNER_W, claimLines, scrollLines);
-    const reasonChunks = paginateText(bottom, REASON_INNER_W, FULL_HEADER_REASON_LINES, scrollLines);
-
-    // Header page: first claim chunk in claim slot, first reason chunk in reason slot.
-    out.push({
-      claimIdx: i,
-      pageWithinClaim: 0,
-      text: reasonChunks[0] ?? '',
-      claimChunk: claimChunks[0] ?? '',
-    });
-
-    let pageIdx = 1;
-    // Claim continuation pages — scroll layout, continuation text in the
-    // reason slot (visually "the claim continues here").
-    for (let c = 1; c < claimChunks.length; c++) {
-      out.push({ claimIdx: i, pageWithinClaim: pageIdx++, text: claimChunks[c]! });
-    }
-    // Reason continuation pages — scroll layout, continuation text in the
-    // reason slot.
-    for (let r = 1; r < reasonChunks.length; r++) {
-      out.push({ claimIdx: i, pageWithinClaim: pageIdx++, text: reasonChunks[r]! });
-    }
+    const body = formatUnifiedBody(result, i, autoSelected);
+    if (body) parts.push(body);
   }
-  return out;
+  return parts.join('\n\n');
 }
 
-function formatCompactHeader(result: LensResult, claimIdx: number, posTag: string): string {
-  const { middle } = formatLensResult(result, claimIdx);
-  if (posTag && middle) return `${posTag} · ${middle}`;
-  return posTag || middle;
+/**
+ * Bottom bullet row showing within-entry page position — `● ○ ○` for page 1
+ * of 3, `○ ● ○` for page 2, `○ ○ ●` for page 3. Left-aligned (text-container
+ * rendering on this hardware doesn't expose alignment, and a fixed-space
+ * leading pad can't be reliably centered across font widths — so we keep it
+ * unambiguously left-aligned). Only called when total > 1.
+ */
+function bulletRow(currentIdx: number, total: number): string {
+  const dots: string[] = [];
+  for (let i = 0; i < total; i++) dots.push(i === currentIdx ? '●' : '○');
+  return dots.join(' ');
+}
+
+/**
+ * Build the paginated page list for one entry, with all indicator chrome
+ * applied:
+ *   - Session-relative `"X/N · "` prefix on the first line of every page
+ *     (when the caller passes a non-empty `sessionTag`). Stays the same
+ *     across every page of this entry so the wearer always knows which
+ *     question they're on; only changes when crossing into a different
+ *     entry (via the natural page sequence in `sessionPages`).
+ *   - Bottom bullet row showing within-entry page position, only when the
+ *     entry expands to more than one page.
+ *
+ * Pagination is two-pass: first to detect multi-page, then with the budget
+ * reduced by the appropriate number of lines to make room for the prefix's
+ * potential wrap (1 line) + bullet row (2 lines = blank separator + the row
+ * itself).
+ */
+function computePagesForResult(
+  result: LensResult,
+  pageLines: number,
+  options: { autoSelected?: boolean; sessionTag?: string } = {},
+): PageRef[] {
+  const autoSelected = options.autoSelected ?? (result.autoSelected === true);
+  const sessionTag = options.sessionTag ?? '';
+  const body = formatEntryBody(result, autoSelected);
+
+  const applyPrefix = (chunk: string) =>
+    sessionTag ? `${sessionTag} · ${chunk}` : chunk;
+
+  // First pass with budget reduced only by the prefix overhead (if any).
+  const prefixOverhead = sessionTag ? 1 : 0;
+  const firstBudget = Math.max(1, pageLines - prefixOverhead);
+  const firstPass = paginateText(body, BODY_INNER_W, firstBudget, firstBudget);
+
+  if (firstPass.length <= 1) {
+    const text = applyPrefix(firstPass[0] ?? '');
+    return [{ claimIdx: 0, pageWithinClaim: 0, text }];
+  }
+
+  // Multi-page: also reserve 2 lines for the bottom bullet row + blank-line
+  // separator, then re-paginate.
+  const finalBudget = Math.max(1, pageLines - prefixOverhead - 2);
+  const final = paginateText(body, BODY_INNER_W, finalBudget, finalBudget);
+  const totalPages = final.length;
+  return final.map((chunk, p) => ({
+    claimIdx: 0,
+    pageWithinClaim: p,
+    text: `${applyPrefix(chunk)}\n\n${bulletRow(p, totalPages)}`,
+  }));
 }
 
 function isDiscreetLayout(layout: ActiveLayout): boolean {
-  return layout === 'discreet-minimal' || layout === 'discreet-result' || layout === 'discreet-scroll';
+  return layout === 'discreet-minimal' || layout === 'discreet-result';
 }
 
-function targetLayoutForActivePage(page: PageRef): ActiveLayout {
-  const discreet = isDiscreetLayout(activeLayout);
-  if (page.pageWithinClaim === 0) return discreet ? 'discreet-result' : 'baseline';
-  return discreet ? 'discreet-scroll' : 'baseline-scroll';
+function pageLinesForActiveLayout(): number {
+  return isDiscreetLayout(activeLayout) ? DISCREET_PAGE_LINES : BASELINE_PAGE_LINES;
+}
+
+function targetLayoutForActivePage(): ActiveLayout {
+  return isDiscreetLayout(activeLayout) ? 'discreet-result' : 'baseline';
 }
 
 /** The entry the active-page cursor is currently pointing at. */
 function currentActiveEntry(): HistoryEntry | null {
   const p = sessionPages[sessionPageIndex];
   return p ? sessionEntries[p.entryIdx] ?? null : null;
-}
-
-/** Sum of claims across `sessionEntries[0..entryIdx-1]` — global claim offset
- *  of an entry's first claim. */
-function claimsBefore(entryIdx: number): number {
-  let sum = 0;
-  for (let i = 0; i < entryIdx && i < sessionEntries.length; i++) {
-    sum += claimCount(sessionEntries[i]!.result);
-  }
-  return sum;
-}
-
-function totalSessionClaims(): number {
-  return claimsBefore(sessionEntries.length);
-}
-
-function latestAnalysisClaimCount(): number {
-  if (!latestAnalysisRange) return 0;
-  return claimsBefore(latestAnalysisRange.lastEntry + 1) - claimsBefore(latestAnalysisRange.firstEntry);
-}
-
-function cursorInLatestRange(): boolean {
-  if (!latestAnalysisRange) return false;
-  const p = sessionPages[sessionPageIndex];
-  if (!p) return false;
-  return p.entryIdx >= latestAnalysisRange.firstEntry && p.entryIdx <= latestAnalysisRange.lastEntry;
-}
-
-/** Build the position tag for the active page's claim line / compact header.
- *  Returns "" when there's nothing to show (single-claim session, or
- *  within-analysis mode with a single-claim latest analysis). */
-function activeIndicatorTag(): string {
-  const p = sessionPages[sessionPageIndex];
-  if (!p) return '';
-  if (useWithinAnalysisIndicator && latestAnalysisRange && cursorInLatestRange()) {
-    const count = latestAnalysisClaimCount();
-    if (count <= 1) return '';
-    const offset = (claimsBefore(p.entryIdx) - claimsBefore(latestAnalysisRange.firstEntry)) + p.claimIdx;
-    return `${offset + 1}/${count}`;
-  }
-  const total = totalSessionClaims();
-  if (total <= 1) return '';
-  const x = claimsBefore(p.entryIdx) + p.claimIdx;
-  return `${x + 1}/${total}`;
 }
 
 /** Find the contiguous run of `sessionEntries` whose ids are in `newIds`.
@@ -1031,25 +1091,37 @@ function firstPageIndexForEntry(entryIdx: number): number {
   return 0;
 }
 
-/** Rebuild `sessionPages` by paginating every entry's result. The scroll-line
- *  and claim-line budgets follow the current active layout (discreet vs
- *  baseline); a layout change requires re-running this so the chunk sizes
- *  match the new container heights. */
+/** Rebuild `sessionPages` by paginating every entry's result into unified-body
+ *  pages. Session-relative X/Y ("X/N · ") sits on the first line of every
+ *  page so the wearer always knows which question they're on; the indicator
+ *  stays constant while scrolling within an entry and only changes when the
+ *  page sequence crosses into the next entry. Bullets at the bottom show
+ *  within-entry page position, only when the entry spans multiple pages. */
 function recomputeSessionPages(): void {
-  const discreet = isDiscreetLayout(activeLayout);
-  const scrollLines = discreet ? DISCREET_SCROLL_REASON_LINES : BASELINE_SCROLL_REASON_LINES;
-  const claimLines = discreet ? DISCREET_CLAIM_LINES : BASELINE_CLAIM_LINES;
+  const pageLines = pageLinesForActiveLayout();
+  const totalEntries = sessionEntries.length;
   const out: SessionPageRef[] = [];
-  for (let i = 0; i < sessionEntries.length; i++) {
+  for (let i = 0; i < totalEntries; i++) {
     const entry = sessionEntries[i]!;
-    const entryPages = computePagesForResult(entry.result, scrollLines, claimLines);
-    for (const p of entryPages) out.push({ ...p, entryIdx: i });
+    // Always show the session-relative tag — even for a 1-entry session
+    // ("1/1") so the wearer never wonders whether the indicator is missing.
+    const sessionTag = totalEntries > 0 ? `${i + 1}/${totalEntries}` : '';
+    const pages = computePagesForResult(entry.result, pageLines, {
+      autoSelected: entry.result.autoSelected === true,
+      sessionTag,
+    });
+    for (const p of pages) {
+      out.push({ entryIdx: i, claimIdx: p.claimIdx, pageWithinClaim: p.pageWithinClaim, text: p.text });
+    }
   }
   sessionPages = out;
 }
 
-/** Render the active page from the session cursor; rebuild the page container
- *  if the target layout differs from the current one. */
+/** Render the active page from the session cursor. With the unified-body
+ *  layout, every page is the same single container — pagination already baked
+ *  the heading + verdict + body into `page.text`, so we just push it. A layout
+ *  rebuild is only needed when the mode itself changes (baseline ↔ discreet),
+ *  not on every page swipe. */
 async function renderActivePage(): Promise<void> {
   if (currentPage !== 'active') return;
   // Clamp the index in case a result that arrived mid-scroll shortened the
@@ -1060,64 +1132,25 @@ async function renderActivePage(): Promise<void> {
   const page = sessionPages[sessionPageIndex];
   const entry = currentActiveEntry();
   if (!page || !entry) return;
-  const target = targetLayoutForActivePage(page);
+  const target = targetLayoutForActivePage();
   const layoutChanged = target !== activeLayout;
   if (layoutChanged) {
     setActiveLayout(target);
     const ok = await getBridge().rebuildPageContainer(buildActivePage());
     if (!ok) throw new Error('rebuildPageContainer (active) failed.');
   }
-  if (page.pageWithinClaim === 0) {
-    const { middle } = formatLensResult(entry.result, page.claimIdx);
-    const decoratedClaim = applyClaimPrefixes(
-      page.claimChunk ?? '',
-      activeIndicatorTag(),
-      entry.result.autoSelected === true,
-    );
-    await Promise.all([
-      upgradeText(CONTAINER.claim, NAME.claim, decoratedClaim),
-      upgradeText(CONTAINER.verdict, NAME.verdict, middle),
-      upgradeText(CONTAINER.reason, NAME.reason, page.text),
-    ]);
-  } else {
-    // Compact-header layout. The header content is set inline at build time
-    // (uses activeIndicatorTag() of the page that triggered the rebuild). On
-    // same-layout scrolls within the same claim only the reason changes.
-    await upgradeText(CONTAINER.reason, NAME.reason, page.text);
-  }
+  await upgradeText(CONTAINER.reason, NAME.reason, page.text);
 }
 
-/** Render `detailPages[detailPageIndex]` on the history-detail page. */
+/** Render `detailPages[detailPageIndex]` on the history-detail page. With the
+ *  unified-body layout there is only one container layout — no page-0 vs
+ *  scroll-page split — so a swipe just upgrades the body text. */
 async function renderHistoryDetailPage(): Promise<void> {
   if (currentPage !== 'history-detail') return;
   const page = detailPages[detailPageIndex];
   const entry = cachedHistoryEntries[historyDetailIndex];
   if (!page || !entry) return;
-  const wantsFull = page.pageWithinClaim === 0;
-  const layoutChanged = wantsFull !== detailIsFullLayout;
-  if (layoutChanged) {
-    detailIsFullLayout = wantsFull;
-    const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, page));
-    if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
-    // Build sets compactHeader / claim+verdict content inline. Only the
-    // reason needs an explicit upgrade so callers (and tests) can observe
-    // the scroll firing a textContainerUpgrade.
-    await upgradeText(CONTAINER.reason, NAME.reason, page.text);
-    return;
-  }
-  if (wantsFull) {
-    const { middle } = formatLensResult(entry.result, page.claimIdx);
-    const total = cachedHistoryEntries.length;
-    const idxTag = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total}` : '';
-    const decorated = applyClaimPrefixes(page.claimChunk ?? '', idxTag, entry.result.autoSelected === true);
-    await Promise.all([
-      upgradeText(CONTAINER.claim, NAME.claim, decorated),
-      upgradeText(CONTAINER.verdict, NAME.verdict, middle),
-      upgradeText(CONTAINER.reason, NAME.reason, page.text),
-    ]);
-  } else {
-    await upgradeText(CONTAINER.reason, NAME.reason, page.text);
-  }
+  await upgradeText(CONTAINER.reason, NAME.reason, page.text);
 }
 
 // ------- page builders ----------------------------------------------------
@@ -1239,45 +1272,36 @@ function buildActivePage(): RebuildPageContainer {
   switch (activeLayout) {
     case 'discreet-minimal': return buildDiscreetMinimalPage();
     case 'discreet-result': return buildDiscreetResultPage();
-    case 'discreet-scroll': return buildDiscreetScrollPage();
-    case 'baseline-scroll': return buildBaselineScrollPage();
     case 'baseline':
     default:
       return buildBaselineActivePage();
   }
 }
 
+/**
+ * Baseline unified layout — a single full-screen body container (heading +
+ * verdict + reason composed with blank-line separators) plus the existing
+ * top status slot and bottom REC/hint chrome row. Body abuts the chrome at
+ * y=256 without overlapping.
+ *
+ * The body itself is the event capturer (isEventCapture=1). It covers nearly
+ * the whole screen, so an underlying full-screen sink would be blocked by
+ * it on this hardware. Matches the history-detail page, which also lets the
+ * body be the capturer.
+ */
 function buildBaselineActivePage(): RebuildPageContainer {
-  const eventCapture = makeFullScreenEventSink();
   const status = new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
     xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 26,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: pendingStatusFrame, isEventCapture: 0,
   });
-  // Claim slot grew from 54→62 px so longer questions can wrap to two lines
-  // instead of being silently truncated; verdict and reason shift down by 6
-  // and reason shrinks by 6 to absorb the change without disturbing the
-  // bottom REC/hint row.
-  const claim = new TextContainerProperty({
-    containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 62,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  // Verdict slot is single-line but holds variable text (trivia answers,
-  // meeting-prep "From: <source>", etc.) that can have descenders. h=32 with
-  // paddingLength=4 leaves 24 px inner, enough for the full glyph including
-  // descender.
-  const verdict = new TextContainerProperty({
-    containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 96, width: SCREEN_W - 32, height: 32,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  // Reason at h=126 → inner 118 / 27 ≈ 4.37 lines, still fits the 4-line
-  // FULL_HEADER_REASON_LINES budget. Bottom REC/hint row at y=260 unchanged.
-  const reason = new TextContainerProperty({
+  // Body: y=4, h=252 → bottom 256, abuts REC/hint chrome row. Fits 9 lines
+  // (9 × 27 + 8 = 251 ≤ 252). One container holds the entire heading +
+  // verdict + reason, paginated upstream into per-page chunks.
+  const body = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 130, width: SCREEN_W - 32, height: 126,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: BASELINE_PAGE_LINES * LINE_PX + 8,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 1,
   });
   const rec = new TextContainerProperty({
     containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
@@ -1289,7 +1313,7 @@ function buildBaselineActivePage(): RebuildPageContainer {
     xPosition: 16, yPosition: 260, width: SCREEN_W - 120, height: 28,
     borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
   });
-  const textObject = [eventCapture, status, claim, verdict, reason, rec, hint];
+  const textObject = [status, body, rec, hint];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
@@ -1317,100 +1341,25 @@ function buildDiscreetMinimalPage(): RebuildPageContainer {
 }
 
 /**
- * Discreet result layout — full-screen question/answer. No dot, no status,
- * no hint: once an answer is on screen it fills the available space. Uses
- * the same text-container event sink as discreet-minimal / baseline so
- * swipes (scroll reason / walk claims) and taps (walk claims → menu) fire
- * reliably.
+ * Discreet result layout — full-screen unified body container with the small
+ * top-right status corner overlay. Body starts at y=4 and extends nearly to
+ * the screen bottom (h=278 → bottom y=282), holding 10 lines of paginated
+ * heading + verdict + reason. The status corner sits at top-right (y=4, x=517+);
+ * during result display the status slot is empty (STATUS_LABEL.displaying = ''),
+ * so the body's top-right corner is unobstructed.
+ *
+ * The body itself is the event capturer (isEventCapture=1). It nearly covers
+ * the screen, so a separate underlying sink would be blocked by it on this
+ * hardware. Matches history-detail, which uses the same pattern.
  */
 function buildDiscreetResultPage(): RebuildPageContainer {
-  const sink = makeFullScreenEventSink();
-  const claim = new TextContainerProperty({
-    containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  // Same descender fix as the baseline verdict — h=32 with paddingLength=4
-  // yields 24 px inner area, large enough for the full y/g/p glyph. There's
-  // no bottom chrome on this layout, so the reason container also gains
-  // space (extends from y=130/h=126 to y=136/h=146) for the same reason on
-  // its last paginated line.
-  const verdict = new TextContainerProperty({
-    containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 102, width: SCREEN_W - 32, height: 32,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const reason = new TextContainerProperty({
+  const status = makeCornerStatus();
+  const body = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 138, width: SCREEN_W - 32, height: 146,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: DISCREET_PAGE_LINES * LINE_PX + 8,
+    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 1,
   });
-  const textObject = [sink, claim, verdict, reason];
-  return new RebuildPageContainer({
-    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
-  });
-}
-
-/**
- * Discreet scroll layout — page 2+ of a claim, no chrome. A 1-line compact
- * header at the top (claim position + verdict glyph) plus a tall reason area
- * that holds 8 lines of text. Reason starts at y=36 so the 27px header sits
- * comfortably without overlap.
- */
-function buildDiscreetScrollPage(): RebuildPageContainer {
-  const sink = makeFullScreenEventSink();
-  const page = sessionPages[sessionPageIndex];
-  const entry = currentActiveEntry();
-  const headerContent = page && entry ? formatCompactHeader(entry.result, page.claimIdx, activeIndicatorTag()) : '';
-  const header = new TextContainerProperty({
-    containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
-    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
-    borderWidth: 0, paddingLength: 2, content: headerContent, isEventCapture: 0,
-  });
-  // Reason: 8 lines × 27px = 216px text, plus 2×4 padding = 224 container height.
-  const reason = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 40, width: SCREEN_W - 32, height: DISCREET_SCROLL_REASON_LINES * LINE_PX + 8,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const textObject = [sink, header, reason];
-  return new RebuildPageContainer({
-    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
-  });
-}
-
-/**
- * Baseline scroll layout — page 2+ of a claim, keeps REC + hint chrome.
- * Compact header at the top, reason in the middle (7 lines), REC + hint at
- * the bottom at the usual y=256 row.
- */
-function buildBaselineScrollPage(): RebuildPageContainer {
-  const sink = makeFullScreenEventSink();
-  const page = sessionPages[sessionPageIndex];
-  const entry = currentActiveEntry();
-  const headerContent = page && entry ? formatCompactHeader(entry.result, page.claimIdx, activeIndicatorTag()) : '';
-  const header = new TextContainerProperty({
-    containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
-    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
-    borderWidth: 0, paddingLength: 2, content: headerContent, isEventCapture: 0,
-  });
-  // Reason: 7 lines × 27px = 189px text + 2×4 padding = 197 container height.
-  const reason = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 40, width: SCREEN_W - 32, height: BASELINE_SCROLL_REASON_LINES * LINE_PX + 8,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const rec = new TextContainerProperty({
-    containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
-    xPosition: SCREEN_W - 96, yPosition: 256, width: 80, height: 28,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
-  });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
-    xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
-    borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
-  });
-  const textObject = [sink, header, reason, rec, hint];
+  const textObject = [status, body];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
@@ -1435,7 +1384,22 @@ function makeDiscreetStatus(): TextContainerProperty {
   return new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
     xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 26,
-    borderWidth: 0, paddingLength: 4, content: '•', isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4,
+    content: pendingStatusFrame || '•',
+    isEventCapture: 0,
+  });
+}
+
+/** Small status slot for layouts that otherwise have no chrome (discreet-result,
+ *  scroll layouts). Empty when no analysis is running, spinner content during
+ *  one — lets the wearer see "still working" while reviewing previous answers. */
+function makeCornerStatus(): TextContainerProperty {
+  return new TextContainerProperty({
+    containerID: CONTAINER.status, containerName: NAME.status,
+    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 26,
+    borderWidth: 0, paddingLength: 4,
+    content: pendingStatusFrame,
+    isEventCapture: 0,
   });
 }
 
@@ -1468,32 +1432,16 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
   return new RebuildPageContainer({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
-function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPageContainer {
-  if (page.pageWithinClaim !== 0) return buildHistoryDetailScrollPage(entry, page);
-  const { middle } = formatLensResult(entry.result, page.claimIdx);
-  const total = cachedHistoryEntries.length;
-  // X/Y position indicator across the current session's entries — only shown
-  // when there's more than one, so a single-entry session doesn't get the
-  // chrome.
-  const idxTag = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total}` : '';
-  const decoratedClaim = applyClaimPrefixes(page.claimChunk ?? '', idxTag, entry.result.autoSelected === true);
-  // History-detail has no top status chrome, so claim can start higher than
-  // the active page (y=24 vs y=32). That extra 8 px absorbs the verdict slot
-  // growth (26 → 32) without squeezing the reason container's 4-line budget;
-  // descenders on trivia answers and "From: <source>" lines no longer clip.
-  const claim = new TextContainerProperty({
-    containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 24, width: SCREEN_W - 32, height: 68,
-    borderWidth: 0, paddingLength: 4, content: decoratedClaim, isEventCapture: 0,
-  });
-  const verdict = new TextContainerProperty({
-    containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 96, width: SCREEN_W - 32, height: 32,
-    borderWidth: 0, paddingLength: 4, content: middle, isEventCapture: 0,
-  });
-  const reason = new TextContainerProperty({
+/**
+ * History-detail unified layout — a single body container with the bottom
+ * hint row at y=260. Body holds 9 lines of paginated heading + verdict +
+ * reason. The body is the event sink (isEventCapture=1) so swipes (scroll
+ * pages) and taps (back to history list) fire reliably on this hardware.
+ */
+function buildHistoryDetailPage(_entry: HistoryEntry, page: PageRef): RebuildPageContainer {
+  const body = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 132, width: SCREEN_W - 32, height: 124,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: HISTORY_DETAIL_PAGE_LINES * LINE_PX + 8,
     borderWidth: 0, paddingLength: 4, content: page.text, isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
@@ -1501,36 +1449,7 @@ function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPage
     xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
     borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
   });
-  const textObject = [claim, verdict, reason, hint];
-  return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
-}
-
-/** History-detail scroll layout — page 2+ of a claim's reason. Compact header
- * + tall reason area + bottom hint, with the reason container as the event
- * sink so swipes register. */
-function buildHistoryDetailScrollPage(entry: HistoryEntry, page: PageRef): RebuildPageContainer {
-  // Within-entry "1/N" claim position in the compact header (same as the
-  // pre-session-scroll active page behavior). The cross-entry X/Y prefix only
-  // lives on full-layout claim chunks.
-  const count = claimCount(entry.result);
-  const posTag = count > 1 ? `${page.claimIdx + 1}/${count}` : '';
-  const headerContent = formatCompactHeader(entry.result, page.claimIdx, posTag);
-  const header = new TextContainerProperty({
-    containerID: CONTAINER.compactHeader, containerName: NAME.compactHeader,
-    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 32,
-    borderWidth: 0, paddingLength: 2, content: headerContent, isEventCapture: 0,
-  });
-  const reason = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 40, width: SCREEN_W - 32, height: DISCREET_SCROLL_REASON_LINES * LINE_PX + 8,
-    borderWidth: 0, paddingLength: 4, content: page.text, isEventCapture: 1,
-  });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList,
-    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
-    borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
-  });
-  const textObject = [header, reason, hint];
+  const textObject = [body, hint];
   return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
@@ -1540,17 +1459,16 @@ export function resetHudSessionState(): void {
   cachedHistoryEntries = [];
   detailPages = [];
   detailPageIndex = 0;
-  detailIsFullLayout = true;
   historyDetailIndex = -1;
   sessionEntries = [];
   sessionPages = [];
   sessionPageIndex = 0;
   activeHidden = false;
   latestAnalysisRange = null;
-  useWithinAnalysisIndicator = true;
   activeLayout = 'baseline';
   pendingActiveResult = null;
   pendingMenuSpinnerFrame = '';
+  pendingStatusFrame = '';
   // Cancel any pending picker-hint flash so its 2.5s callback can't fire after
   // the session has been torn down and attempt to upgradeText on a stale page.
   if (pickerHintFlashTimer) {

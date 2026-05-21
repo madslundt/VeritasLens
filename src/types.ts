@@ -13,20 +13,25 @@ export interface TriviaClaim { quote: string; question: string; answer: string; 
 export interface Eli5Claim { quote: string; explanation: string; }
 
 /**
- * Per-entry shape for the Meeting Prep lens. The first entry in `claims` is
- * the primary answer to whatever the user just heard; any further entries are
- * follow-up prompts the user could ask next, in priority order.
+ * Per-entry shape for the Meeting Prep lens. `claims[0]` is always the primary
+ * answer; an optional `evidence` claim follows when the answer is grounded in
+ * a labeled attachment; an optional `followup` claim is the last entry, and
+ * only appears when prep is silent on a decision-changing detail.
  */
+export type MeetingPrepClaimKind = 'answer' | 'evidence' | 'followup';
+
 export interface MeetingPrepClaim {
-  /** Primary answer text or follow-up prompt. */
+  /** Discriminator for renderers — claim 0 is always 'answer'. */
+  kind: MeetingPrepClaimKind;
+  /** Answer text, verbatim evidence excerpt, or follow-up prompt depending on `kind`. */
   text: string;
   /**
-   * Section label this draws from — constrained to the user's section labels
-   * via a dynamic enum in the response schema. Empty string when the response
-   * is not grounded in any specific section.
+   * Attachment label this draws from — constrained to the user's attachment
+   * labels via a dynamic enum in the response schema. Empty on follow-ups and
+   * when the answer is not grounded in a specific attachment.
    */
   source: string;
-  /** Optional supporting line (numbers, contract clause refs, contrasts). Typically only set on the primary answer. */
+  /** Optional supporting line. Only set on the answer claim. */
   detail: string;
 }
 

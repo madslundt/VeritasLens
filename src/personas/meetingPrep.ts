@@ -10,14 +10,17 @@ import { isRecord, parseJsonResponse, trimTo } from './_utils';
 
 export const MEETING_PREP_ID = 'meeting-prep';
 
-// Sized to fit the HUD's claim slot (54 px in baseline, 68 px in discreet-
-// result) without spilling into the verdict/source line below. Each is ~2
-// lines of text on the 576 px-wide display. Detail is generous because it
-// renders in the much larger bottom reason slot (~6 lines).
-export const MAX_ANSWER_CHARS = 90;
-export const MAX_DETAIL_CHARS = 200;
+// Sized to fit the HUD's 2-line claim slot (62 px in baseline, 68 px in
+// discreet-result) without spilling into the verdict/source line below. The
+// HUD also caps the rendered top field at 140 chars via `clip(text, 140)`,
+// so 140 is the slot's true ceiling. Detail is generous because it renders
+// in the much larger bottom reason slot and auto-paginates if needed.
+export const MAX_ANSWER_CHARS = 140;
+export const MAX_DETAIL_CHARS = 300;
 export const MAX_FOLLOW_UP_CHARS = 110;
-export const MAX_FOLLOW_UPS = 3;
+// Matches the HUD's `clip(text, 140)` in src/runtime/hud.ts so the evidence
+// quote never overflows the answer slot when rendered with surrounding quotes.
+export const MAX_EVIDENCE_CHARS = 140;
 
 /**
  * Builds display labels for attachments, filling unlabeled ones with
@@ -41,24 +44,30 @@ export function resolveAttachmentLabels(attachments: MeetingPrepSection[]): stri
 const BASE_PROMPT = `You are VeritasLens, a real-time meeting assistant for smart glasses. The user is in a live meeting. Before it they prepared written context — general notes and 0+ labeled attachments — and just tapped after a short audio clip. The general notes lead with the user's goal; treat the first sentence as the primary outcome the answer should advance.
 
 Your job:
-1. Produce ONE specific primary answer (≤90 chars) grounded in the prepared context. Put elaboration in \`detail\`, not \`answer\`.
-2. Optionally include a supporting \`detail\` (≤200 chars) — a number, clause reference, comparison, or contrast.
-3. Optionally suggest 0–3 follow-ups (≤110 chars each), in priority order, that the user should ask the OTHER PARTY (counterparty, banker, interviewer). Skip padding — fewer is better. Never suggest a follow-up the prepared context already answers — fold that answer into \`answer\` or \`detail\` instead. Good follow-ups extract numbers, clauses, deadlines, or commitments the prep does NOT contain.
-4. Set \`source\` only when drawing from a labeled attachment; never set it for general notes or your own knowledge.
+1. Produce ONE specific primary answer (≤140 chars) grounded in the prepared context. Put elaboration in \`detail\`, not \`answer\`.
+2. Optionally include a supporting \`detail\` (≤300 chars) — a number, clause reference, comparison, or contrast.
+3. When the answer draws on a specific labeled attachment, include an \`evidence\` excerpt — a short verbatim or near-verbatim quote (≤140 chars) from that attachment, with its \`source\`. This lets the user verify the grounding at a glance. Skip \`evidence\` when the answer comes from general notes or your own reasoning.
+4. Suggest a single \`followUp\` (≤110 chars) ONLY when the prepared context is genuinely silent on a specific number, clause, deadline, or commitment whose value would change the user's decision. Default is to omit \`followUp\`. Do NOT emit obvious, generic, or socially clumsy questions ("What's your timeline?", "Can you tell me more?"). Do NOT re-ask anything the prep already answers — fold that answer into \`answer\` or \`detail\` instead.
+5. Set \`source\` (on the top-level answer and on \`evidence\`) only when drawing from a labeled attachment; never set it for general notes or your own knowledge.
 
 Output strict JSON matching the provided schema. No prose outside JSON.`;
 
 /**
- * One generic example anchoring the JSON shape and rule 3's "fold answered
- * questions into the answer, don't echo them as follow-ups" behavior. Kept
- * hardcoded (not templated on user input) so the model sees the same anchor
- * regardless of role/goal — templating risks style leakage and degenerate
- * cases when those fields are unset.
+ * Two generic examples anchoring the JSON shape. Example A (the common case)
+ * shows evidence grounding and NO follow-up, calibrating the model against
+ * the prior version's reflex to always emit follow-ups. Example B shows the
+ * legitimate-gap case where one follow-up is warranted. Kept hardcoded (not
+ * templated on user input) so the anchor is identical regardless of role/goal.
  */
-const FEW_SHOT_EXAMPLE = `EXAMPLE (illustrative only — do not echo):
+const FEW_SHOT_EXAMPLE = `EXAMPLE A (no follow-up — the common case):
 Heard: "Our current rate is 4.8%. We can offer you 4.2% if you sign today."
-Prep: { notes: "Renegotiating mortgage rate", Bank contract: "Current rate 4.8%, 25-year term." }
-Output: {"answer":"4.2% is below your 4.8% — but ask for the lock window.","detail":"Saves ~€120/month at current balance; check if 4.2% is fixed and for how long.","followUps":[{"prompt":"Is 4.2% fixed, and for how many years?"},{"prompt":"Any prepayment penalty at the new rate?"}],"source":"Bank contract"}`;
+Prep: { notes: "Renegotiating mortgage rate; want ≤5y fixed.", Bank contract: "Current rate 4.8%, 25-year term, prepayment penalty 1% of remaining balance." }
+Output: {"answer":"4.2% beats your 4.8% — but check the lock window and the 1% penalty.","detail":"Saves ~€120/month at current balance; only worth it if fixed for several years.","source":"Bank contract","evidence":{"source":"Bank contract","quote":"Current rate 4.8%, 25-year term, prepayment penalty 1% of remaining balance."}}
+
+EXAMPLE B (genuine gap — one follow-up):
+Heard: "We can give you 4.2% if you sign today."
+Prep: { notes: "Renegotiating mortgage rate.", Bank contract: "Current rate 4.8%, 25-year term." }
+Output: {"answer":"4.2% beats your 4.8% — but prep doesn't say how long it's fixed.","detail":"Saves ~€120/month; only meaningful if fixed for several years.","source":"Bank contract","evidence":{"source":"Bank contract","quote":"Current rate 4.8%, 25-year term."},"followUp":"Is 4.2% fixed, and for how many years?"}`;
 
 /** Split sections into the general slot + non-empty attachments. */
 function partition(sections: MeetingPrepSection[]): {
@@ -100,10 +109,13 @@ export function buildMeetingPrepPrompt(
   }
 
   parts.push(
-    `\n\nLANGUAGE: Write the answer, detail, and each follow-up prompt in ${langName}.`,
+    `\n\nLANGUAGE: Write the answer, detail, and follow-up prompt in ${langName}.`,
   );
   if (labels.length > 0) {
-    parts.push(' Attachment labels in the "source" field must stay as-is regardless of language.');
+    parts.push(
+      ' Keep the evidence quote in its original language (verbatim from the attachment).' +
+        ' Attachment labels in the "source" field must stay as-is regardless of language.',
+    );
   }
 
   return parts.join('');
@@ -122,13 +134,6 @@ export function buildMeetingPrepSchema(
   const { attachments } = partition(sections);
   const labels = resolveAttachmentLabels(attachments);
 
-  const followUpItemProps: Record<string, unknown> = {
-    prompt: {
-      type: 'string',
-      description: `Follow-up suggestion (max ${MAX_FOLLOW_UP_CHARS} chars).`,
-    },
-  };
-
   const properties: Record<string, unknown> = {
     answer: {
       type: 'string',
@@ -138,14 +143,11 @@ export function buildMeetingPrepSchema(
       type: 'string',
       description: `Optional supporting line (max ${MAX_DETAIL_CHARS} chars).`,
     },
-    followUps: {
-      type: 'array',
-      maxItems: MAX_FOLLOW_UPS,
-      items: {
-        type: 'object',
-        properties: followUpItemProps,
-        required: ['prompt'],
-      },
+    followUp: {
+      type: 'string',
+      description:
+        `Optional single follow-up to ask the other party (max ${MAX_FOLLOW_UP_CHARS} chars). ` +
+        'Only set when prep is genuinely silent on a decision-changing detail.',
     },
   };
 
@@ -156,7 +158,19 @@ export function buildMeetingPrepSchema(
       description: 'Attachment label this draws from (exact match required).',
     };
     properties['source'] = sourceProp;
-    followUpItemProps['source'] = sourceProp;
+    properties['evidence'] = {
+      type: 'object',
+      description:
+        'Short verbatim or near-verbatim excerpt from one attachment that grounds the answer.',
+      properties: {
+        source: sourceProp,
+        quote: {
+          type: 'string',
+          description: `Excerpt from the attachment (max ${MAX_EVIDENCE_CHARS} chars).`,
+        },
+      },
+      required: ['source', 'quote'],
+    };
   }
 
   return {
@@ -176,26 +190,40 @@ export function parseMeetingPrepResponse(
   const claims: MeetingPrepClaim[] = [];
 
   claims.push({
+    kind: 'answer',
     text: trimTo(typeof raw['answer'] === 'string' ? raw['answer'] : '', MAX_ANSWER_CHARS),
     source: coerceSource(raw['source'], validLabels),
     detail: trimTo(typeof raw['detail'] === 'string' ? raw['detail'] : '', MAX_DETAIL_CHARS),
   });
 
-  const followUpsRaw = raw['followUps'];
-  if (Array.isArray(followUpsRaw)) {
-    for (const f of followUpsRaw.slice(0, MAX_FOLLOW_UPS)) {
-      if (!isRecord(f)) continue;
-      const prompt = trimTo(
-        typeof f['prompt'] === 'string' ? f['prompt'] : '',
-        MAX_FOLLOW_UP_CHARS,
-      );
-      if (!prompt) continue;
+  const evidenceRaw = raw['evidence'];
+  if (isRecord(evidenceRaw)) {
+    const evidenceSource = coerceSource(evidenceRaw['source'], validLabels);
+    const evidenceQuote = trimTo(
+      typeof evidenceRaw['quote'] === 'string' ? evidenceRaw['quote'] : '',
+      MAX_EVIDENCE_CHARS,
+    );
+    if (evidenceSource && evidenceQuote) {
       claims.push({
-        text: prompt,
-        source: coerceSource(f['source'], validLabels),
+        kind: 'evidence',
+        text: evidenceQuote,
+        source: evidenceSource,
         detail: '',
       });
     }
+  }
+
+  const followUp = trimTo(
+    typeof raw['followUp'] === 'string' ? raw['followUp'] : '',
+    MAX_FOLLOW_UP_CHARS,
+  );
+  if (followUp) {
+    claims.push({
+      kind: 'followup',
+      text: followUp,
+      source: '',
+      detail: '',
+    });
   }
 
   return { type: 'meeting-prep', claims };
