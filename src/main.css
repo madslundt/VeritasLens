@@ -857,6 +857,34 @@ button:disabled {
   overflow: hidden;
 }
 
+/* End-of-session summary entries are de-emphasised so the eye lands on the
+   claim-style answers above them. The row is dimmer and the question text is
+   muted; the expanded body still gets the full theme so the summary is
+   readable when opened. */
+.history-row-summary {
+  background: transparent;
+  border-color: rgba(255, 255, 255, 0.06);
+  opacity: 0.72;
+}
+.history-row-summary .history-q {
+  color: var(--muted);
+  font-style: italic;
+}
+.history-row-summary .history-icon {
+  color: var(--muted);
+}
+
+/* Thin spacer between the claim list and the muted summary tail. Renders as
+   pure whitespace — no background, no border. */
+.history-row-divider {
+  background: transparent;
+  border: none;
+  height: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .history-question {
   width: 100%;
   background: none;

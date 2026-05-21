@@ -14,9 +14,29 @@ The user has provided an audio clip of a recent conversation segment. Summarize 
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.`;
 
-export function buildSessionSummaryPrompt(lang: LanguageCode): string {
+export interface SessionSummaryOptions {
+  /**
+   * Running summaries from earlier intervals of the same session whose audio
+   * has since fallen out of the ring buffer. Used by the final end-of-session
+   * call so the summary can cover the whole conversation, not just the tail.
+   */
+  previousSummaries?: string[];
+}
+
+export function buildSessionSummaryPrompt(
+  lang: LanguageCode,
+  options?: SessionSummaryOptions,
+): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${BASE_PROMPT}\n\nLANGUAGE: Write \`summary\` in ${langName}. \`quote\` stays in the original spoken language.`;
+  const langDirective = `LANGUAGE: Write \`summary\` in ${langName}. \`quote\` stays in the original spoken language.`;
+  const prior = options?.previousSummaries?.filter((s) => s.trim().length > 0) ?? [];
+  if (prior.length === 0) {
+    return `${BASE_PROMPT}\n\n${langDirective}`;
+  }
+  const numbered = prior.map((s, i) => `${i + 1}. ${s}`).join('\n');
+  const priorBlock =
+    `PRIOR CONTEXT: These are running summaries of earlier parts of the same conversation whose audio is no longer in the buffer. Use them only for context; the authoritative content is the audio clip. Produce a single consolidated summary covering the whole session.\n${numbered}`;
+  return `${BASE_PROMPT}\n\n${priorBlock}\n\n${langDirective}`;
 }
 
 export const SESSION_SUMMARY_SCHEMA = {

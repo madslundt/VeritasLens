@@ -375,10 +375,36 @@ export const SettingsView: Component = () => {
     }
   };
 
-  // Session detail view
+  // Session detail view. Claim-style answers are the primary content; the
+  // end-of-session summary (lensId='session-summary') is rendered last with a
+  // muted style so it doesn't compete with the claims for attention.
   const SessionDetailView = () => {
     const entries = selectedSessionEntries();
     const orderedEntries = [...entries].reverse();
+    const claimEntries = orderedEntries.filter((e) => e.lensId !== 'session-summary');
+    const summaryEntries = orderedEntries.filter((e) => e.lensId === 'session-summary');
+    const renderRow = (entry: HistoryEntry, muted: boolean) => (
+      <li class="history-row" classList={{ 'history-row-summary': muted }}>
+        <button
+          type="button"
+          class="history-question"
+          onClick={() => setExpandedEntryId((prev) => (prev === entry.id ? null : entry.id))}
+        >
+          <span class={`history-icon ${badgeClass(entry.badge)}`}>{badgeIcon(entry.badge)}</span>
+          <span class="history-time">{formatTime(entry.timestamp)}</span>
+          <span class="history-q">{entry.question}</span>
+        </button>
+        <Show when={expandedEntryId() === entry.id}>
+          <div class="history-detail">
+            <Show when={entry.result.autoSelected}>
+              <p class="history-detail-lens">{entry.lensName}</p>
+            </Show>
+            <p class="history-detail-question">{entry.question}</p>
+            <pre>{formatResultText(entry.result)}</pre>
+          </div>
+        </Show>
+      </li>
+    );
     return (
       <div class="session-detail">
         <div class="field-header">
@@ -390,30 +416,11 @@ export const SettingsView: Component = () => {
           </span>
         </div>
         <ul class="history-list">
-          <For each={orderedEntries}>
-            {(entry) => (
-              <li class="history-row">
-                <button
-                  type="button"
-                  class="history-question"
-                  onClick={() => setExpandedEntryId((prev) => (prev === entry.id ? null : entry.id))}
-                >
-                  <span class={`history-icon ${badgeClass(entry.badge)}`}>{badgeIcon(entry.badge)}</span>
-                  <span class="history-time">{formatTime(entry.timestamp)}</span>
-                  <span class="history-q">{entry.question}</span>
-                </button>
-                <Show when={expandedEntryId() === entry.id}>
-                  <div class="history-detail">
-                    <Show when={entry.result.autoSelected}>
-                      <p class="history-detail-lens">{entry.lensName}</p>
-                    </Show>
-                    <p class="history-detail-question">{entry.question}</p>
-                    <pre>{formatResultText(entry.result)}</pre>
-                  </div>
-                </Show>
-              </li>
-            )}
-          </For>
+          <For each={claimEntries}>{(entry) => renderRow(entry, false)}</For>
+          <Show when={summaryEntries.length > 0}>
+            <li class="history-row-divider" aria-hidden="true" />
+          </Show>
+          <For each={summaryEntries}>{(entry) => renderRow(entry, true)}</For>
         </ul>
       </div>
     );
@@ -828,8 +835,10 @@ export const SettingsView: Component = () => {
                   </For>
                 </select>
                 <span class="field-hint warning">
-                  ⚠ Auto-summary sends an API request at each interval (~30 calls/hour at 2 min).
-                  Significantly higher API cost. Results appear in History only, not on the HUD.
+                  ⚠ Auto-summary sends a Gemini request at each interval plus one final
+                  request when you exit the session. Intermediate ticks are kept in memory
+                  only; one consolidated summary appears in History per session. Sessions
+                  shorter than the interval produce no entry.
                 </span>
               </Show>
             </div>

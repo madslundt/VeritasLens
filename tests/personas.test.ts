@@ -278,7 +278,7 @@ describe('eli5', () => {
   });
 });
 
-import { parseSessionSummaryResponse } from '../src/personas/sessionSummary';
+import { buildSessionSummaryPrompt, parseSessionSummaryResponse } from '../src/personas/sessionSummary';
 
 describe('session-summary', () => {
   it('parses a valid summary response', () => {
@@ -287,6 +287,37 @@ describe('session-summary', () => {
     );
     expect(result.type).toBe('session-summary');
     if (result.type === 'session-summary') expect(result.summary).toContain('project');
+  });
+
+  it('buildSessionSummaryPrompt omits the prior-context block when no previous summaries are supplied', () => {
+    const prompt = buildSessionSummaryPrompt('en');
+    expect(prompt).not.toContain('PRIOR CONTEXT');
+    expect(prompt).toContain('LANGUAGE:');
+  });
+
+  it('buildSessionSummaryPrompt omits the prior-context block when the array is empty', () => {
+    const prompt = buildSessionSummaryPrompt('en', { previousSummaries: [] });
+    expect(prompt).not.toContain('PRIOR CONTEXT');
+  });
+
+  it('buildSessionSummaryPrompt drops empty/whitespace-only entries before deciding whether to include the prior-context block', () => {
+    const prompt = buildSessionSummaryPrompt('en', { previousSummaries: ['', '   '] });
+    expect(prompt).not.toContain('PRIOR CONTEXT');
+  });
+
+  it('buildSessionSummaryPrompt embeds each previous summary in a numbered list under PRIOR CONTEXT', () => {
+    const prompt = buildSessionSummaryPrompt('en', {
+      previousSummaries: ['first half of meeting', 'second half discussion'],
+    });
+    expect(prompt).toContain('PRIOR CONTEXT');
+    expect(prompt).toContain('1. first half of meeting');
+    expect(prompt).toContain('2. second half discussion');
+  });
+
+  it('buildSessionSummaryPrompt still applies the language directive when prior context is provided', () => {
+    const prompt = buildSessionSummaryPrompt('da', { previousSummaries: ['en ting'] });
+    expect(prompt).toContain('Dansk');
+    expect(prompt).toContain('PRIOR CONTEXT');
   });
 });
 

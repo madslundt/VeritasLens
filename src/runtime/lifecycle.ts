@@ -33,6 +33,7 @@ import {
 import { callLens, MAX_RETRIES } from '@/llm/gemini';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
 import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
+import { buildSessionSummaryPrompt } from '@/personas/sessionSummary';
 import {
   MEETING_PREP_ID,
   buildMeetingPrepPrompt,
@@ -62,6 +63,11 @@ let unsubscribeEvents: (() => void) | null = null;
 let inflight: AbortController | null = null;
 let analyzing = false;
 let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
+// In-memory running summaries accumulated during a session by the auto-summary
+// timer. Cleared on session enter / leave / runtime stop. Never persisted on
+// their own — they are folded into the single end-of-session entry by
+// runFinalSummary().
+let intermediateSummaries: Array<{ summary: string; quote?: string }> = [];
 
 let lastPickerIndex = 0;
 let lastMenuIndex = 0;
@@ -104,6 +110,11 @@ export async function stopHudRuntime(): Promise<void> {
   running = false;
   stopSpinner();
   stopAutoSummaryTimer();
+  // System shutdown deliberately discards any accumulated intermediate
+  // summaries — firing a Gemini call here would race the runtime teardown
+  // (no reliable way to complete the fetch + localStorage write), so the
+  // final summary only runs from the user-initiated leaveActiveSession path.
+  intermediateSummaries = [];
   unsubscribeEvents?.();
   unsubscribeEvents = null;
   inflight?.abort();
@@ -298,6 +309,7 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   setActivePersona(personaId);
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   sessionStartTime = Date.now();
+  intermediateSummaries = [];
   lastMenuIndex = 0;
   setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
   await showActivePage(persona);
@@ -325,7 +337,14 @@ async function leaveActiveSession(): Promise<void> {
   analyzing = false;
   stopSpinner();
   try { await getBridge().audioControl(false); } catch { /* ignore */ }
+  // Stop the periodic timer BEFORE the final summary so a tick can't fire
+  // mid-call and double up against the same buffer.
   stopAutoSummaryTimer();
+  // Best-effort end-of-session summary. runFinalSummary is internally guarded
+  // and never throws, so this can't block the cleanup that follows. It runs
+  // before buffer.clear() so the most-recent audio is still available.
+  await runFinalSummary();
+  intermediateSummaries = [];
   buffer?.clear();
   buffer = null;
   resetHudSessionState();
@@ -653,16 +672,11 @@ async function runAutoSummary(): Promise<void> {
       model: settings().geminiModel,
     });
     const result = persona.parse(rawText);
-    for (const single of splitResultByClaim(result)) {
-      pushHistoryEntry({
-        sessionId: currentSessionId,
-        lensId: persona.id,
-        lensName: persona.name,
-        question: extractQuestion(single),
-        badge: 'AUTO',
-        quote: extractQuote(single),
-        result: single,
-      }, (k, v) => getBridge().setLocalStorage(k, v));
+    // Intermediate tick — accumulate text in memory only. The final end-of-
+    // session call folds these into one history entry; intermediates never
+    // appear in History on their own.
+    if (result.type === 'session-summary' && result.summary.trim().length > 0) {
+      intermediateSummaries.push({ summary: result.summary, quote: result.quote });
     }
   } catch (err) {
     // Auto-summary is best-effort, but failures should be observable in the
@@ -670,6 +684,74 @@ async function runAutoSummary(): Promise<void> {
     // entries (network down, quota, etc.).
     pushDebugEvent({
       label: 'auto-summary-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Generates one consolidated end-of-session summary using accumulated
+ * intermediate summaries as prior context plus whatever audio is still in the
+ * ring buffer. Pushes exactly one history entry (lensId='session-summary',
+ * badge='SUMMARY') on success.
+ *
+ * Skipped when no intermediate ever fired — this also implements the
+ * "session shorter than autoSummaryInterval" gate, because the first timer
+ * tick lands at exactly that boundary.
+ *
+ * Best-effort; failures land in pushDebugEvent and never throw, so the caller
+ * (leaveActiveSession) can always complete its cleanup.
+ */
+async function runFinalSummary(): Promise<void> {
+  if (intermediateSummaries.length === 0) return;
+  const apiKey = settings().geminiApiKey;
+  if (!apiKey) return;
+  const persona = getPersona('session-summary');
+  if (!persona) return;
+  try {
+    const previousSummaries = intermediateSummaries.map((i) => i.summary);
+    const prompt = buildSessionSummaryPrompt(
+      settings().responseLanguage,
+      { previousSummaries },
+    );
+    // If the buffer was cleared between the last tick and exit (defensive —
+    // leaveActiveSession clears it after this call returns), fall through to a
+    // text-only synthesis by sending a tiny silent WAV. Skipping the call
+    // would lose the work entirely.
+    const wav = buffer && buffer.bytesBuffered > 0 ? buffer.snapshotWav() : null;
+    if (!wav) {
+      pushDebugEvent({
+        label: 'final-summary-skip',
+        detail: 'no audio buffer at session end',
+      });
+      return;
+    }
+    const rawText = await callLens({
+      apiKey,
+      wav,
+      prompt,
+      schema: persona.schema,
+      model: settings().geminiModel,
+    });
+    const result = persona.parse(rawText);
+    if (result.type !== 'session-summary') return;
+    // Fall back to the most-recent intermediate quote if the final response
+    // didn't include one — keeps the history row from rendering with an empty
+    // quote column when prior ticks already captured a salient line.
+    const lastIntermediate = intermediateSummaries[intermediateSummaries.length - 1];
+    const quote = result.quote ?? lastIntermediate?.quote ?? '';
+    pushHistoryEntry({
+      sessionId: currentSessionId,
+      lensId: persona.id,
+      lensName: persona.name,
+      question: extractQuestion(result),
+      badge: 'SUMMARY',
+      quote,
+      result,
+    }, (k, v) => getBridge().setLocalStorage(k, v));
+  } catch (err) {
+    pushDebugEvent({
+      label: 'final-summary-fail',
       detail: err instanceof Error ? err.message : String(err),
     });
   }
