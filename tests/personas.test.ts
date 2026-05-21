@@ -594,88 +594,12 @@ describe('meeting-prep / buildMeetingPrepPrompt', () => {
     expect(prompt).not.toContain('=== ');
   });
 
-  it('includes a YOUR PERSPECTIVE block with both Role and Goal when set', () => {
-    const prompt = buildMeetingPrepPrompt({
-      lang: 'en',
-      sections: GENERAL_PLUS_TWO,
-      role: 'Buyer',
-      goal: 'Negotiate the rate below 4.2%',
-    });
-    expect(prompt).toContain('YOUR PERSPECTIVE:');
-    expect(prompt).toContain('- Role: Buyer');
-    expect(prompt).toContain('- Goal: Negotiate the rate below 4.2%');
-  });
-
-  it('emits only the present line when only one of role/goal is set', () => {
-    const roleOnly = buildMeetingPrepPrompt({
-      lang: 'en',
-      sections: GENERAL_PLUS_TWO,
-      role: 'Buyer',
-    });
-    expect(roleOnly).toContain('- Role: Buyer');
-    expect(roleOnly).not.toContain('- Goal:');
-
-    const goalOnly = buildMeetingPrepPrompt({
-      lang: 'en',
-      sections: GENERAL_PLUS_TWO,
-      goal: 'Decide if this candidate is a fit',
-    });
-    expect(goalOnly).toContain('- Goal: Decide if this candidate is a fit');
-    expect(goalOnly).not.toContain('- Role:');
-  });
-
-  it('omits the YOUR PERSPECTIVE block entirely when both role and goal are empty', () => {
-    const prompt = buildMeetingPrepPrompt({
-      lang: 'en',
-      sections: GENERAL_PLUS_TWO,
-      goal: '',
-      role: '',
-    });
-    expect(prompt).not.toContain('YOUR PERSPECTIVE:');
-  });
-
-  it('treats whitespace-only role/goal as unset', () => {
-    const prompt = buildMeetingPrepPrompt({
-      lang: 'en',
-      sections: GENERAL_PLUS_TWO,
-      goal: '   ',
-      role: '\t  ',
-    });
-    expect(prompt).not.toContain('YOUR PERSPECTIVE:');
-  });
-
-  it('includes the hardcoded few-shot example regardless of role/goal state', () => {
-    const withFields = buildMeetingPrepPrompt({
-      lang: 'en',
-      sections: GENERAL_PLUS_TWO,
-      goal: 'X',
-      role: 'Buyer',
-    });
-    const withoutFields = buildMeetingPrepPrompt('en', GENERAL_PLUS_TWO);
-    expect(withFields).toContain('EXAMPLE');
-    expect(withoutFields).toContain('EXAMPLE');
-  });
-
-  it('still emits the LANGUAGE directive when perspective block is present', () => {
-    const prompt = buildMeetingPrepPrompt({
-      lang: 'da',
-      sections: GENERAL_PLUS_TWO,
-      role: 'Buyer',
-      goal: 'Win',
-    });
-    expect(prompt).toContain('LANGUAGE:');
-    expect(prompt).toContain('Dansk');
-  });
-});
-
-describe('meeting-prep / buildMeetingPrepSchema (regression: no role/goal in response)', () => {
-  it('does not add role or goal as response fields when perspective is set', () => {
-    // role/goal are PROMPT inputs only — the response schema must stay
-    // unchanged so existing parse logic and HUD rendering keep working.
-    const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO) as Record<string, unknown>;
-    const props = schema['properties'] as Record<string, unknown>;
-    expect(props['role']).toBeUndefined();
-    expect(props['goal']).toBeUndefined();
+  it('includes the hardcoded few-shot example so the model sees concrete answer/follow-up shape', () => {
+    // Quality-critical: the example anchors rule 3 ("fold answered questions
+    // into `answer` instead of echoing them as follow-ups"). Without it the
+    // model often regresses to redundant follow-ups.
+    const prompt = buildMeetingPrepPrompt('en', GENERAL_PLUS_TWO);
+    expect(prompt).toContain('EXAMPLE');
   });
 });
 
