@@ -118,6 +118,13 @@ let exitGeneratesSummary = false;
 // bump in @evenrealities/pretext doesn't silently break pagination.
 const LINE_PX = measureTextWrap('X', 1000).height;
 const REASON_INNER_W = SCREEN_W - 32 - 2 * 4; // 536
+// Claim-slot inner heights:
+//   baseline claim       = 54px container, padding 4 → inner 46px = 1 × 27 line
+//   discreet-result claim = 68px container, padding 4 → inner 60px = 2 × 27 lines
+// Claim text wider than the slot overflows visually into the verdict row, so
+// we paginate any excess into compact-header continuation pages.
+const BASELINE_CLAIM_LINES = 1;
+const DISCREET_CLAIM_LINES = 2;
 // On page 0 of a claim (full header layout), reason height varies by mode but
 // inner area accommodates ~4 lines of 27px in both baseline (134-8=126px → 4)
 // and discreet-result (126-8=118px → 4).
@@ -128,13 +135,22 @@ const BASELINE_SCROLL_REASON_LINES = 7;
 const DISCREET_SCROLL_REASON_LINES = 8;
 
 /**
- * One screen-worth of result content. Multi-claim results and long reasons
- * expand into a flat list of these — swipe-down increments the index,
- * swipe-up decrements. `pageWithinClaim === 0` is the full-header page
- * (claim + verdict + reason); higher values are scroll pages with a thin
- * header and expanded reason.
+ * One screen-worth of result content. Multi-claim results and long claim/
+ * reason text expand into a flat list of these — swipe-down increments the
+ * index, swipe-up decrements. `pageWithinClaim === 0` is the full-header
+ * page; higher values are compact-header scroll pages.
+ *
+ * `claimChunk` is set on the header page only — it carries the chunk of the
+ * claim that fits the (small) claim slot. `text` is what goes in the reason
+ * slot: the first reason chunk for the header page, or a claim-continuation
+ * or reason-continuation chunk for scroll pages.
  */
-type PageRef = { claimIdx: number; pageWithinClaim: number; text: string };
+type PageRef = {
+  claimIdx: number;
+  pageWithinClaim: number;
+  text: string;
+  claimChunk?: string;
+};
 
 let activePages: PageRef[] = [];
 let activePageIndex = 0;
@@ -272,7 +288,8 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     cachedHistoryEntries = [entry];
     historyDetailIndex = 0;
   }
-  detailPages = computePagesForResult(entry.result, /*scrollLines*/ DISCREET_SCROLL_REASON_LINES);
+  // history-detail uses the discreet-result-style claim slot (68px / 2 lines).
+  detailPages = computePagesForResult(entry.result, DISCREET_SCROLL_REASON_LINES, DISCREET_CLAIM_LINES);
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
@@ -294,7 +311,7 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
   if (nextEntry < 0 || nextEntry >= cachedHistoryEntries.length) return;
   historyDetailIndex = nextEntry;
   const entry = cachedHistoryEntries[nextEntry]!;
-  detailPages = computePagesForResult(entry.result, DISCREET_SCROLL_REASON_LINES);
+  detailPages = computePagesForResult(entry.result, DISCREET_SCROLL_REASON_LINES, DISCREET_CLAIM_LINES);
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
@@ -359,10 +376,13 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     return;
   }
 
-  // Compute the flat page list for this result. Line budget for page 2+ depends
-  // on whether the current mode is discreet (no chrome) or baseline (REC+hint).
-  const scrollLines = isDiscreetLayout(activeLayout) ? DISCREET_SCROLL_REASON_LINES : BASELINE_SCROLL_REASON_LINES;
-  activePages = computePagesForResult(result, scrollLines);
+  // Compute the flat page list for this result. Scroll-page reason budget
+  // depends on chrome (discreet drops REC+hint, gains 1 line). Claim slot
+  // capacity depends on the page-0 layout (discreet-result is taller).
+  const discreet = isDiscreetLayout(activeLayout);
+  const scrollLines = discreet ? DISCREET_SCROLL_REASON_LINES : BASELINE_SCROLL_REASON_LINES;
+  const claimLines = discreet ? DISCREET_CLAIM_LINES : BASELINE_CLAIM_LINES;
+  activePages = computePagesForResult(result, scrollLines, claimLines);
   activePageIndex = 0;
   if (currentPage === 'active') {
     await renderActivePage();
@@ -544,18 +564,18 @@ function badgeGlyph(badge: string): string {
 // ------- line-aware pagination -------------------------------------------
 
 /**
- * Split a reason string into screen-sized chunks. Page 0 uses the smaller
- * `FULL_HEADER_REASON_LINES` budget (full header above); subsequent pages
- * use the larger `scrollLines` budget (compact header above). Word boundaries
- * are preferred; unbreakable runs fall back to character splits.
+ * Split arbitrary text into screen-sized chunks. The first page uses the
+ * tighter `firstLines` budget (it sits inside a smaller slot); subsequent
+ * pages use the larger `scrollLines` budget (compact header above). Word
+ * boundaries are preferred; unbreakable runs fall back to character splits.
  */
-function paginateReason(text: string, scrollLines: number): string[] {
+function paginateText(text: string, innerW: number, firstLines: number, scrollLines: number): string[] {
   const pages: string[] = [];
   let remaining = text;
   let isFirst = true;
   while (remaining.length > 0) {
-    const maxLines = isFirst ? FULL_HEADER_REASON_LINES : scrollLines;
-    const { chunk, rest } = takeLines(remaining, REASON_INNER_W, maxLines);
+    const maxLines = isFirst ? firstLines : scrollLines;
+    const { chunk, rest } = takeLines(remaining, innerW, maxLines);
     pages.push(chunk);
     if (rest.length === remaining.length) break; // safety: no forward progress
     remaining = rest;
@@ -615,14 +635,43 @@ function charSplitFallback(text: string, innerW: number, maxLines: number): { ch
   return { chunk: text.slice(0, best), rest: text.slice(best) };
 }
 
-/** Build a flat page list spanning every claim and every reason sub-page. */
-function computePagesForResult(result: LensResult, scrollLines: number): PageRef[] {
+/**
+ * Build a flat page list spanning every claim, every claim continuation, and
+ * every reason continuation. Page 0 of each claim is the header page (full
+ * claim chunk + verdict + first reason chunk). If the claim doesn't fit the
+ * claim slot, the overflow continues on compact-header pages before the
+ * reason starts; same compact-header layout, just claim text in the reason
+ * slot. After claim continuations come the reason continuations.
+ */
+function computePagesForResult(result: LensResult, scrollLines: number, claimLines: number): PageRef[] {
   const total = claimCount(result);
   const out: PageRef[] = [];
   for (let i = 0; i < total; i++) {
-    const { bottom } = formatLensResult(result, i);
-    const chunks = paginateReason(bottom, scrollLines);
-    chunks.forEach((text, idx) => out.push({ claimIdx: i, pageWithinClaim: idx, text }));
+    const { top, bottom } = formatLensResult(result, i);
+    // Paginate the claim against the claim slot first, then the scroll slot
+    // for any continuations.
+    const claimChunks = paginateText(top, REASON_INNER_W, claimLines, scrollLines);
+    const reasonChunks = paginateText(bottom, REASON_INNER_W, FULL_HEADER_REASON_LINES, scrollLines);
+
+    // Header page: first claim chunk in claim slot, first reason chunk in reason slot.
+    out.push({
+      claimIdx: i,
+      pageWithinClaim: 0,
+      text: reasonChunks[0] ?? '',
+      claimChunk: claimChunks[0] ?? '',
+    });
+
+    let pageIdx = 1;
+    // Claim continuation pages — scroll layout, continuation text in the
+    // reason slot (visually "the claim continues here").
+    for (let c = 1; c < claimChunks.length; c++) {
+      out.push({ claimIdx: i, pageWithinClaim: pageIdx++, text: claimChunks[c]! });
+    }
+    // Reason continuation pages — scroll layout, continuation text in the
+    // reason slot.
+    for (let r = 1; r < reasonChunks.length; r++) {
+      out.push({ claimIdx: i, pageWithinClaim: pageIdx++, text: reasonChunks[r]! });
+    }
   }
   return out;
 }
@@ -659,9 +708,11 @@ async function renderActivePage(): Promise<void> {
     if (!ok) throw new Error('rebuildPageContainer (active) failed.');
   }
   if (page.pageWithinClaim === 0) {
-    const { top, middle } = formatLensResult(currentActiveResult, page.claimIdx);
+    const { middle } = formatLensResult(currentActiveResult, page.claimIdx);
     await Promise.all([
-      upgradeText(CONTAINER.claim, NAME.claim, top),
+      // page.claimChunk already carries the X/Y and Auto prefixes from
+      // formatLensResult — we paginated the prefixed top text.
+      upgradeText(CONTAINER.claim, NAME.claim, page.claimChunk ?? ''),
       upgradeText(CONTAINER.verdict, NAME.verdict, middle),
       upgradeText(CONTAINER.reason, NAME.reason, page.text),
     ]);
@@ -692,11 +743,11 @@ async function renderHistoryDetailPage(): Promise<void> {
     return;
   }
   if (wantsFull) {
-    const { top, middle } = formatLensResult(entry.result, page.claimIdx);
+    const { middle } = formatLensResult(entry.result, page.claimIdx);
     const total = cachedHistoryEntries.length;
     const idxPrefix = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total} · ` : '';
     await Promise.all([
-      upgradeText(CONTAINER.claim, NAME.claim, `${idxPrefix}${top}`),
+      upgradeText(CONTAINER.claim, NAME.claim, `${idxPrefix}${page.claimChunk ?? ''}`),
       upgradeText(CONTAINER.verdict, NAME.verdict, middle),
       upgradeText(CONTAINER.reason, NAME.reason, page.text),
     ]);
@@ -1012,7 +1063,7 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
 
 function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPageContainer {
   if (page.pageWithinClaim !== 0) return buildHistoryDetailScrollPage(entry, page);
-  const { top, middle } = formatLensResult(entry.result, page.claimIdx);
+  const { middle } = formatLensResult(entry.result, page.claimIdx);
   const total = cachedHistoryEntries.length;
   // X/Y position indicator across the current session's entries — only shown
   // when there's more than one, so a single-entry session doesn't get the
@@ -1021,7 +1072,7 @@ function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPage
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
     xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
-    borderWidth: 0, paddingLength: 4, content: `${idxPrefix}${top}`, isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: `${idxPrefix}${page.claimChunk ?? ''}`, isEventCapture: 0,
   });
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,

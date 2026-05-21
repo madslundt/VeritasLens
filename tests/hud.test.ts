@@ -895,6 +895,112 @@ describe('line-aware pagination', () => {
     expect(header!.payload.content).toContain('+ TRUE');
   });
 
+  it('paginates a long claim across header + claim-continuation pages (baseline)', async () => {
+    // baseline claim slot fits 1 line (~70 chars at 536px); a multi-line Danish
+    // primary line — like Meeting Prep can produce — overflows it.
+    await saveDiscreet(fakeSetLs, false);
+    setActiveLayout('baseline');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher.';
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: 'short reason' }],
+    });
+
+    // Page 0: claim slot has the FIRST chunk only (≤1 line); it does not contain
+    // the tail of the claim.
+    const claim0 = lastUpgradeByName('vl-claim')!;
+    expect(claim0).toBeDefined();
+    expect(longClaim).toContain(claim0);          // chunk is a prefix of the original
+    expect(claim0.length).toBeLessThan(longClaim.length); // pagination actually fired
+    expect(claim0).not.toContain('matcher');      // tail must NOT be on page 0
+
+    // Scroll forward — we should land on a claim-continuation page (scroll
+    // layout, reason slot carries the rest of the claim). Walking forward
+    // until we either hit the tail of the claim or run out of pages.
+    let foundTail = false;
+    for (let i = 0; i < 5; i++) {
+      bridge.textContainerUpgrade.mockClear();
+      bridge.rebuildPageContainer.mockClear();
+      await scrollActiveReason(1);
+      const reason = lastUpgradeByName('vl-reason');
+      if (reason && reason.includes('matcher')) {
+        foundTail = true;
+        // First scroll-down crosses full→scroll, which rebuilds. Subsequent
+        // same-layout scrolls don't.
+        break;
+      }
+    }
+    expect(foundTail).toBe(true);
+  });
+
+  it('long claim still paginates when followed by a long reason (linear traversal)', async () => {
+    await saveDiscreet(fakeSetLs, false);
+    setActiveLayout('baseline');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette niveau.';
+    const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(40);
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: longReason }],
+    });
+
+    // Visit every page. The traversal order must show the claim tail before
+    // any reason text appears.
+    let sawClaimTail = false;
+    let sawReasonText = false;
+    let claimTailBeforeReason = false;
+    const allReasonContents: string[] = [];
+    const page0Reason = lastUpgradeByName('vl-reason')!;
+    if (page0Reason) allReasonContents.push(page0Reason);
+    for (let i = 0; i < 30; i++) {
+      bridge.textContainerUpgrade.mockClear();
+      await scrollActiveReason(1);
+      const next = lastUpgradeByName('vl-reason');
+      if (!next) break;
+      allReasonContents.push(next);
+      if (next.includes('matcher')) {
+        sawClaimTail = true;
+        if (!sawReasonText) claimTailBeforeReason = true;
+      }
+      if (next.includes('quick brown')) {
+        sawReasonText = true;
+      }
+    }
+    expect(sawClaimTail).toBe(true);
+    expect(sawReasonText).toBe(true);
+    expect(claimTailBeforeReason).toBe(true);
+  });
+
+  it('discreet mode (2-line claim slot) absorbs a borderline claim without claim-continuation', async () => {
+    // Same Danish claim, but discreet-result has a 68px / 2-line claim slot.
+    // For this length (~95 chars), pretext wraps it to 2 lines which fit.
+    await saveDiscreet(fakeSetLs, true);
+    setActiveLayout('discreet-minimal');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const claim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%.';
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim, reason: 'short' }],
+    });
+
+    // Page 0's claim slot should hold the entire claim (no continuation needed).
+    const claim0 = lastUpgradeByName('vl-claim')!;
+    expect(claim0).toBe(claim);
+    // And scroll forward should be a no-op since reason is also 1 page.
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    await scrollActiveReason(1);
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+
   it('history-detail entry hop still fires at the flat-page edges', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
