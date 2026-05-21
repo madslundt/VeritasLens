@@ -2,8 +2,23 @@
 import { uint8ToBase64, encodePcmToWav } from '@/runtime/audioBuffer';
 import {
   DEFAULT_GEMINI_MODEL,
+  GEMINI_MODELS,
   type GeminiModel,
 } from '@/types';
+
+/**
+ * Restrict the model name we interpolate into the endpoint URL to the
+ * statically-known list. Defense-in-depth: today `opts.model` comes from our
+ * own settings store, but a future code path that forwards a user-supplied
+ * string would otherwise inject directly into the URL. Falls back silently to
+ * the default; the caller is expected to log the fallback if it cares.
+ */
+function resolveModel(raw: string | undefined): GeminiModel {
+  if (raw && (GEMINI_MODELS as readonly string[]).includes(raw)) {
+    return raw as GeminiModel;
+  }
+  return DEFAULT_GEMINI_MODEL;
+}
 
 const ENDPOINT = (model: string) =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
@@ -83,7 +98,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     }
 
     const response = await fetch(
-      `${ENDPOINT(opts.model ?? DEFAULT_GEMINI_MODEL)}?key=${encodeURIComponent(opts.apiKey)}`,
+      `${ENDPOINT(resolveModel(opts.model))}?key=${encodeURIComponent(opts.apiKey)}`,
       {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -179,7 +194,8 @@ export async function fetchAvailableModels(apiKey: string, signal?: AbortSignal)
         m.name?.startsWith('models/gemini-') &&
         m.supportedGenerationMethods?.includes('generateContent'),
     )
-    .map((m) => m.name!.replace('models/', ''))
+    .map((m) => m.name?.replace('models/', '') ?? '')
+    .filter((n) => n.length > 0)
     .sort()
     .reverse();
 }

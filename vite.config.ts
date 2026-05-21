@@ -17,6 +17,15 @@ export default defineConfig({
   build: {
     target: 'es2022',
     sourcemap: false,
+    minify: 'esbuild',
+    cssCodeSplit: false,
+  },
+  esbuild: {
+    // The two `console.*` call sites in src/ are both `import.meta.env.DEV`-
+    // gated, so dropping unconditionally in prod removes no observable
+    // logging. `debugger` should never reach prod either.
+    drop: ['console', 'debugger'],
+    legalComments: 'none',
   },
   test: {
     globals: true,

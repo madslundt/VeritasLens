@@ -139,8 +139,14 @@ export async function loadHistory(getLocalStorage: (k: string) => Promise<string
       if (ok) migrated.push(ok);
     }
     setSessionHistory(migrated);
-  } catch {
-    // corrupt or missing — start fresh
+  } catch (err) {
+    // corrupt or missing — start fresh, but surface the failure in the debug
+    // log so a wedged KV (or a JSON.parse exception on user data) is visible
+    // in the settings debug panel rather than silently dropping all history.
+    pushDebugEvent({
+      label: 'history-load-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -231,26 +237,33 @@ async function persistHistory(
   // some characters cost 2-3 bytes but only one code unit each.
   let bytes = utf8ByteLength(json);
   if (bytes > HISTORY_BYTE_BUDGET && entries.length > 0) {
-    // Estimate the surviving tail length from the size ratio, then linearly
-    // fine-tune by chunks of 10 % to absorb estimation error. This keeps trim
-    // work effectively O(log n) on the byte count instead of O(n) re-stringifies.
-    const ratio = HISTORY_BYTE_BUDGET / bytes;
-    let keep = Math.max(1, Math.floor(entries.length * ratio * 0.9));
+    // Two-shot trim, total ≤3 stringify calls per persist write:
+    //   call 1: full entries (above)
+    //   call 2: ratio-based estimate using avg bytes/entry of the full list
+    //   call 3: if still over, re-estimate from the trimmed list's actual
+    //           avg (tail entries can be larger than the full-list avg)
+    // A 0.85 safety factor on each pass absorbs estimation error from
+    // uneven entry sizes; a single-entry-over-budget is preserved as-is
+    // (losing it would discard the answer the user just received).
+    const SAFETY = 0.85;
+    const estimateKeep = (totalBytes: number, count: number): number => {
+      const avg = totalBytes / count;
+      return Math.max(1, Math.floor((HISTORY_BYTE_BUDGET / avg) * SAFETY));
+    };
+    let keep = estimateKeep(bytes, entries.length);
     let trimmed = entries.slice(-keep);
     json = JSON.stringify(trimmed);
     bytes = utf8ByteLength(json);
-    while (bytes > HISTORY_BYTE_BUDGET && trimmed.length > 1) {
-      keep = Math.max(1, Math.floor(trimmed.length * 0.9));
+    if (bytes > HISTORY_BYTE_BUDGET && trimmed.length > 1) {
+      const next = estimateKeep(bytes, trimmed.length);
+      // Ensure forward progress even if the new estimate ≥ current length
+      // (can happen on extreme tail-skew where avg jumps each pass).
+      keep = Math.max(1, Math.min(next, trimmed.length - 1));
       trimmed = trimmed.slice(-keep);
       json = JSON.stringify(trimmed);
       bytes = utf8ByteLength(json);
     }
-    // A single entry larger than the entire budget is persisted as-is — losing
-    // it would discard the answer the user just received — but surface it in
-    // the debug log so the over-cap write is visible. Prior history was
-    // already discarded by the trim above; that loss is intrinsic to a
-    // single-entry overflow and not fixable here without truncating user data.
-    if (bytes > HISTORY_BYTE_BUDGET && trimmed.length === 1) {
+    if (bytes > HISTORY_BYTE_BUDGET) {
       pushDebugEvent({
         label: 'history-oversized-entry',
         detail: `single entry ${Math.round(bytes / 1024)}KB exceeds ${Math.round(HISTORY_BYTE_BUDGET / 1024)}KB cap`,
@@ -363,8 +376,13 @@ export async function loadMeetingPrepSections(
       sections.push({ id, label, body });
     }
     setMeetingPrepSectionsSignal(sections);
-  } catch {
-    // corrupt or missing — start fresh
+  } catch (err) {
+    // Same rationale as loadHistory above: surface the failure so a wedged KV
+    // isn't an invisible blank-meeting-prep regression.
+    pushDebugEvent({
+      label: 'meeting-prep-load-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

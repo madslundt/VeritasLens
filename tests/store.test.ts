@@ -6,7 +6,7 @@
 // regression at the bottom is intentionally `.skip`-ed — it documents the
 // post-Pass 1 behaviour and gets un-skipped when C1 lands.
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   clearDebugEvents,
   clearSessionHistory,
@@ -87,8 +87,6 @@ describe('pushHistoryEntry', () => {
 });
 
 describe('persistHistory trim semantics', () => {
-  // Increase timeout — current implementation is O(n²) over the trim loop
-  // (Pass 1 / C2 will fix this).
   it('keeps the persisted JSON under HISTORY_BYTE_BUDGET when overflowing', async () => {
     const ls = fakeLocalStorage();
     for (let i = 0; i < 400; i++) {
@@ -103,6 +101,75 @@ describe('persistHistory trim semantics', () => {
     expect(parsed.length).toBeGreaterThan(0);
     expect(parsed.at(-1)!.question).toContain('claim 399');
   }, 30_000);
+
+  // Regression for B2: the prior `while (over) { keep *= 0.9; stringify; }` loop
+  // could re-stringify the same payload 5+ times per write on uneven entry
+  // distributions (e.g. a tail of large entries dragging the per-entry average
+  // up after smaller entries get trimmed). The refactor caps stringify calls
+  // per single persistHistory at <=3 so big-history writes stop causing GC
+  // churn on constrained devices.
+  it('caps JSON.stringify calls per persist write at 3 or fewer (uneven entries)', async () => {
+    // 400 small in-memory + 50 fat at the tail. Total ~330 KB; first
+    // ratio-based estimate trims to ~243 entries which still includes all
+    // 50 fat (~250 KB) — the old loop would iterate many times shrinking
+    // 10% at a time until only ~40 fat entries fit.
+    for (let i = 0; i < 400; i++) {
+      pushHistoryEntry({
+        sessionId: 's', lensId: 'eli5', lensName: 'ELI5',
+        question: 'q' + i, badge: 'ELI5', quote: '',
+        result: { type: 'eli5', claims: [{ quote: '', explanation: 'short' }] },
+      });
+    }
+    for (let i = 0; i < 50; i++) {
+      pushHistoryEntry({
+        sessionId: 's', lensId: 'eli5', lensName: 'ELI5',
+        question: 'long ' + 'x'.repeat(200),
+        badge: 'ELI5', quote: '',
+        result: { type: 'eli5', claims: [{ quote: '', explanation: 'y'.repeat(4000) }] },
+      });
+    }
+    const ls = fakeLocalStorage();
+    // Spy AFTER the in-memory pushes so we only count the persist call below.
+    const spy = vi.spyOn(JSON, 'stringify');
+    pushHistoryEntry({
+      sessionId: 's', lensId: 'eli5', lensName: 'ELI5',
+      question: 'trigger persist', badge: 'ELI5', quote: '',
+      result: { type: 'eli5', claims: [{ quote: '', explanation: 'z'.repeat(4000) }] },
+    }, ls.set);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // persistHistory's calls have an array as the first arg (the entries list);
+    // ignore the per-entry stringify calls Solid or test setup may make.
+    const persistCalls = spy.mock.calls.filter((c) => Array.isArray(c[0]));
+    spy.mockRestore();
+    expect(persistCalls.length).toBeLessThanOrEqual(3);
+  });
+
+  // Regression for B2: an uneven distribution where the tail has bigger
+  // entries than the average would underestimate the trim aggressiveness on
+  // the first pass. The refactor must still land under budget by call 3.
+  it('lands under budget even when tail entries are larger than average', async () => {
+    const ls = fakeLocalStorage();
+    // 400 small entries (~200 B) then 50 fat ones (~5 KB) at the tail.
+    for (let i = 0; i < 400; i++) {
+      pushHistoryEntry({
+        sessionId: 's', lensId: 'eli5', lensName: 'ELI5',
+        question: 'q' + i, badge: 'ELI5', quote: '',
+        result: { type: 'eli5', claims: [{ quote: '', explanation: 'short' }] },
+      });
+    }
+    for (let i = 0; i < 50; i++) {
+      pushHistoryEntry({
+        sessionId: 's', lensId: 'eli5', lensName: 'ELI5',
+        question: 'long question ' + 'x'.repeat(200),
+        badge: 'ELI5', quote: '',
+        result: { type: 'eli5', claims: [{ quote: '', explanation: 'y'.repeat(4000) }] },
+      });
+    }
+    pushHistoryEntry(fatEntry(999), ls.set);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const raw = ls.data.get('veritaslens.history') ?? '[]';
+    expect(raw.length).toBeLessThanOrEqual(HISTORY_BYTE_BUDGET);
+  });
 });
 
 describe('clearSessionHistory', () => {

@@ -390,8 +390,13 @@ async function handleBackMenuOption(): Promise<void> {
 async function handleHistoryListGesture(g: Gesture): Promise<void> {
   if (typeof g.itemIndex === 'number') lastHistoryIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    if (lastHistoryIndex === 0) { lastMenuIndex = 0; await restoreActivePage(); return; }
+    if (lastHistoryIndex <= 0) { lastMenuIndex = 0; await restoreActivePage(); return; }
     const entries = getHistoryListEntries();
+    // Bound by entry count too — a stale lastHistoryIndex from a prior page
+    // that had more entries would otherwise read off the end (entry is then
+    // undefined and the `if (entry)` below silently no-ops, but the explicit
+    // bound makes the intent obvious).
+    if (lastHistoryIndex > entries.length) return;
     const entry = entries[lastHistoryIndex - 1];
     if (entry) await showHistoryDetailPage(entry);
   }

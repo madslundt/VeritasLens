@@ -63,7 +63,16 @@ function installRawMessageWiretap(): void {
   wiretapInstalled = true;
 }
 
-function isAudioMessage(msg: unknown): boolean {
+/**
+ * The "audio" prefix anchored to the start of the string and followed by end,
+ * `_` (snake_case like `audio_pcm`), or an uppercase letter (camelCase like
+ * `audioFrame`). Avoids the previous `/audio/i` false-positive that matched
+ * any substring — a URL or field name containing "audio" elsewhere would
+ * have silently suppressed an unrelated debug event.
+ */
+const AUDIO_TYPE_PREFIX = /^audio(?:$|_|[A-Z])/;
+
+export function isAudioMessage(msg: unknown): boolean {
   if (!msg || typeof msg !== 'object') return false;
   // Fast path: structured-type checks.
   const m = msg as { data?: unknown };
@@ -71,10 +80,10 @@ function isAudioMessage(msg: unknown): boolean {
   if (data) {
     if (Array.isArray(data)) {
       const head = data[0];
-      if (typeof head === 'string' && /audio/i.test(head)) return true;
+      if (typeof head === 'string' && AUDIO_TYPE_PREFIX.test(head)) return true;
     } else if (typeof data === 'object') {
       const d = data as { type?: unknown };
-      if (typeof d.type === 'string' && /audio/i.test(d.type)) return true;
+      if (typeof d.type === 'string' && AUDIO_TYPE_PREFIX.test(d.type)) return true;
     }
   }
   // Fallback: any serialized payload containing an audio-PCM field is audio.
@@ -82,8 +91,8 @@ function isAudioMessage(msg: unknown): boolean {
   // want to filter cheaply.
   try {
     const head = JSON.stringify(msg)?.slice(0, 200) ?? '';
-    if (/"?audio_?pcm"?/i.test(head)) return true;
-    if (/"?audio_?event"?/i.test(head)) return true;
+    if (/"audio_?pcm"/i.test(head)) return true;
+    if (/"audio_?event"/i.test(head)) return true;
   } catch {
     /* ignored */
   }

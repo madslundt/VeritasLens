@@ -7,6 +7,7 @@ import {
   loadHistory,
   loadMeetingPrepSections,
   loadSettings,
+  pushDebugEvent,
   setAppMode,
   setAppPhase,
   setAvailableModels,
@@ -31,11 +32,19 @@ async function bootstrap(): Promise<void> {
 
     // Phone-side WebView mode follows the LaunchSource hint; HUD on glasses
     // runs independently of which mode the phone is in.
-    bridge.onLaunchSource((source) => {
+    // Capture the SDK's unsubscribe callbacks so a host that keeps the JS
+    // context alive across WebView reloads (some embedders do) won't
+    // accumulate stale listeners on each reboot.
+    const disposeLaunchSource = bridge.onLaunchSource((source) => {
       setAppMode(source === 'glassesMenu' ? 'hud' : 'settings');
     });
 
-    bridge.onDeviceStatusChanged((status) => setDeviceStatus(status));
+    const disposeDeviceStatus = bridge.onDeviceStatusChanged((status) => setDeviceStatus(status));
+
+    window.addEventListener('beforeunload', () => {
+      try { disposeLaunchSource(); } catch { /* SDK may already be torn down */ }
+      try { disposeDeviceStatus(); } catch { /* SDK may already be torn down */ }
+    }, { once: true });
 
     await loadSettings((k) => bridge.getLocalStorage(k));
     await loadHistory((k) => bridge.getLocalStorage(k));
@@ -49,7 +58,14 @@ async function bootstrap(): Promise<void> {
       void import('./llm/gemini').then(({ fetchAvailableModels }) =>
         fetchAvailableModels(apiKey)
           .then((models) => { if (models.length > 0) setAvailableModels(models); })
-          .catch(() => { /* keep static fallback */ })
+          .catch((err) => {
+            // Keep the static fallback in the picker, but surface why the live
+            // model list is missing so a wedged API key / network is debuggable.
+            pushDebugEvent({
+              label: 'model-fetch-fail',
+              detail: err instanceof Error ? err.message : String(err),
+            });
+          })
           .finally(() => setModelsLoading(false)),
       );
     }
