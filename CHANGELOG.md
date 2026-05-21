@@ -4,6 +4,8 @@
 - New **Meeting Prep** lens: ground answers in context you write on your phone before a meeting — general notes plus optional labeled attachments (contracts, prepared questions) the assistant can cite as sources.
 - **Auto-summary** rewired to one consolidated entry per session: interval ticks accumulate in memory as context and a single summary is written to History when you exit the session. Sessions shorter than the interval produce no entry. In the phone History view the summary sits at the top of each session with a muted style so claim-style results below keep visual focus.
 - Remove the **Summary** lens from the picker. Auto-summary still produces an end-of-session entry in History; per-tap summaries no longer compete with claim-style lenses, since any model can include a summary in its own output.
+- **Hide / re-reveal** via swipe gestures: swipe down past the last answer page hides the result and returns the HUD to recording; a follow-up swipe up brings the same last page back. Tap → Back uses the same hidden state, so swipe-up after dismissing via the menu now reveals the last page you were viewing (previously jumped one back).
+- Baseline HUD claim slot grew from one line to two so longer questions wrap instead of being truncated.
 
 ## 0.5.0 — 2026-05-20
 - Multi-claim per tap (up to 5) for Fact, Stats, Fallacy, Bias, Trivia, and ELI5. One Gemini call now covers several distinct claims/questions/terms when present.

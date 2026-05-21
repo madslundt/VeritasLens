@@ -122,11 +122,11 @@ let exitGeneratesSummary = false;
 const LINE_PX = measureTextWrap('X', 1000).height;
 const REASON_INNER_W = SCREEN_W - 32 - 2 * 4; // 536
 // Claim-slot inner heights:
-//   baseline claim       = 54px container, padding 4 → inner 46px = 1 × 27 line
+//   baseline claim       = 62px container, padding 4 → inner 54px = 2 × 27 lines
 //   discreet-result claim = 68px container, padding 4 → inner 60px = 2 × 27 lines
 // Claim text wider than the slot overflows visually into the verdict row, so
 // we paginate any excess into compact-header continuation pages.
-const BASELINE_CLAIM_LINES = 1;
+const BASELINE_CLAIM_LINES = 2;
 const DISCREET_CLAIM_LINES = 2;
 // On page 0 of a claim (full header layout), reason height varies by mode but
 // inner area accommodates ~4 lines of 27px in both baseline (134-8=126px → 4)
@@ -157,6 +157,11 @@ type PageRef = {
 
 let activePages: PageRef[] = [];
 let activePageIndex = 0;
+// True when the active result has been hidden via tap-back from the menu. The
+// page list + index are preserved so the next scroll-up can reveal the last
+// page the user was viewing; the visible layout is demoted to baseline /
+// discreet-minimal in the meantime.
+let activeHidden = false;
 let detailPages: PageRef[] = [];
 let detailPageIndex = 0;
 /** Tracks which history-detail layout is currently on screen (full vs scroll). */
@@ -350,6 +355,7 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
     return;
   }
   currentActiveResult = result;
+  activeHidden = false;
 
   // Null result paths — clear or demote, matching prior behaviour. Discreet
   // demotes to the dot-only idle layout; baseline-scroll falls back to baseline
@@ -395,14 +401,72 @@ export async function setLensResult(result: LensResult | null): Promise<void> {
   }
 }
 
-export async function scrollActiveReason(dir: 1 | -1): Promise<void> {
-  if (currentPage !== 'active') return;
-  if (activePages.length === 0) return;
+/** Outcome of a swipe on the active page, used by lifecycle to update app phase. */
+export type ScrollActiveResult = 'scrolled' | 'noop' | 'revealed' | 'hidden';
+
+export async function scrollActiveReason(dir: 1 | -1): Promise<ScrollActiveResult> {
+  if (currentPage !== 'active') return 'noop';
+
+  // Hidden state: questions were tucked away via tap-back or swipe-down. A
+  // swipe-up brings the LAST page back into view (so the user re-sees the
+  // question they were last on). Swipe-down while hidden stays hidden.
+  if (activeHidden) {
+    if (dir === -1 && activePages.length > 0) {
+      activeHidden = false;
+      activePageIndex = activePages.length - 1;
+      await renderActivePage();
+      return 'revealed';
+    }
+    return 'noop';
+  }
+
+  if (activePages.length === 0) return 'noop';
+
+  // Swipe-down past the last page hides the answer (preserving activePages so
+  // a follow-up swipe-up can re-reveal it). Layout demotes to listening view.
+  if (dir === 1 && activePageIndex === activePages.length - 1) {
+    await hideActiveResultInPlace();
+    return 'hidden';
+  }
+
   const next = activePageIndex + dir;
-  if (next < 0 || next >= activePages.length) return;
+  if (next < 0 || next >= activePages.length) return 'noop';
   activePageIndex = next;
   await renderActivePage();
+  return 'scrolled';
 }
+
+/** Demote the active page to its idle layout (baseline / discreet-minimal)
+ * while keeping `activePages` and `currentActiveResult` intact, so a swipe-up
+ * can reveal the last page again. Shared by swipe-down dismiss and tap-back
+ * from the menu. */
+async function hideActiveResultInPlace(): Promise<void> {
+  activeHidden = true;
+  const targetIdle: ActiveLayout = isDiscreetLayout(activeLayout) ? 'discreet-minimal' : 'baseline';
+  if (activeLayout !== targetIdle) {
+    setActiveLayout(targetIdle);
+    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    if (!ok) throw new Error('rebuildPageContainer (hide) failed.');
+    return;
+  }
+  // Already on the idle layout (e.g., single-page baseline). Wipe the visible
+  // claim / verdict / reason text but keep the layout containers.
+  await Promise.all([
+    upgradeText(CONTAINER.claim, NAME.claim, ''),
+    upgradeText(CONTAINER.verdict, NAME.verdict, ''),
+    upgradeText(CONTAINER.reason, NAME.reason, ''),
+  ]);
+}
+
+/** Mark the active result as hidden without clearing it. Used by the menu's
+ * Back option so the next swipe-up can re-reveal the last page the user was
+ * viewing. */
+export function markActiveHidden(): void {
+  if (activePages.length > 0) activeHidden = true;
+}
+
+/** True iff the active result is preserved in memory but currently hidden. */
+export function isActiveHidden(): boolean { return activeHidden; }
 
 /** Toggle the recording indicator in the bottom-right of the active page. */
 export async function setRecIndicator(on: boolean): Promise<void> {
@@ -949,25 +1013,29 @@ function buildBaselineActivePage(): RebuildPageContainer {
     xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 26,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
+  // Claim slot grew from 54→62 px so longer questions can wrap to two lines
+  // instead of being silently truncated; verdict and reason shift down by 6
+  // and reason shrinks by 6 to absorb the change without disturbing the
+  // bottom REC/hint row.
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 34, width: SCREEN_W - 32, height: 54,
+    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 62,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   // Verdict slot is single-line but holds variable text (trivia answers,
-  // meeting-prep "From: <source>", etc.) that can have descenders. At the
-  // prior h=26 with paddingLength=4 the inner 18 px is shorter than the line
-  // box, so y/g/p got cropped. h=32 leaves 24 px inner, enough for the full
-  // glyph including descender. Reason container shifts down to absorb the
-  // 6 px gain and REC/hint drop the same amount to keep the screen filled.
+  // meeting-prep "From: <source>", etc.) that can have descenders. h=32 with
+  // paddingLength=4 leaves 24 px inner, enough for the full glyph including
+  // descender.
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 90, width: SCREEN_W - 32, height: 32,
+    xPosition: 16, yPosition: 96, width: SCREEN_W - 32, height: 32,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
+  // Reason at h=126 → inner 118 / 27 ≈ 4.37 lines, still fits the 4-line
+  // FULL_HEADER_REASON_LINES budget. Bottom REC/hint row at y=260 unchanged.
   const reason = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 124, width: SCREEN_W - 32, height: 132,
+    xPosition: 16, yPosition: 130, width: SCREEN_W - 32, height: 126,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const rec = new TextContainerProperty({
@@ -1227,6 +1295,7 @@ export function resetHudSessionState(): void {
   historyDetailIndex = -1;
   activePages = [];
   activePageIndex = 0;
+  activeHidden = false;
   currentActiveResult = null;
   activeLayout = 'baseline';
   pendingActiveResult = null;

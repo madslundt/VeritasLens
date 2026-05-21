@@ -9,6 +9,7 @@ import {
   flashPickerHint,
   getActiveLayout,
   hasPendingActiveResult,
+  markActiveHidden,
   menuOptionAtIndex,
   personaAtIndex,
   resetHudSessionState,
@@ -250,9 +251,9 @@ function handleEvent(event: EvenHubEvent): void {
       }
     } else if (currentHudPage() === 'active') {
       if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
-        scrollActiveReason(-1).catch((err) => logDispatchError('scroll-active-fail', err));
+        handleActiveScroll(-1).catch((err) => logDispatchError('scroll-active-fail', err));
       } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-        scrollActiveReason(1).catch((err) => logDispatchError('scroll-active-fail', err));
+        handleActiveScroll(1).catch((err) => logDispatchError('scroll-active-fail', err));
       }
     }
     return;
@@ -324,9 +325,24 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
     return;
   }
   if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
-    await scrollActiveReason(-1);
+    await handleActiveScroll(-1);
   } else if (g.type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-    await scrollActiveReason(1);
+    await handleActiveScroll(1);
+  }
+}
+
+/**
+ * Dispatch a swipe on the active page to the HUD and reconcile app phase with
+ * the outcome. Reveal flips us back to 'displaying'; dismiss tears the result
+ * down and returns to 'listening' — same end-state as tap → Back from the menu.
+ */
+async function handleActiveScroll(dir: 1 | -1): Promise<void> {
+  const outcome = await scrollActiveReason(dir);
+  if (outcome === 'revealed') {
+    setAppPhase('displaying');
+    await setStatus('displaying');
+  } else if (outcome === 'hidden') {
+    setAppPhase('listening');
   }
 }
 
@@ -364,6 +380,9 @@ async function handleBackMenuOption(): Promise<void> {
   setStateResult(null);
   setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
   await restoreActivePage();
+  // Preserve the result so a follow-up swipe-up re-reveals the last page the
+  // user was viewing instead of decrementing from a stale index.
+  markActiveHidden();
   setAppPhase('listening');
 }
 

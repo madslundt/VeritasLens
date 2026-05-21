@@ -57,6 +57,8 @@ import {
   bootstrapHud,
   currentHudPage,
   hasPendingActiveResult,
+  isActiveHidden,
+  markActiveHidden,
   MENU_OPTIONS,
   menuOptionAtIndex,
   personaAtIndex,
@@ -672,6 +674,100 @@ describe('multi-claim active page', () => {
   });
 });
 
+describe('hide / reveal active result via scroll edges', () => {
+  type TextBag = { payload: { containerName: string; content: string } };
+  function lastUpgradeByName(name: string): string | undefined {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
+    }
+    return undefined;
+  }
+
+  const twoClaims: LensResult = {
+    type: 'fact-check',
+    claims: [
+      { quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' },
+      { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
+    ],
+  };
+
+  it('markActiveHidden + scroll-up reveals the last page', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(twoClaims);
+    await scrollActiveReason(1); // advance to last page (claim 2)
+
+    markActiveHidden();
+    expect(isActiveHidden()).toBe(true);
+
+    bridge.textContainerUpgrade.mockClear();
+    const outcome = await scrollActiveReason(-1);
+    expect(outcome).toBe('revealed');
+    expect(isActiveHidden()).toBe(false);
+    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
+  });
+
+  it('scroll-up while hidden with no result in memory is a noop', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    // No result was set, but markActiveHidden refuses without pages — still
+    // exercise the "hidden + empty" branch directly via scrollActiveReason.
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    const outcome = await scrollActiveReason(-1);
+    expect(outcome).toBe('noop');
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+
+  it('scroll-down past the last page hides the result (preserved for re-reveal)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(twoClaims);
+    await scrollActiveReason(1); // last page
+
+    const outcome = await scrollActiveReason(1);
+    expect(outcome).toBe('hidden');
+    expect(isActiveHidden()).toBe(true);
+
+    // A follow-up swipe-up re-reveals the same last page the user was viewing.
+    const followUp = await scrollActiveReason(-1);
+    expect(followUp).toBe('revealed');
+    expect(isActiveHidden()).toBe(false);
+    expect(lastUpgradeByName('vl-claim')).toBe('2/2 · C2');
+  });
+
+  it('scroll-down while hidden is a noop', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(twoClaims);
+    markActiveHidden();
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+    const outcome = await scrollActiveReason(1);
+    expect(outcome).toBe('noop');
+    expect(isActiveHidden()).toBe(true);
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+
+  it('setLensResult clears the hidden flag', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(twoClaims);
+    markActiveHidden();
+    expect(isActiveHidden()).toBe(true);
+
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: 'q', verdict: 'TRUE', claim: 'fresh', reason: 'r' }],
+    });
+    expect(isActiveHidden()).toBe(false);
+  });
+});
+
 describe('menu spinner', () => {
   type TextBag = { payload: { containerName: string; content: string } };
   type RebuildBag = { payload: { textObject: TextBag[] } };
@@ -896,26 +992,29 @@ describe('line-aware pagination', () => {
   });
 
   it('paginates a long claim across header + claim-continuation pages (baseline)', async () => {
-    // baseline claim slot fits 1 line (~70 chars at 536px); a multi-line Danish
-    // primary line — like Meeting Prep can produce — overflows it.
+    // baseline claim slot fits 2 lines (~140 chars at 536px); a longer
+    // Meeting-Prep-style primary line still has to overflow it.
     await saveDiscreet(fakeSetLs, false);
     setActiveLayout('baseline');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
-    const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher.';
+    // Pretext wraps ~100 chars to 2 baseline-claim lines, so we need ≥105 chars
+    // to overflow into a continuation page; the 140-char clip() in formatLensResult
+    // means the unique tail marker must live before char 139.
+    const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette tilbud SLUTORD.';
     await setLensResult({
       type: 'fact-check',
       claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: 'short reason' }],
     });
 
-    // Page 0: claim slot has the FIRST chunk only (≤1 line); it does not contain
+    // Page 0: claim slot has the FIRST chunk only (≤2 lines); it does not contain
     // the tail of the claim.
     const claim0 = lastUpgradeByName('vl-claim')!;
     expect(claim0).toBeDefined();
     expect(longClaim).toContain(claim0);          // chunk is a prefix of the original
     expect(claim0.length).toBeLessThan(longClaim.length); // pagination actually fired
-    expect(claim0).not.toContain('matcher');      // tail must NOT be on page 0
+    expect(claim0).not.toContain('SLUTORD');      // tail must NOT be on page 0
 
     // Scroll forward — we should land on a claim-continuation page (scroll
     // layout, reason slot carries the rest of the claim). Walking forward
@@ -926,7 +1025,7 @@ describe('line-aware pagination', () => {
       bridge.rebuildPageContainer.mockClear();
       await scrollActiveReason(1);
       const reason = lastUpgradeByName('vl-reason');
-      if (reason && reason.includes('matcher')) {
+      if (reason && reason.includes('SLUTORD')) {
         foundTail = true;
         // First scroll-down crosses full→scroll, which rebuilds. Subsequent
         // same-layout scrolls don't.
@@ -942,7 +1041,10 @@ describe('line-aware pagination', () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
-    const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette niveau.';
+    // Pretext wraps ~100 chars to 2 baseline-claim lines, so we need ≥105 chars
+    // to overflow into a continuation page; the 140-char clip() in formatLensResult
+    // means the unique tail marker must live before char 139.
+    const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette tilbud SLUTORD.';
     const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(40);
     await setLensResult({
       type: 'fact-check',
@@ -963,7 +1065,7 @@ describe('line-aware pagination', () => {
       const next = lastUpgradeByName('vl-reason');
       if (!next) break;
       allReasonContents.push(next);
-      if (next.includes('matcher')) {
+      if (next.includes('SLUTORD')) {
         sawClaimTail = true;
         if (!sawReasonText) claimTailBeforeReason = true;
       }
@@ -993,12 +1095,11 @@ describe('line-aware pagination', () => {
     // Page 0's claim slot should hold the entire claim (no continuation needed).
     const claim0 = lastUpgradeByName('vl-claim')!;
     expect(claim0).toBe(claim);
-    // And scroll forward should be a no-op since reason is also 1 page.
-    bridge.textContainerUpgrade.mockClear();
-    bridge.rebuildPageContainer.mockClear();
-    await scrollActiveReason(1);
-    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
-    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+    // The result has a single page (no claim continuation, no reason
+    // continuation), so swipe-down past it hides the answer rather than
+    // no-op'ing — the "no more pages to scroll" outcome.
+    const outcome = await scrollActiveReason(1);
+    expect(outcome).toBe('hidden');
   });
 
   it('history-detail entry hop still fires at the flat-page edges', async () => {
