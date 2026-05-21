@@ -416,11 +416,11 @@ export const SettingsView: Component = () => {
           </span>
         </div>
         <ul class="history-list">
-          <For each={claimEntries}>{(entry) => renderRow(entry, false)}</For>
-          <Show when={summaryEntries.length > 0}>
+          <For each={summaryEntries}>{(entry) => renderRow(entry, true)}</For>
+          <Show when={summaryEntries.length > 0 && claimEntries.length > 0}>
             <li class="history-row-divider" aria-hidden="true" />
           </Show>
-          <For each={summaryEntries}>{(entry) => renderRow(entry, true)}</For>
+          <For each={claimEntries}>{(entry) => renderRow(entry, false)}</For>
         </ul>
       </div>
     );
