@@ -58,6 +58,24 @@ export interface MeetingPrepSection {
   body: string;
 }
 
+/**
+ * Optional one-line user intent + perspective passed alongside sections. When
+ * set they steer Gemini's answer toward an outcome and orient its follow-ups
+ * to the user's side of the conversation. Both default to empty strings —
+ * absence means "not configured" and the prompt omits the perspective block.
+ */
+export interface MeetingPrepPayload {
+  /** What the user is trying to achieve in this meeting. Free text, capped at save time. */
+  goal: string;
+  /** Which side of the conversation the user is on (Buyer / Seller / Candidate / Interviewer / custom). Free string. */
+  role: string;
+  sections: MeetingPrepSection[];
+}
+
+/** Preset role chips offered in the UI. The committed value is still a plain string. */
+export const MEETING_PREP_ROLE_PRESETS = ['Buyer', 'Seller', 'Candidate', 'Interviewer'] as const;
+export type MeetingPrepRolePreset = (typeof MEETING_PREP_ROLE_PRESETS)[number];
+
 /** One entry in the in-memory session history. */
 export interface HistoryEntry {
   id: string;

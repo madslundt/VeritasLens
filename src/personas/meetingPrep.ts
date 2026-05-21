@@ -38,18 +38,27 @@ export function resolveAttachmentLabels(attachments: MeetingPrepSection[]): stri
   });
 }
 
-const BASE_PROMPT = `You are VeritasLens, a real-time meeting assistant for smart glasses.
-
-The user is in a live meeting. Before the meeting they prepared written context — general notes about the meeting and, optionally, one or more labeled attachments (specific documents, contract excerpts, prepared questions). Both are shown below. They just provided a short audio clip of what was said in the meeting and tapped for help.
+const BASE_PROMPT = `You are VeritasLens, a real-time meeting assistant for smart glasses. The user is in a live meeting. Before it they prepared written context — general notes and 0+ labeled attachments — and just tapped after a short audio clip.
 
 Your job:
-1. Produce ONE concise primary answer (≤90 chars — must fit two short lines on a smart-glasses HUD) that responds to what was just said, grounded in the prepared context. Be specific, not generic. If the audio doesn't ask a clear question, infer what would help and answer it. Put elaboration in "detail", not "answer".
-2. Optionally include a short supporting detail (≤200 chars) — a number, clause reference, comparison, or contrast that gives the answer weight. This is where longer reasoning goes.
-3. Optionally suggest 0–3 follow-up prompts (≤110 chars each — also two short HUD lines) the user should ask the OTHER PARTY in the meeting (the counterparty, banker, interviewer, etc.) — not the user themselves. Order by priority. Skip any that don't add real value — fewer is better than padding.
-   CRITICAL: Do NOT suggest a follow-up whose answer is already present in the prepared context. If the context already answers something relevant, fold that answer into the primary answer or detail instead of phrasing it as a question for the user to ask. A good follow-up surfaces information the user does NOT already have — it pushes the other party for a number, clause, deadline, or commitment that the prep doesn't contain.
-4. When the answer or a follow-up draws on a specific ATTACHMENT, set its "source" field to the matching attachment label (exact match). Omit "source" when the response comes from the general notes or your own knowledge — the general notes are unlabeled and never get a source attribution.
+1. Produce ONE specific primary answer (≤90 chars) grounded in the prepared context. Put elaboration in \`detail\`, not \`answer\`. If \`YOUR PERSPECTIVE\` is set, the answer must advance the user's GOAL viewed from their ROLE.
+2. Optionally include a supporting \`detail\` (≤200 chars) — a number, clause reference, comparison, or contrast.
+3. Optionally suggest 0–3 follow-ups (≤110 chars each), in priority order, that the user should ask the OTHER PARTY (counterparty, banker, interviewer). Skip padding — fewer is better. Never suggest a follow-up the prepared context already answers — fold that answer into \`answer\` or \`detail\` instead. Good follow-ups extract numbers, clauses, deadlines, or commitments the prep does NOT contain. If \`YOUR PERSPECTIVE\` is set, frame follow-ups as questions the user (in their ROLE) would put to the OTHER PARTY.
+4. Set \`source\` only when drawing from a labeled attachment; never set it for general notes or your own knowledge.
 
-Output strict JSON matching the provided schema. Do not add prose outside JSON.`;
+Output strict JSON matching the provided schema. No prose outside JSON.`;
+
+/**
+ * One generic example anchoring the JSON shape and rule 3's "fold answered
+ * questions into the answer, don't echo them as follow-ups" behavior. Kept
+ * hardcoded (not templated on user input) so the model sees the same anchor
+ * regardless of role/goal — templating risks style leakage and degenerate
+ * cases when those fields are unset.
+ */
+const FEW_SHOT_EXAMPLE = `EXAMPLE (illustrative only — do not echo):
+Heard: "Our current rate is 4.8%. We can offer you 4.2% if you sign today."
+Prep: { notes: "Renegotiating mortgage rate", Bank contract: "Current rate 4.8%, 25-year term." }
+Output: {"answer":"4.2% is below your 4.8% — but ask for the lock window.","detail":"Saves ~€120/month at current balance; check if 4.2% is fixed and for how long.","followUps":[{"prompt":"Is 4.2% fixed, and for how many years?"},{"prompt":"Any prepayment penalty at the new rate?"}],"source":"Bank contract"}`;
 
 /** Split sections into the general slot + non-empty attachments. */
 function partition(sections: MeetingPrepSection[]): {
@@ -61,15 +70,45 @@ function partition(sections: MeetingPrepSection[]): {
   return { generalBody, attachments };
 }
 
+export interface MeetingPrepPromptInputs {
+  lang: LanguageCode;
+  sections: MeetingPrepSection[];
+  /** Optional one-line outcome the user wants from this meeting. Empty = unset. */
+  goal?: string;
+  /** Optional perspective string (e.g. "Buyer"). Empty = unset. */
+  role?: string;
+}
+
+export function buildMeetingPrepPrompt(input: MeetingPrepPromptInputs): string;
+// Legacy positional signature kept for backward compatibility with any code
+// (or tests) that still calls it as `(lang, sections)` without the perspective
+// fields. Resolves to an empty goal/role.
 export function buildMeetingPrepPrompt(
   lang: LanguageCode,
   sections: MeetingPrepSection[],
+): string;
+export function buildMeetingPrepPrompt(
+  a: LanguageCode | MeetingPrepPromptInputs,
+  b?: MeetingPrepSection[],
 ): string {
-  const langName = LANGUAGES[lang] ?? 'English';
-  const { generalBody, attachments } = partition(sections);
+  const input: MeetingPrepPromptInputs =
+    typeof a === 'string' ? { lang: a, sections: b ?? [] } : a;
+  const langName = LANGUAGES[input.lang] ?? 'English';
+  const { generalBody, attachments } = partition(input.sections);
   const labels = resolveAttachmentLabels(attachments);
+  const goal = (input.goal ?? '').trim();
+  const role = (input.role ?? '').trim();
 
-  const parts: string[] = [BASE_PROMPT, '\n\nPREPARED CONTEXT:'];
+  const parts: string[] = [BASE_PROMPT];
+
+  if (goal || role) {
+    const perspectiveLines: string[] = ['\n\nYOUR PERSPECTIVE:'];
+    if (role) perspectiveLines.push(`- Role: ${role}`);
+    if (goal) perspectiveLines.push(`- Goal: ${goal}`);
+    parts.push(perspectiveLines.join('\n'));
+  }
+
+  parts.push('\n\n', FEW_SHOT_EXAMPLE, '\n\nPREPARED CONTEXT:');
 
   if (generalBody) {
     parts.push(`\n\n# Notes (general — not a citable source)\n${generalBody}`);

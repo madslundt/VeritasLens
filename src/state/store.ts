@@ -16,6 +16,7 @@ import {
   type HistoryEntry,
   type LanguageCode,
   type LensResult,
+  type MeetingPrepPayload,
   type MeetingPrepSection,
   type Settings,
 } from '@/types';
@@ -38,6 +39,10 @@ const MEETING_PREP_KEY = 'veritaslens.meetingPrep';
 export const MEETING_PREP_BYTE_BUDGET = 50 * 1024;
 /** Per-label character cap, applied at write time. */
 export const MEETING_PREP_LABEL_MAX = 80;
+/** Cap on the optional Goal field (one-line outcome statement). */
+export const MEETING_PREP_GOAL_MAX = 200;
+/** Cap on the optional Role field, including custom "Other" text. */
+export const MEETING_PREP_ROLE_MAX = 40;
 
 export const [appMode, setAppMode] = createSignal<AppMode>('settings');
 export const [appPhase, setAppPhase] = createSignal<AppPhase>('booting');
@@ -49,6 +54,23 @@ export const [deviceStatus, setDeviceStatus] = createSignal<DeviceStatus | null>
 export const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
 export const [sessionHistory, setSessionHistory] = createSignal<HistoryEntry[]>([]);
 export const [meetingPrepSections, setMeetingPrepSectionsSignal] = createSignal<MeetingPrepSection[]>([]);
+export const [meetingPrepGoal, setMeetingPrepGoalSignal] = createSignal<string>('');
+export const [meetingPrepRole, setMeetingPrepRoleSignal] = createSignal<string>('');
+
+/**
+ * Snapshot of all meeting-prep config inputs together. Use this from lifecycle
+ * (read-fresh per analysis) so the prompt builder doesn't need to chain three
+ * separate accessors. Sections and the two optional perspective fields are
+ * independently optional; goal/role being set without sections is not enough
+ * to consider the lens "configured" (see meetingPrepIsConfigured).
+ */
+export function meetingPrepConfig(): MeetingPrepPayload {
+  return {
+    goal: meetingPrepGoal(),
+    role: meetingPrepRole(),
+    sections: meetingPrepSections(),
+  };
+}
 
 const [settings, setSettings] = createSignal<Settings>({
   geminiApiKey: '',
@@ -303,18 +325,26 @@ export async function loadMeetingPrepSections(
     if (!raw) return;
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object') return;
-    const sectionsRaw = (parsed as Record<string, unknown>)['sections'];
-    if (!Array.isArray(sectionsRaw)) return;
-    const sections: MeetingPrepSection[] = [];
-    for (const s of sectionsRaw) {
-      if (!s || typeof s !== 'object') continue;
-      const rec = s as Record<string, unknown>;
-      const id = typeof rec['id'] === 'string' && rec['id'] ? rec['id'] : newSectionId();
-      const label = typeof rec['label'] === 'string' ? rec['label'] : '';
-      const body = typeof rec['body'] === 'string' ? rec['body'] : '';
-      sections.push({ id, label, body });
+    const rec = parsed as Record<string, unknown>;
+    const sectionsRaw = rec['sections'];
+    if (Array.isArray(sectionsRaw)) {
+      const sections: MeetingPrepSection[] = [];
+      for (const s of sectionsRaw) {
+        if (!s || typeof s !== 'object') continue;
+        const r = s as Record<string, unknown>;
+        const id = typeof r['id'] === 'string' && r['id'] ? r['id'] : newSectionId();
+        const label = typeof r['label'] === 'string' ? r['label'] : '';
+        const body = typeof r['body'] === 'string' ? r['body'] : '';
+        sections.push({ id, label, body });
+      }
+      setMeetingPrepSectionsSignal(sections);
     }
-    setMeetingPrepSectionsSignal(sections);
+    // Optional perspective fields — added in a later release, so missing keys
+    // and non-string values both coerce to '' (= not configured).
+    const rawGoal = rec['goal'];
+    setMeetingPrepGoalSignal(typeof rawGoal === 'string' ? rawGoal.slice(0, MEETING_PREP_GOAL_MAX) : '');
+    const rawRole = rec['role'];
+    setMeetingPrepRoleSignal(typeof rawRole === 'string' ? rawRole.slice(0, MEETING_PREP_ROLE_MAX) : '');
   } catch {
     // corrupt or missing — start fresh
   }
@@ -328,9 +358,9 @@ export async function loadMeetingPrepSections(
  */
 export async function saveMeetingPrepSections(
   setLs: SetLs,
-  sections: MeetingPrepSection[],
+  payload: MeetingPrepPayload,
 ): Promise<{ ok: boolean; error?: string }> {
-  const normalized: MeetingPrepSection[] = sections.map((s, i) => ({
+  const normalized: MeetingPrepSection[] = payload.sections.map((s, i) => ({
     id: s.id || newSectionId(),
     // Section 0 is the general-context slot — unlabeled by convention so it
     // never appears as a citable source. Force-clear any stale label that
@@ -338,8 +368,10 @@ export async function saveMeetingPrepSections(
     label: i === 0 ? '' : s.label.slice(0, MEETING_PREP_LABEL_MAX),
     body: s.body,
   }));
-  const payload = JSON.stringify({ sections: normalized });
-  const bytes = utf8ByteLength(payload);
+  const goal = (payload.goal ?? '').slice(0, MEETING_PREP_GOAL_MAX);
+  const role = (payload.role ?? '').slice(0, MEETING_PREP_ROLE_MAX);
+  const serialized = JSON.stringify({ goal, role, sections: normalized });
+  const bytes = utf8ByteLength(serialized);
   if (bytes > MEETING_PREP_BYTE_BUDGET) {
     return {
       ok: false,
@@ -348,19 +380,34 @@ export async function saveMeetingPrepSections(
       )} KB.`,
     };
   }
-  const ok = await setLs(MEETING_PREP_KEY, payload);
-  if (ok) setMeetingPrepSectionsSignal(normalized);
+  const ok = await setLs(MEETING_PREP_KEY, serialized);
+  if (ok) {
+    setMeetingPrepSectionsSignal(normalized);
+    setMeetingPrepGoalSignal(goal);
+    setMeetingPrepRoleSignal(role);
+  }
   return { ok };
 }
 
-/** True when at least one section has a non-empty body — required for the lens to run. */
+/**
+ * True when at least one section has a non-empty body — required for the lens
+ * to run. Goal/role alone do not count: without notes or attachments the
+ * model has nothing concrete to ground answers in, so we keep the existing
+ * empty-context guard semantics.
+ */
 export function meetingPrepIsConfigured(): boolean {
   return meetingPrepSections().some((s) => s.body.trim().length > 0);
 }
 
 /** Total UTF-8 bytes of the current meeting-prep payload (used by the editor UI). */
 export function meetingPrepUsedBytes(): number {
-  return utf8ByteLength(JSON.stringify({ sections: meetingPrepSections() }));
+  return utf8ByteLength(
+    JSON.stringify({
+      goal: meetingPrepGoal(),
+      role: meetingPrepRole(),
+      sections: meetingPrepSections(),
+    }),
+  );
 }
 
 export function newSectionId(): string {
