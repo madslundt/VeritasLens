@@ -15,6 +15,7 @@ import {
   setModelsLoading,
   settings,
 } from './state/store';
+
 import './main.css';
 
 async function bootstrap(): Promise<void> {
@@ -58,7 +59,6 @@ async function bootstrap(): Promise<void> {
     // Always push a page to the glasses on boot. If the user is configured
     // they get the persona picker; otherwise they get a "configure on phone"
     // message so the HUD is never silently blank.
-    void settings; // signal access kept warm for future config-change reactivity
     try {
       await startHudRuntime();
     } catch (err) {

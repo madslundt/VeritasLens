@@ -52,6 +52,7 @@ import {
   meetingPrepIsConfigured,
   meetingPrepSections,
   pushDebugEvent,
+  pushHistoryEntries,
   pushHistoryEntry,
   sessionHistory,
   setActivePersona,
@@ -75,6 +76,11 @@ let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
 // cancel its fetch + base64 work instead of letting it run to completion and
 // push stale state into the next session.
 let autoSummaryInflight: AbortController | null = null;
+// Detached final-summary call (fires after leaveActiveSession). Held at module
+// scope so a new session entering — or runtime stop — can cancel an in-flight
+// final summary and release its ~19 MB WAV closure instead of letting the
+// request linger past teardown.
+let finalSummaryInflight: AbortController | null = null;
 // In-memory running summaries accumulated during a session by the auto-summary
 // timer. Cleared on session enter / leave / runtime stop. Never persisted on
 // their own — they are folded into the single end-of-session entry by
@@ -146,6 +152,10 @@ export async function stopHudRuntime(): Promise<void> {
   autoSummaryInflight?.abort();
   autoSummaryInflight = null;
   stopAutoSummaryTimer();
+  // Same reasoning for the detached final-summary call: abort it so its WAV
+  // closure can be GC'd immediately rather than living until Gemini responds.
+  finalSummaryInflight?.abort();
+  finalSummaryInflight = null;
   // System shutdown deliberately discards any accumulated intermediate
   // summaries — firing a Gemini call here would race the runtime teardown
   // (no reliable way to complete the fetch + localStorage write), so the
@@ -155,6 +165,7 @@ export async function stopHudRuntime(): Promise<void> {
   unsubscribeEvents = null;
   inflight?.abort();
   inflight = null;
+  analyzing = false;
   buffer?.clear();
   buffer = null;
   try { await getBridge().audioControl(false); } catch { /* ignore */ }
@@ -190,13 +201,27 @@ async function requestHostExitConfirm(): Promise<void> {
   await getBridge().shutDownPageContainer(1);
 }
 
-function isLifecycleSysEvent(et: OsEventTypeList | undefined): boolean {
+function isHandledLifecycleSysEvent(et: OsEventTypeList | undefined): boolean {
+  // Narrowed to the two events the switch below actually handles. The
+  // foreground enter/exit events are deliberately not listed — they fall
+  // through to the gesture / no-op path so adding handling later is just a
+  // new case rather than a guard mismatch.
   return (
-    et === OsEventTypeList.FOREGROUND_EXIT_EVENT ||
-    et === OsEventTypeList.FOREGROUND_ENTER_EVENT ||
     et === OsEventTypeList.SYSTEM_EXIT_EVENT ||
     et === OsEventTypeList.ABNORMAL_EXIT_EVENT
   );
+}
+
+/** Centralised handler for unhandled rejections from `void`-dispatched async
+ *  page handlers. Without this, a bridge.rebuild rejection inside e.g.
+ *  handleMenuGesture surfaces as an unhandled rejection at the WebView level,
+ *  which is a hard crash on strict platforms. Logged to the debug ring so the
+ *  failure stays observable in the settings view. */
+function logDispatchError(label: string, err: unknown): void {
+  pushDebugEvent({
+    label,
+    detail: err instanceof Error ? err.message : String(err),
+  });
 }
 
 function handleEvent(event: EvenHubEvent): void {
@@ -204,10 +229,12 @@ function handleEvent(event: EvenHubEvent): void {
     console.info('[veritaslens] event', summarize(event));
   }
 
-  if (event.sysEvent && isLifecycleSysEvent(event.sysEvent.eventType)) {
+  if (event.sysEvent && isHandledLifecycleSysEvent(event.sysEvent.eventType)) {
     switch (event.sysEvent.eventType) {
       case OsEventTypeList.SYSTEM_EXIT_EVENT:
-      case OsEventTypeList.ABNORMAL_EXIT_EVENT: void stopHudRuntime(); return;
+      case OsEventTypeList.ABNORMAL_EXIT_EVENT:
+        stopHudRuntime().catch((err) => logDispatchError('stop-runtime-fail', err));
+        return;
     }
   }
 
@@ -216,11 +243,17 @@ function handleEvent(event: EvenHubEvent): void {
   if (event.textEvent) {
     const type = event.textEvent.eventType ?? 0;
     if (currentHudPage() === 'history-detail') {
-      if (type === OsEventTypeList.SCROLL_TOP_EVENT) void scrollHistoryDetail(-1);
-      else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) void scrollHistoryDetail(1);
+      if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
+        scrollHistoryDetail(-1).catch((err) => logDispatchError('scroll-history-fail', err));
+      } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+        scrollHistoryDetail(1).catch((err) => logDispatchError('scroll-history-fail', err));
+      }
     } else if (currentHudPage() === 'active') {
-      if (type === OsEventTypeList.SCROLL_TOP_EVENT) void scrollActiveReason(-1);
-      else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) void scrollActiveReason(1);
+      if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
+        scrollActiveReason(-1).catch((err) => logDispatchError('scroll-active-fail', err));
+      } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+        scrollActiveReason(1).catch((err) => logDispatchError('scroll-active-fail', err));
+      }
     }
     return;
   }
@@ -236,19 +269,30 @@ function handleEvent(event: EvenHubEvent): void {
   // Everywhere else it starts analysis, or cancels an in-flight one.
   if (gesture.type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
     if (page === 'picker' || page === 'unconfigured') {
-      void requestHostExitConfirm();
+      requestHostExitConfirm().catch((err) => logDispatchError('host-exit-fail', err));
       return;
     }
-    if (analyzing) { inflight?.abort(); return; }
-    void runAnalysis();
+    if (analyzing) {
+      // Cancel the in-flight analysis. Null `inflight` right here (in addition
+      // to the controller-identity check in runAnalysis's finally) so the
+      // analyzing flag's release isn't gated on whether a NEW analysis has
+      // raced in between abort and finally — otherwise the user can get stuck
+      // unable to start a new analysis until they leave the session.
+      const c = inflight;
+      inflight = null;
+      analyzing = false;
+      c?.abort();
+      return;
+    }
+    runAnalysis().catch((err) => logDispatchError('run-analysis-fail', err));
     return;
   }
 
-  if (page === 'picker') void handlePickerEvent(gesture);
-  else if (page === 'active') void handleActiveGesture(gesture);
-  else if (page === 'menu') void handleMenuGesture(gesture);
-  else if (page === 'history-list') void handleHistoryListGesture(gesture);
-  else if (page === 'history-detail') void handleHistoryDetailGesture(gesture);
+  if (page === 'picker') handlePickerEvent(gesture).catch((err) => logDispatchError('picker-fail', err));
+  else if (page === 'active') handleActiveGesture(gesture).catch((err) => logDispatchError('active-fail', err));
+  else if (page === 'menu') handleMenuGesture(gesture).catch((err) => logDispatchError('menu-fail', err));
+  else if (page === 'history-list') handleHistoryListGesture(gesture).catch((err) => logDispatchError('history-list-fail', err));
+  else if (page === 'history-detail') handleHistoryDetailGesture(gesture).catch((err) => logDispatchError('history-detail-fail', err));
 }
 
 async function handlePickerEvent(g: Gesture): Promise<void> {
@@ -342,6 +386,11 @@ async function handleHistoryDetailGesture(g: Gesture): Promise<void> {
 async function enterActiveSession(personaId: PersonaId): Promise<void> {
   const persona = getPersona(personaId);
   if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
+  // A previous session may have left a detached final-summary call in flight.
+  // Abort it so its WAV closure is released and so its late history-write
+  // can't interleave with this fresh session's writes.
+  finalSummaryInflight?.abort();
+  finalSummaryInflight = null;
   setActivePersona(personaId);
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   sessionStartTime = Date.now();
@@ -403,15 +452,23 @@ async function leaveActiveSession(): Promise<void> {
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 let spinnerTimer: ReturnType<typeof setInterval> | null = null;
 let spinnerPrefix = '';
+// Generation counter bumped by stopSpinner so a tick callback already
+// mid-flight when clearInterval lands discards its async setStatus /
+// setMenuSpinner writes instead of overwriting the post-stop "displaying"
+// status. Without this guard a single straggler tick can briefly revert the
+// verdict back to a spinner frame.
+let spinnerGen = 0;
 
 function startSpinner(): void {
   if (spinnerTimer) return;
   let i = 0;
+  const gen = spinnerGen;
   // Push an initial frame immediately so the menu/status slot doesn't stay
   // blank for up to one tick after analysis begins.
   void setStatus(spinnerPrefix ? `${spinnerPrefix}${SPINNER_FRAMES[i]}` : ` ${SPINNER_FRAMES[i]}  `);
   void setMenuSpinner(SPINNER_FRAMES[i]!);
   spinnerTimer = setInterval(() => {
+    if (gen !== spinnerGen) return; // stale tick after stopSpinner
     i = (i + 1) % SPINNER_FRAMES.length;
     const frame = SPINNER_FRAMES[i];
     void setStatus(spinnerPrefix ? `${spinnerPrefix}${frame}` : ` ${frame}  `);
@@ -423,6 +480,7 @@ function stopSpinner(): void {
   if (spinnerTimer) clearInterval(spinnerTimer);
   spinnerTimer = null;
   spinnerPrefix = '';
+  spinnerGen++;
   void setMenuSpinner('');
 }
 
@@ -646,8 +704,11 @@ async function runAnalysis(): Promise<void> {
     if (autoSelected) result.autoSelected = true;
     stopSpinner();
     setStateResult(result);
-    await Promise.all(
-      splitResultByClaim(result).map((single) => pushHistoryEntry({
+    // Single atomic write for all per-claim history entries — see
+    // pushHistoryEntries for the race it prevents (concurrent persist calls
+    // overwriting each other with stale snapshots).
+    await pushHistoryEntries(
+      splitResultByClaim(result).map((single) => ({
         sessionId: currentSessionId,
         lensId: analysisPersona.id,
         lensName: analysisPersona.name,
@@ -655,7 +716,8 @@ async function runAnalysis(): Promise<void> {
         badge: extractBadge(single),
         quote: extractQuote(single),
         result: single,
-      }, (k, v) => getBridge().setLocalStorage(k, v))),
+      })),
+      (k, v) => getBridge().setLocalStorage(k, v),
     );
     await reloadHistoryFromStorage();
     await setLensResult(result);
@@ -665,6 +727,10 @@ async function runAnalysis(): Promise<void> {
   } catch (err) {
     stopSpinner();
     if ((err as Error)?.name === 'AbortError') {
+      // User cancelled via double-tap (which nulls `inflight` and clears
+      // `analyzing` at the call site), or a back-to-back analysis aborted this
+      // one. Either way the finally's identity check is enough to clear our
+      // own controller — no extra reset needed here.
       await setStatus('listening');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('listening');
@@ -684,7 +750,9 @@ async function runAnalysis(): Promise<void> {
     // Identity check prevents clobbering a newer controller spawned by a
     // back-to-back analysis. Nulling inflight here releases the AbortController
     // and, through its closure, the WAV snapshot that can be up to ~19 MB at
-    // the maximum buffer duration.
+    // the maximum buffer duration. The cancel path in handleEvent also clears
+    // `analyzing`/`inflight` directly so a stuck flag can't strand the user
+    // even if the controller-identity check below misses on a race.
     if (inflight === controller) {
       analyzing = false;
       inflight = null;
@@ -805,27 +873,92 @@ function captureFinalSummaryInputs(): FinalSummaryInputs | null {
 }
 
 /**
+ * Build a session-summary LensResult from the accumulated intermediate ticks
+ * alone, when there's no fresh audio at session end to send to Gemini. Uses
+ * the most-recent intermediate as the headline (its title, summary, quote),
+ * then unions topics and key points across every tick. Stops the user from
+ * losing an entire session's auto-summary work just because the buffer
+ * happened to be empty at exit time (very short trailing tick, mic glitch).
+ */
+function synthesizeSummaryFromIntermediates(
+  intermediates: FinalSummaryInputs['intermediates'],
+): Extract<LensResult, { type: 'session-summary' }> | null {
+  if (intermediates.length === 0) return null;
+  const last = intermediates[intermediates.length - 1]!;
+  // Union topics / key points across all ticks, de-duplicated preserving
+  // first-seen order. Caps keep the result bounded for the history budget.
+  const seenTopics = new Set<string>();
+  const topics: string[] = [];
+  const seenKey = new Set<string>();
+  const keyPoints: string[] = [];
+  for (const seg of intermediates) {
+    for (const t of seg.topics ?? []) {
+      const k = t.trim();
+      if (k && !seenTopics.has(k)) { seenTopics.add(k); topics.push(k); }
+    }
+    for (const p of seg.keyPoints ?? []) {
+      const k = p.trim();
+      if (k && !seenKey.has(k)) { seenKey.add(k); keyPoints.push(k); }
+    }
+  }
+  return {
+    type: 'session-summary',
+    title: last.title ?? 'Summary of conversation',
+    summary: last.summary,
+    topics: topics.slice(0, 20),
+    keyPoints: keyPoints.slice(0, 40),
+    quote: last.quote,
+  };
+}
+
+/**
  * Generates one consolidated end-of-session summary using accumulated
  * intermediate summaries as prior context plus whatever audio was buffered
  * when the user exited. Pushes exactly one history entry on success.
  *
  * All inputs are captured by the caller synchronously before buffer teardown,
  * so this can safely run in the background after leaveActiveSession returns.
+ * Tracked via finalSummaryInflight so a new session or runtime stop can
+ * abort the network call and release its WAV closure.
  *
  * Best-effort; failures land in pushDebugEvent and never throw.
  */
 async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
+  const controller = new AbortController();
+  finalSummaryInflight = controller;
   try {
+    // Empty-buffer fallback: synthesize a history entry from the intermediates
+    // alone rather than discarding the whole session. Skips the Gemini call
+    // entirely — there's no audio to send and the intermediates already cover
+    // the session content.
+    if (!inputs.wav) {
+      const synth = synthesizeSummaryFromIntermediates(inputs.intermediates);
+      if (!synth) {
+        pushDebugEvent({
+          label: 'final-summary-skip',
+          detail: 'no audio and no intermediates at session end',
+        });
+        return;
+      }
+      pushDebugEvent({
+        label: 'final-summary-synth',
+        detail: `no audio at session end; synthesized from ${inputs.intermediates.length} intermediate tick(s)`,
+      });
+      await pushHistoryEntry({
+        sessionId: inputs.sessionId,
+        lensId: SESSION_SUMMARY_ID,
+        lensName: SESSION_SUMMARY_NAME,
+        question: extractQuestion(synth),
+        badge: 'SUMMARY',
+        quote: synth.quote ?? '',
+        result: synth,
+      }, (k, v) => getBridge().setLocalStorage(k, v));
+      await reloadHistoryFromStorage();
+      return;
+    }
     const prompt = buildSessionSummaryPrompt(inputs.language, {
       previousSummaries: inputs.intermediates,
     });
-    if (!inputs.wav) {
-      pushDebugEvent({
-        label: 'final-summary-skip',
-        detail: 'no audio buffer at session end',
-      });
-      return;
-    }
     // Pull wav off the inputs object so the network call holds the last
     // reference. After callLens resolves we drop it immediately, freeing the
     // ~36 MB linear PCM / WAV pair for GC during JSON parsing rather than
@@ -838,7 +971,9 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
       prompt,
       schema: SESSION_SUMMARY_SCHEMA,
       model: inputs.model,
+      signal: controller.signal,
     });
+    if (controller.signal.aborted) return;
     const result = parseSessionSummaryResponse(rawText);
     if (result.type !== 'session-summary') return;
     // Fall back to the most-recent intermediate quote if the final response
@@ -857,10 +992,13 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
     }, (k, v) => getBridge().setLocalStorage(k, v));
     await reloadHistoryFromStorage();
   } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return;
     pushDebugEvent({
       label: 'final-summary-fail',
       detail: err instanceof Error ? err.message : String(err),
     });
+  } finally {
+    if (finalSummaryInflight === controller) finalSummaryInflight = null;
   }
 }
 

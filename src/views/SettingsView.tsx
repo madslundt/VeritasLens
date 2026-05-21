@@ -4,6 +4,7 @@ import {
   MEETING_PREP_BYTE_BUDGET,
   MEETING_PREP_LABEL_MAX,
   availableModels,
+  computeMeetingPrepBytes,
   deviceStatus,
   meetingPrepSections,
   modelsLoading,
@@ -236,21 +237,9 @@ export const SettingsView: Component = () => {
     if (prepSavedFadeTimer) clearTimeout(prepSavedFadeTimer);
   });
 
-  const prepUsedBytes = createMemo(() => {
-    // Mirrors the saver's measurement so the inline counter matches what the
-    // cap check will see on the next debounce tick.
-    let bytes = 2 + '"sections":'.length + 2; // {"sections":[]}
-    const sections = prepDraft();
-    sections.forEach((s, i) => {
-      bytes += 1; // {
-      bytes += `"id":${JSON.stringify(s.id)},`.length;
-      bytes += `"label":${JSON.stringify(s.label)},`.length;
-      bytes += `"body":${JSON.stringify(s.body)}`.length;
-      bytes += 1; // }
-      if (i < sections.length - 1) bytes += 1; // ,
-    });
-    return bytes;
-  });
+  // Shared helper with the store so the inline counter and the cap check
+  // never drift — adding a field to MeetingPrepSection updates both at once.
+  const prepUsedBytes = createMemo(() => computeMeetingPrepBytes(prepDraft()));
 
   /** Whether the general slot (row 0) has any content. */
   const prepGeneralSet = createMemo(
@@ -366,7 +355,7 @@ export const SettingsView: Component = () => {
     setTestMessage('');
     try {
       const { runSelfTest } = await import('@/llm/gemini');
-      const result = await runSelfTest(settings().geminiApiKey, draftModel(), draftLanguage());
+      const result = await runSelfTest(settings().geminiApiKey, draftModel());
       setTestState('ok');
       setTestMessage(`Reachable · ${result.latencyMs} ms`);
     } catch (err) {
@@ -396,7 +385,7 @@ export const SettingsView: Component = () => {
         </button>
         <Show when={expandedEntryId() === entry.id}>
           <div class="history-detail">
-            <Show when={entry.result.autoSelected}>
+            <Show when={entry.result.autoSelected && entry.lensName}>
               <p class="history-detail-lens">{entry.lensName}</p>
             </Show>
             <p class="history-detail-question">{entry.question}</p>
@@ -449,7 +438,9 @@ export const SettingsView: Component = () => {
                 </button>
                 <Show when={expandedEntryId() === entry.id}>
                   <div class="history-detail">
-                    <p class="history-detail-lens">{entry.lensName}</p>
+                    <Show when={entry.lensName}>
+                      <p class="history-detail-lens">{entry.lensName}</p>
+                    </Show>
                     <p class="history-detail-question">{entry.question}</p>
                     <pre>{formatResultText(entry.result)}</pre>
                   </div>

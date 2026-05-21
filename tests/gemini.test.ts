@@ -53,8 +53,8 @@ describe('parseRetryAfterMs', () => {
   it('returns null on negative seconds', () => {
     expect(parseRetryAfterMs('-1')).toBeNull();
   });
-  it('caps very large values at 30 s', () => {
-    expect(parseRetryAfterMs('600')).toBe(30_000);
+  it('caps very large values at 8 s', () => {
+    expect(parseRetryAfterMs('600')).toBe(8_000);
   });
 });
 
@@ -71,9 +71,9 @@ describe('parseGoogleRetryDelayMs', () => {
   it('returns null when no retryDelay is present', () => {
     expect(parseGoogleRetryDelayMs(JSON.stringify({ error: { details: [] } }))).toBeNull();
   });
-  it('caps the delay at 30 s', () => {
+  it('caps the delay at 8 s', () => {
     const body = JSON.stringify({ error: { details: [{ retryDelay: '999s' }] } });
-    expect(parseGoogleRetryDelayMs(body)).toBe(30_000);
+    expect(parseGoogleRetryDelayMs(body)).toBe(8_000);
   });
 });
 

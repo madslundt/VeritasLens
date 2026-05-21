@@ -130,7 +130,7 @@ export function getPersona(id: PersonaId): Persona | undefined {
  * kept as a separate function so future picker-only filtering has a single
  * call site to update.
  */
-export function getPickerPersonas(_bufferDuration: number): Persona[] {
+export function getPickerPersonas(): Persona[] {
   return personasSignal();
 }
 

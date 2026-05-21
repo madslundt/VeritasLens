@@ -97,20 +97,20 @@ beforeEach(() => {
 
 describe('personaAtIndex', () => {
   it('returns the persona at the given index (within picker list)', () => {
-    const list = getPickerPersonas(120);
+    const list = getPickerPersonas();
     const persona = personaAtIndex(1);
     expect(persona).not.toBeNull();
     expect(persona!.id).toBe(list[1]!.id);
   });
 
   it('falls back to the first persona when index is undefined / negative', () => {
-    const first = getPickerPersonas(120)[0]!;
+    const first = getPickerPersonas()[0]!;
     expect(personaAtIndex(undefined)!.id).toBe(first.id);
     expect(personaAtIndex(-5)!.id).toBe(first.id);
   });
 
   it('falls back to the first persona when index is out of range', () => {
-    const first = getPickerPersonas(120)[0]!;
+    const first = getPickerPersonas()[0]!;
     expect(personaAtIndex(999)!.id).toBe(first.id);
   });
 });

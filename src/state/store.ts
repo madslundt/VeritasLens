@@ -245,6 +245,17 @@ async function persistHistory(
       json = JSON.stringify(trimmed);
       bytes = utf8ByteLength(json);
     }
+    // A single entry larger than the entire budget is persisted as-is — losing
+    // it would discard the answer the user just received — but surface it in
+    // the debug log so the over-cap write is visible. Prior history was
+    // already discarded by the trim above; that loss is intrinsic to a
+    // single-entry overflow and not fixable here without truncating user data.
+    if (bytes > HISTORY_BYTE_BUDGET && trimmed.length === 1) {
+      pushDebugEvent({
+        label: 'history-oversized-entry',
+        detail: `single entry ${Math.round(bytes / 1024)}KB exceeds ${Math.round(HISTORY_BYTE_BUDGET / 1024)}KB cap`,
+      });
+    }
   }
   await setLs(HISTORY_KEY, json);
 }
@@ -259,11 +270,28 @@ export function pushHistoryEntry(
   entry: Omit<HistoryEntry, 'id' | 'timestamp'>,
   setLs?: (k: string, v: string) => Promise<boolean>
 ): Promise<void> {
-  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-  const next: HistoryEntry[] = [
-    ...sessionHistory(),
-    { id, timestamp: Date.now(), ...entry },
-  ].slice(-HISTORY_MAX_ENTRIES);
+  return pushHistoryEntries([entry], setLs);
+}
+
+/**
+ * Atomically append several entries in one read-modify-write of the signal
+ * and one persistHistory call. Lets multi-claim analyses persist N entries
+ * without N racing local-storage writes — out-of-order resolves between
+ * concurrent persist calls would otherwise let an earlier (shorter) write
+ * overwrite a later (complete) one and silently drop claims.
+ */
+export function pushHistoryEntries(
+  entries: Array<Omit<HistoryEntry, 'id' | 'timestamp'>>,
+  setLs?: (k: string, v: string) => Promise<boolean>
+): Promise<void> {
+  if (entries.length === 0) return Promise.resolve();
+  const ts = Date.now();
+  const fresh: HistoryEntry[] = entries.map((e, i) => ({
+    id: `${ts}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+    timestamp: ts,
+    ...e,
+  }));
+  const next: HistoryEntry[] = [...sessionHistory(), ...fresh].slice(-HISTORY_MAX_ENTRIES);
   setSessionHistory(next);
   return setLs ? persistHistory(setLs, next) : Promise.resolve();
 }
@@ -372,9 +400,18 @@ export function meetingPrepIsConfigured(): boolean {
   return meetingPrepSections().some((s) => s.body.trim().length > 0);
 }
 
+/**
+ * Total UTF-8 bytes that a given set of sections will occupy once persisted.
+ * Mirrors the exact JSON shape used by saveMeetingPrepSections so the editor's
+ * inline counter matches what the cap check will see on the next debounce.
+ */
+export function computeMeetingPrepBytes(sections: MeetingPrepSection[]): number {
+  return utf8ByteLength(JSON.stringify({ sections }));
+}
+
 /** Total UTF-8 bytes of the current meeting-prep payload (used by the editor UI). */
 export function meetingPrepUsedBytes(): number {
-  return utf8ByteLength(JSON.stringify({ sections: meetingPrepSections() }));
+  return computeMeetingPrepBytes(meetingPrepSections());
 }
 
 export function newSectionId(): string {

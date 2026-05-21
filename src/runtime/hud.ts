@@ -204,7 +204,7 @@ export function hasPendingActiveResult(): boolean { return pendingActiveResult !
 
 /** Look up the persona at the given index from the host event payload. */
 export function personaAtIndex(idx: number | undefined | null): Persona | null {
-  const list = getPickerPersonas(settings().bufferDuration);
+  const list = getPickerPersonas();
   const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
   return list[safe] ?? list[0] ?? null;
 }
@@ -444,14 +444,18 @@ let pickerHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
 export async function flashPickerHint(message: string, ms = 2500): Promise<void> {
   if (currentPage !== 'picker') return;
   if (pickerHintFlashTimer) clearTimeout(pickerHintFlashTimer);
+  // Capture the baseline hint at flash time rather than recomputing it from
+  // live signals in the timer callback — the picker layout for "now" is the
+  // correct thing to restore, even if a settings change has shifted the
+  // persona list during the 2.5 s flash window.
+  const list = getPickerPersonas();
+  const baseline = list.length > 1
+    ? 'Swipe ⇅ · Tap: start · Double-tap: exit'
+    : 'Tap: start · Double-tap: exit';
   await upgradeText(CONTAINER.pickerHint, NAME.pickerHint, message);
   pickerHintFlashTimer = setTimeout(() => {
     pickerHintFlashTimer = null;
     if (currentPage !== 'picker') return;
-    const list = getPickerPersonas(settings().bufferDuration);
-    const baseline = list.length > 1
-      ? 'Swipe ⇅ · Tap: start · Double-tap: exit'
-      : 'Tap: start · Double-tap: exit';
     void upgradeText(CONTAINER.pickerHint, NAME.pickerHint, baseline);
   }, ms);
 }
@@ -593,6 +597,27 @@ function badgeGlyph(badge: string): string {
 // ------- line-aware pagination -------------------------------------------
 
 /**
+ * Cached wrapper around `measureTextWrap`. The pagination binary search
+ * re-probes overlapping prefixes of the same (text, width) pair many times
+ * per claim; on the G2's constrained CPU each probe involves a font-metric
+ * lookup. The cache lives for the lifetime of one paginateText call (passed
+ * in explicitly so it can't leak across calls) and is keyed on width+text
+ * so multiple widths in flight don't collide.
+ */
+type WrapCache = Map<string, number>;
+
+function cachedLineCount(cache: WrapCache, text: string, innerW: number): number {
+  // Pre-pad the key with the width so two paginations at different widths
+  // sharing a cache (we never share, but the key is cheap) can't collide.
+  const key = `${innerW} ${text}`;
+  const hit = cache.get(key);
+  if (hit !== undefined) return hit;
+  const measured = measureTextWrap(text, innerW).lineCount;
+  cache.set(key, measured);
+  return measured;
+}
+
+/**
  * Split arbitrary text into screen-sized chunks. The first page uses the
  * tighter `firstLines` budget (it sits inside a smaller slot); subsequent
  * pages use the larger `scrollLines` budget (compact header above). Word
@@ -602,9 +627,10 @@ function paginateText(text: string, innerW: number, firstLines: number, scrollLi
   const pages: string[] = [];
   let remaining = text;
   let isFirst = true;
+  const cache: WrapCache = new Map();
   while (remaining.length > 0) {
     const maxLines = isFirst ? firstLines : scrollLines;
-    const { chunk, rest } = takeLines(remaining, innerW, maxLines);
+    const { chunk, rest } = takeLines(remaining, innerW, maxLines, cache);
     pages.push(chunk);
     if (rest.length === remaining.length) break; // safety: no forward progress
     remaining = rest;
@@ -613,9 +639,8 @@ function paginateText(text: string, innerW: number, firstLines: number, scrollLi
   return pages.length > 0 ? pages : [''];
 }
 
-function takeLines(text: string, innerW: number, maxLines: number): { chunk: string; rest: string } {
-  const wholeFits = measureTextWrap(text, innerW);
-  if (wholeFits.lineCount <= maxLines) return { chunk: text, rest: '' };
+function takeLines(text: string, innerW: number, maxLines: number, cache: WrapCache): { chunk: string; rest: string } {
+  if (cachedLineCount(cache, text, innerW) <= maxLines) return { chunk: text, rest: '' };
 
   // Binary search over word boundaries for the largest prefix that fits.
   // `split(/(\s+)/)` preserves separators, so we can rejoin losslessly.
@@ -631,7 +656,7 @@ function takeLines(text: string, innerW: number, maxLines: number): { chunk: str
       lo = mid + 1;
       continue;
     }
-    if (measureTextWrap(candidate, innerW).lineCount <= maxLines) {
+    if (cachedLineCount(cache, candidate, innerW) <= maxLines) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -641,20 +666,20 @@ function takeLines(text: string, innerW: number, maxLines: number): { chunk: str
   if (best === 0) {
     // No word boundary works — the first token alone exceeds the line budget.
     // Fall back to splitting on the codepoint that fits.
-    return charSplitFallback(text, innerW, maxLines);
+    return charSplitFallback(text, innerW, maxLines, cache);
   }
   const chunk = words.slice(0, best).join('').replace(/\s+$/, '');
   const rest = words.slice(best).join('').replace(/^\s+/, '');
   return { chunk, rest };
 }
 
-function charSplitFallback(text: string, innerW: number, maxLines: number): { chunk: string; rest: string } {
+function charSplitFallback(text: string, innerW: number, maxLines: number, cache: WrapCache): { chunk: string; rest: string } {
   let lo = 1;
   let hi = text.length;
   let best = 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (measureTextWrap(text.slice(0, mid), innerW).lineCount <= maxLines) {
+    if (cachedLineCount(cache, text.slice(0, mid), innerW) <= maxLines) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -727,6 +752,11 @@ function targetLayoutForActivePage(page: PageRef): ActiveLayout {
  * target layout differs from the current one. */
 async function renderActivePage(): Promise<void> {
   if (currentPage !== 'active') return;
+  // Clamp the index in case a result that arrived mid-scroll shortened the
+  // page list while a queued scroll event still references the old position.
+  if (activePages.length > 0 && activePageIndex >= activePages.length) {
+    activePageIndex = activePages.length - 1;
+  }
   const page = activePages[activePageIndex];
   if (!page || !currentActiveResult) return;
   const target = targetLayoutForActivePage(page);
@@ -787,6 +817,16 @@ async function renderHistoryDetailPage(): Promise<void> {
 
 // ------- page builders ----------------------------------------------------
 
+/** Sum container counts so a future build-time list change can't drift away
+ *  from the SDK's `containerTotalNum` field — that mismatch silently drops
+ *  containers on the wire. */
+function totalContainers(
+  listObject: ReadonlyArray<unknown>,
+  textObject: ReadonlyArray<unknown>,
+): number {
+  return listObject.length + textObject.length;
+}
+
 function buildUnconfiguredPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer | RebuildPageContainer {
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 32,
@@ -809,11 +849,13 @@ function buildUnconfiguredPage(mode: 'create' | 'rebuild'): CreateStartUpPageCon
     isEventCapture: 1,
   });
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
-  return new Ctor({ containerTotalNum: 3, listObject: [sink], textObject: [title, msg] });
+  const listObject = [sink];
+  const textObject = [title, msg];
+  return new Ctor({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
 function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer | RebuildPageContainer {
-  const currentPersonas = getPickerPersonas(settings().bufferDuration);
+  const currentPersonas = getPickerPersonas();
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: 240, height: 36, borderWidth: 0, paddingLength: 4,
@@ -842,7 +884,9 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     isEventCapture: 0,
   });
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
-  return new Ctor({ containerTotalNum: 4, listObject: [list], textObject: [title, hint, summaryBadge] });
+  const listObject = [list];
+  const textObject = [title, hint, summaryBadge];
+  return new Ctor({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
 function buildMenuPage(): RebuildPageContainer {
@@ -876,7 +920,9 @@ function buildMenuPage(): RebuildPageContainer {
     }),
     isEventCapture: 1,
   });
-  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [list], textObject: [title, spinner, clock] });
+  const listObject = [list];
+  const textObject = [title, spinner, clock];
+  return new RebuildPageContainer({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
 function formatClockTime(): string {
@@ -908,29 +954,35 @@ function buildBaselineActivePage(): RebuildPageContainer {
     xPosition: 16, yPosition: 34, width: SCREEN_W - 32, height: 54,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
+  // Verdict slot is single-line but holds variable text (trivia answers,
+  // meeting-prep "From: <source>", etc.) that can have descenders. At the
+  // prior h=26 with paddingLength=4 the inner 18 px is shorter than the line
+  // box, so y/g/p got cropped. h=32 leaves 24 px inner, enough for the full
+  // glyph including descender. Reason container shifts down to absorb the
+  // 6 px gain and REC/hint drop the same amount to keep the screen filled.
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 90, width: SCREEN_W - 32, height: 26,
+    xPosition: 16, yPosition: 90, width: SCREEN_W - 32, height: 32,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const reason = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 118, width: SCREEN_W - 32, height: 134,
+    xPosition: 16, yPosition: 124, width: SCREEN_W - 32, height: 132,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const rec = new TextContainerProperty({
     containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
-    xPosition: SCREEN_W - 96, yPosition: 256, width: 80, height: 28,
+    xPosition: SCREEN_W - 96, yPosition: 260, width: 80, height: 28,
     borderWidth: 0, paddingLength: 4, content: '● REC', isEventCapture: 0,
   });
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
-    xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
+    xPosition: 16, yPosition: 260, width: SCREEN_W - 120, height: 28,
     borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
   });
+  const textObject = [eventCapture, status, claim, verdict, reason, rec, hint];
   return new RebuildPageContainer({
-    containerTotalNum: 7, listObject: [],
-    textObject: [eventCapture, status, claim, verdict, reason, rec, hint],
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
 }
 
@@ -949,8 +1001,9 @@ function buildDiscreetMinimalPage(): RebuildPageContainer {
   // cursor caret position; merging the two avoids the second caret in the
   // opposite corner.
   const status = makeDiscreetStatus();
+  const textObject = [sink, status];
   return new RebuildPageContainer({
-    containerTotalNum: 2, listObject: [], textObject: [sink, status],
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
 }
 
@@ -968,19 +1021,24 @@ function buildDiscreetResultPage(): RebuildPageContainer {
     xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
+  // Same descender fix as the baseline verdict — h=32 with paddingLength=4
+  // yields 24 px inner area, large enough for the full y/g/p glyph. There's
+  // no bottom chrome on this layout, so the reason container also gains
+  // space (extends from y=130/h=126 to y=136/h=146) for the same reason on
+  // its last paginated line.
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 102, width: SCREEN_W - 32, height: 26,
+    xPosition: 16, yPosition: 102, width: SCREEN_W - 32, height: 32,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
   const reason = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 130, width: SCREEN_W - 32, height: 126,
+    xPosition: 16, yPosition: 138, width: SCREEN_W - 32, height: 146,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
+  const textObject = [sink, claim, verdict, reason];
   return new RebuildPageContainer({
-    containerTotalNum: 4, listObject: [],
-    textObject: [sink, claim, verdict, reason],
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
 }
 
@@ -1005,9 +1063,9 @@ function buildDiscreetScrollPage(): RebuildPageContainer {
     xPosition: 16, yPosition: 40, width: SCREEN_W - 32, height: DISCREET_SCROLL_REASON_LINES * LINE_PX + 8,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 0,
   });
+  const textObject = [sink, header, reason];
   return new RebuildPageContainer({
-    containerTotalNum: 3, listObject: [],
-    textObject: [sink, header, reason],
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
 }
 
@@ -1041,9 +1099,9 @@ function buildBaselineScrollPage(): RebuildPageContainer {
     xPosition: 16, yPosition: 256, width: SCREEN_W - 120, height: 28,
     borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
   });
+  const textObject = [sink, header, reason, rec, hint];
   return new RebuildPageContainer({
-    containerTotalNum: 5, listObject: [],
-    textObject: [sink, header, reason, rec, hint],
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
 }
 
@@ -1094,7 +1152,9 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
     content: 'Swipe ⇅ · Tap: detail · Tap ← : back',
     isEventCapture: 0,
   });
-  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [list], textObject: [title, hint] });
+  const listObject = [list];
+  const textObject = [title, hint];
+  return new RebuildPageContainer({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
 function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPageContainer {
@@ -1105,19 +1165,23 @@ function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPage
   // when there's more than one, so a single-entry session doesn't get the
   // chrome.
   const idxPrefix = total > 1 && historyDetailIndex >= 0 ? `${historyDetailIndex + 1}/${total} · ` : '';
+  // History-detail has no top status chrome, so claim can start higher than
+  // the active page (y=24 vs y=32). That extra 8 px absorbs the verdict slot
+  // growth (26 → 32) without squeezing the reason container's 4-line budget;
+  // descenders on trivia answers and "From: <source>" lines no longer clip.
   const claim = new TextContainerProperty({
     containerID: CONTAINER.claim, containerName: NAME.claim,
-    xPosition: 16, yPosition: 32, width: SCREEN_W - 32, height: 68,
+    xPosition: 16, yPosition: 24, width: SCREEN_W - 32, height: 68,
     borderWidth: 0, paddingLength: 4, content: `${idxPrefix}${page.claimChunk ?? ''}`, isEventCapture: 0,
   });
   const verdict = new TextContainerProperty({
     containerID: CONTAINER.verdict, containerName: NAME.verdict,
-    xPosition: 16, yPosition: 102, width: SCREEN_W - 32, height: 26,
+    xPosition: 16, yPosition: 96, width: SCREEN_W - 32, height: 32,
     borderWidth: 0, paddingLength: 4, content: middle, isEventCapture: 0,
   });
   const reason = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 130, width: SCREEN_W - 32, height: 126,
+    xPosition: 16, yPosition: 132, width: SCREEN_W - 32, height: 124,
     borderWidth: 0, paddingLength: 4, content: page.text, isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
@@ -1125,7 +1189,8 @@ function buildHistoryDetailPage(entry: HistoryEntry, page: PageRef): RebuildPage
     xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
     borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
   });
-  return new RebuildPageContainer({ containerTotalNum: 4, listObject: [], textObject: [claim, verdict, reason, hint] });
+  const textObject = [claim, verdict, reason, hint];
+  return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
 /** History-detail scroll layout — page 2+ of a claim's reason. Compact header
@@ -1148,7 +1213,8 @@ function buildHistoryDetailScrollPage(entry: HistoryEntry, page: PageRef): Rebui
     xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
     borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
   });
-  return new RebuildPageContainer({ containerTotalNum: 3, listObject: [], textObject: [header, reason, hint] });
+  const textObject = [header, reason, hint];
+  return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
 /** Clear per-session HUD state so a fresh session doesn't inherit stale buffers. */

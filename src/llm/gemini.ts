@@ -1,12 +1,8 @@
 // src/llm/gemini.ts
 import { uint8ToBase64, encodePcmToWav } from '@/runtime/audioBuffer';
-import { FACT_CHECKER_PROMPT, FACT_CHECKER_SCHEMA } from '@/personas/factChecker';
 import {
   DEFAULT_GEMINI_MODEL,
-  DEFAULT_LANGUAGE,
-  LANGUAGES,
   type GeminiModel,
-  type LanguageCode,
 } from '@/types';
 
 const ENDPOINT = (model: string) =>
@@ -143,29 +139,25 @@ function retryDelay(ms: number, signal?: AbortSignal): Promise<void> {
 
 /**
  * Reachability probe used by Settings "Run self-test".
- * Sends 1 second of silence and reports latency.
+ * Sends 1 second of silence and reports round-trip latency. Uses a minimal
+ * connectivity-only prompt + schema rather than borrowing a real persona —
+ * keeps the LLM transport decoupled from the persona layer so renaming a
+ * lens can't break the self-test.
  */
 export async function runSelfTest(
   apiKey: string,
   model?: GeminiModel | string,
-  language?: LanguageCode,
 ): Promise<{ latencyMs: number }> {
   const silentPcm = new Uint8Array(16_000 * 2);
   const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
-  const lang = language ?? DEFAULT_LANGUAGE;
-  const langName = LANGUAGES[lang] ?? 'English';
-  const prompt =
-    `${FACT_CHECKER_PROMPT}\n\n` +
-    `LANGUAGE: Write the \`claim\` and \`reason\` fields in ${langName}. ` +
-    `The \`verdict\` field MUST stay as one of "TRUE", "FALSE", or "UNVERIFIED".`;
+  const prompt = 'Respond with `{"ok": true}` to confirm reachability.';
+  const schema = {
+    type: 'object',
+    properties: { ok: { type: 'boolean' } },
+    required: ['ok'],
+  };
   const t0 = performance.now();
-  await callLens({
-    apiKey,
-    wav,
-    prompt,
-    schema: FACT_CHECKER_SCHEMA,
-    model,
-  });
+  await callLens({ apiKey, wav, prompt, schema, model });
   return { latencyMs: Math.round(performance.now() - t0) };
 }
 
@@ -196,7 +188,7 @@ function truncate(s: string, n: number): string {
   return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
 }
 
-const MAX_RETRY_DELAY_MS = 30_000;
+const MAX_RETRY_DELAY_MS = 8_000;
 const RETRY_DELAY_PATTERN = /^(\d+(?:\.\d+)?)s$/;
 
 /** Parse an HTTP Retry-After header (seconds only — Gemini does not emit HTTP-date here). */

@@ -77,7 +77,7 @@ Settings and history go through `bridge.setLocalStorage` / `bridge.getLocalStora
 
 ### Retries
 
-`callLens` retries 503/429 up to twice, honoring `Retry-After` headers and Google's structured `retryDelay: "42s"` hints (`parseRetryAfterMs`, `parseGoogleRetryDelayMs`). Each retry calls `onRetry(attempt)`, which the lifecycle uses to flash `retry1` / `retry2` on the HUD.
+`callLens` retries 503/429 up to `MAX_RETRIES` times (currently 3), honoring `Retry-After` headers and Google's structured `retryDelay: "42s"` hints (`parseRetryAfterMs`, `parseGoogleRetryDelayMs`), each clamped to a `MAX_RETRY_DELAY_MS = 8_000` ms ceiling. Each retry calls `onRetry(attempt)`, which the lifecycle uses to flash `R1/3`, `R2/3`, `R3/3` on the HUD.
 
 ### Path alias
 
