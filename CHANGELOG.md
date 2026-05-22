@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.0 — 2026-05-23
+- **OpenRouter** added as a third provider. Picks an audio-capable multimodal model from OpenRouter's catalog (e.g. `openai/gpt-4o-audio-preview`, `google/gemini-2.5-flash`) and sends the WAV inline as an `input_audio` content part — no separate transcription step, since OpenRouter has no Whisper endpoint. The model picker auto-filters to entries whose `architecture.input_modalities` includes `audio`, so non-audio chat models don't surface.
+- API key storage is per host — switching between OpenAI, Groq, and OpenRouter in Settings keeps each credential intact.
+- Settings field-hint updated to describe all three paths (Gemini direct, OpenAI/Groq Whisper-then-chat, OpenRouter inline).
+
 ## 0.7.0 — 2026-05-22
 - **More providers**: bring your own OpenAI or Groq key as an alternative to Gemini. OpenAI and Groq transcribe the audio first (Whisper) and then analyse the transcript; one API key per provider.
 - **Skip silence and noise**: a small voice-activity model runs locally on each tap, so taps with nothing to analyse short-circuit before an API call. The HUD flashes `○` (no voice) or `~` (too noisy) instead of waiting on a pointless request. Toggleable in Settings.
