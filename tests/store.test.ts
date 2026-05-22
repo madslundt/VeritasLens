@@ -17,7 +17,6 @@ import {
   pushDebugEvent,
   pushHistoryEntry,
   saveAutoSummaryEnabled,
-  saveAutoSummaryInterval,
   saveBufferDuration,
   saveGeminiAutoModel,
   saveGeminiKey,
@@ -225,7 +224,6 @@ describe('loadSettings', () => {
     await saveResponseLanguage(ls.set, 'da');
     await saveBufferDuration(ls.set, 120);
     await saveAutoSummaryEnabled(ls.set, true);
-    await saveAutoSummaryInterval(ls.set, 5);
 
     await loadSettings(ls.get);
     const s = settings();
@@ -235,7 +233,6 @@ describe('loadSettings', () => {
     expect(s.responseLanguage).toBe('da');
     expect(s.bufferDuration).toBe(120);
     expect(s.autoSummaryEnabled).toBe(true);
-    expect(s.autoSummaryInterval).toBe(5);
   });
 
   it('returns defaults when storage throws', async () => {
@@ -257,13 +254,18 @@ describe('loadSettings', () => {
     ls.data.set('veritaslens.geminiModel', 'not-a-model');
     ls.data.set('veritaslens.responseLanguage', 'klingon');
     ls.data.set('veritaslens.bufferDuration', '9999');
-    ls.data.set('veritaslens.autoSummaryInterval', '17');
     await loadSettings(ls.get);
     const s = settings();
     expect(s.geminiModel).toBe(DEFAULT_GEMINI_MODEL);
     expect(s.responseLanguage).toBe(DEFAULT_LANGUAGE);
     expect(s.bufferDuration).toBe(DEFAULT_BUFFER_DURATION);
-    expect(s.autoSummaryInterval).toBe(2);
+  });
+
+  it('clamps a persisted 600s buffer duration from 0.6.x down to the new 300s cap', async () => {
+    const ls = fakeLocalStorage();
+    ls.data.set('veritaslens.bufferDuration', '600');
+    await loadSettings(ls.get);
+    expect(settings().bufferDuration).toBe(300);
   });
 });
 

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 — 2026-05-22
+- **More providers**: bring your own OpenAI, OpenRouter, or Groq key as an alternative to Gemini. OpenAI-compatible providers transcribe the audio first, then analyse the text.
+- **Skip silence and noise**: taps with nothing to analyse short-circuit before an API call. The HUD flashes an `○` icon and shows "No speech captured" instead of waiting on a pointless request.
+- **End-of-session Summary**: leaving the lens — manually or by changing provider / model / API key / buffer length — now writes a final interval Summary plus an overall session synthesis. Silent intervals are skipped.
+- **Recording buffer** capped at 5 minutes (down from 10) to match the new fixed Summary cadence (every 5 minutes, no longer configurable).
+- **History search** now also matches auto-derived tags from each entry's content, so a topic, verdict, or entity name finds entries that don't have the word in the recorded question.
+- "Auto-summary" relabelled to **Summary** in the HUD and settings.
+
 ## 0.6.0 — 2026-05-21
 - New **Meeting Prep** lens: ground answers in context you write on your phone before a meeting — general notes plus optional labeled attachments (contracts, prepared questions) the assistant can cite as sources. Every answer is grounded in a verbatim **evidence** excerpt from the cited attachment; follow-up questions are opt-in by the model — emitted only when prep is silent on a decision-changing detail. HUD swipes through three distinct claim kinds — **answer → evidence → follow-up** (evidence in quotes, follow-up with `→`).
 - **Auto-summary** rewired to one consolidated entry per session: interval ticks accumulate in memory as context and a single summary is written to History when you exit the session. Sessions shorter than the interval produce no entry. In the phone History view the summary sits at the top of each session with a muted style so claim-style results below keep visual focus. Picker top-right badge reflects final-summary state: `summarizing…` while the end-of-session summary is generating, `summary ready` briefly when it lands, then back to `auto-summary`.

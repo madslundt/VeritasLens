@@ -1,11 +1,12 @@
 // src/runtime/lifecycle.ts
 import { getBridge } from './bridge';
-import { PcmRingBuffer } from './audioBuffer';
+import { PcmRingBuffer, analyzeBufferForVoice, encodePcmToWav } from './audioBuffer';
 import {
   ACTIVE_HINT_ANALYZING,
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   currentHudPage,
+  flashActiveHint,
   flashPickerHint,
   getActiveLayout,
   hasPendingActiveResult,
@@ -32,7 +33,7 @@ import {
   showPickerPage,
   showUnconfiguredPage,
 } from './hud';
-import { callLens, MAX_RETRIES } from '@/llm/gemini';
+import { callLens, MAX_RETRIES } from '@/llm';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
 import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
 import {
@@ -65,6 +66,7 @@ import {
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
+import { createEffect, createRoot, on } from 'solid-js';
 import type { LanguageCode, LensResult, MeetingPrepSection } from '@/types';
 
 let running = false;
@@ -100,6 +102,15 @@ let lastMenuIndex = 0;
 let lastHistoryIndex = 0;
 let currentSessionId = '';
 let sessionStartTime = 0;
+/**
+ * Monotonic byte position into the current session's buffer marking the
+ * point of the last user-triggered analysis. The no-voice gate considers
+ * audio captured since this position so that re-tapping in silence after a
+ * fresh analysis correctly reports "no sound" instead of re-classifying
+ * already-analysed audio. Reset on session enter; snapshotted just before
+ * each successful API call from runAnalysis.
+ */
+let lastAnalysisByteOffset = 0;
 
 export function isHudRunning(): boolean { return running; }
 
@@ -117,7 +128,12 @@ async function reloadHistoryFromStorage(): Promise<void> {
 }
 
 export async function startHudRuntime(): Promise<void> {
-  const configured = settings().geminiApiKey.trim().length >= 10;
+  const isProviderConfigured = (): boolean => {
+    const s = settings();
+    if (s.provider === 'openai-compatible') return s.openaiApiKey.trim().length >= 10;
+    return s.geminiApiKey.trim().length >= 10;
+  };
+  const configured = isProviderConfigured();
   if (running) {
     if (configured) await showPickerPage();
     else await showUnconfiguredPage();
@@ -129,6 +145,7 @@ export async function startHudRuntime(): Promise<void> {
     await bootstrapHud(configured ? 'picker' : 'unconfigured');
     setAppPhase('idle');
     unsubscribeEvents = getBridge().onEvenHubEvent(handleEvent);
+    startSettingsWatcher();
   } catch (err) {
     running = false;
     setAppPhase('error');
@@ -139,7 +156,11 @@ export async function startHudRuntime(): Promise<void> {
 
 export async function refreshHudPage(): Promise<void> {
   if (!running) return;
-  const configured = settings().geminiApiKey.trim().length >= 10;
+  const s = settings();
+  const configured =
+    s.provider === 'openai-compatible'
+      ? s.openaiApiKey.trim().length >= 10
+      : s.geminiApiKey.trim().length >= 10;
   if (configured) await showPickerPage();
   else await showUnconfiguredPage();
 }
@@ -147,6 +168,7 @@ export async function refreshHudPage(): Promise<void> {
 export async function stopHudRuntime(): Promise<void> {
   if (!running) return;
   running = false;
+  stopSettingsWatcher();
   stopSpinner();
   // Abort the auto-summary tick BEFORE clearing the timer, so a tick already
   // mid-fetch when shutdown begins doesn't keep its network call (and the WAV
@@ -420,6 +442,7 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   sessionStartTime = Date.now();
   intermediateSummaries = [];
+  lastAnalysisByteOffset = 0;
   lastMenuIndex = 0;
   setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
   await showActivePage(persona);
@@ -436,42 +459,51 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   setAppPhase('listening');
 }
 
+// Re-entrancy guard so cascading store-driven events can't double-fire the
+// teardown + stop-time-summary chain. Set on entry, cleared on exit.
+let leavingActiveSession = false;
+
 async function leaveActiveSession(): Promise<void> {
-  // Cancel any analysis still in flight so the answer doesn't arrive into a
-  // session that no longer exists (which would set lensResult / pendingActive
-  // long after the user has left). resetHudSessionState below clears the
-  // pending stash, but the abort prevents a late callLens success from
-  // reintroducing it via setLensResult.
-  inflight?.abort();
-  inflight = null;
-  analyzing = false;
-  stopSpinner();
-  // Abort any auto-summary tick already in flight, then stop the periodic
-  // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
-  // base64 encoding) terminates immediately and frees its WAV/base64 closures
-  // before the final-summary path snapshots the buffer. Without the abort, a
-  // stray tick could complete after teardown and push a stale intermediate
-  // into the next session's accumulator.
-  autoSummaryInflight?.abort();
-  autoSummaryInflight = null;
-  stopAutoSummaryTimer();
-  try { await getBridge().audioControl(false); } catch { /* ignore */ }
-  // Snapshot the inputs for the end-of-session summary while the buffer and
-  // session id are still live. The call itself runs in the background so the
-  // user is returned to the picker immediately — the history entry appears
-  // whenever Gemini responds.
-  const finalInputs = captureFinalSummaryInputs();
-  intermediateSummaries = [];
-  buffer?.clear();
-  buffer = null;
-  resetHudSessionState();
-  await showPickerPage();
-  setAppPhase('idle');
-  // Refresh history before kicking off the background final summary so the
-  // settings WebView shows everything from the session that just ended.
-  // runFinalSummary will reload again on its own once it lands.
-  await reloadHistoryFromStorage();
-  if (finalInputs) void runFinalSummary(finalInputs);
+  if (leavingActiveSession) return;
+  leavingActiveSession = true;
+  try {
+    // Cancel any analysis still in flight so the answer doesn't arrive into a
+    // session that no longer exists (which would set lensResult / pendingActive
+    // long after the user has left). resetHudSessionState below clears the
+    // pending stash, but the abort prevents a late callLens success from
+    // reintroducing it via setLensResult.
+    inflight?.abort();
+    inflight = null;
+    analyzing = false;
+    stopSpinner();
+    // Abort any auto-summary tick already in flight, then stop the periodic
+    // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
+    // base64 encoding) terminates immediately and frees its WAV/base64 closures
+    // before the final-summary path snapshots the buffer. Without the abort, a
+    // stray tick could complete after teardown and push a stale intermediate
+    // into the next session's accumulator.
+    autoSummaryInflight?.abort();
+    autoSummaryInflight = null;
+    stopAutoSummaryTimer();
+    try { await getBridge().audioControl(false); } catch { /* ignore */ }
+    // Snapshot the inputs for the stop-time summaries (last-tick + final
+    // synthesis) while the buffer and session id are still live. Both calls
+    // run in the background so the user is returned to the picker immediately.
+    const stopTimeInputs = captureStopTimeInputs();
+    intermediateSummaries = [];
+    buffer?.clear();
+    buffer = null;
+    resetHudSessionState();
+    await showPickerPage();
+    setAppPhase('idle');
+    // Refresh history before kicking off the background summary chain so the
+    // settings WebView shows everything from the session that just ended.
+    // runStopTimeSummaries reloads again on its own once each entry lands.
+    await reloadHistoryFromStorage();
+    if (stopTimeInputs) void runStopTimeSummaries(stopTimeInputs);
+  } finally {
+    leavingActiveSession = false;
+  }
 }
 
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
@@ -574,12 +606,47 @@ function buildContextBlock(personaName: string): string {
   ].join('\n');
 }
 
+/**
+ * Surface the no-voice gate's feedback. Both layouts get the same glyph in
+ * the top-right status slot so the icon vocabulary is consistent — the
+ * wearer learns the symbols once and they mean the same thing everywhere:
+ *   `○` = nothing to analyse (silence) — the natural inverse of the `•`
+ *         recording-dot rest state, reads as "empty"
+ *   `~` = too noisy — ASCII tilde, reads as "wave / interference"
+ * Reverts to the layout's rest state after ~2.5 s.
+ *
+ * Glyphs were chosen from the LVGL firmware-font safe sets documented in
+ * the Even Hub design guidelines (Selection: `●○ ■□ ★☆`; basic ASCII).
+ * Out-of-font glyphs render as nothing on the G2 — earlier attempts with
+ * `∅` (U+2205) and `≋` (U+224B) were silently dropped by the firmware.
+ *
+ * Baseline additionally writes the full message to the bottom hint slot
+ * (456 px wide — fits the text comfortably) so the glyph is reinforced by
+ * a readable explanation. Discreet has no hint row by design, so the glyph
+ * is the only on-glasses signal; the full message is logged to the debug
+ * panel (`no-voice-gate` entries) for after-the-fact verification.
+ */
+async function showNoVoiceFeedback(message: string): Promise<void> {
+  pushDebugEvent({ label: 'no-voice-gate', detail: message });
+  await flashActiveHint(message);
+  const noisy = message.toLowerCase().includes('noisy');
+  await setStatus(noisy ? '~' : '○');
+  setTimeout(() => { void setStatus('listening'); }, 2500);
+}
+
 async function runAnalysis(): Promise<void> {
   const page = currentHudPage();
   if (page === 'history-list' || page === 'history-detail') await restoreActivePage();
   if (currentHudPage() !== 'active') return;
 
-  if (!buffer || buffer.bytesBuffered === 0) { await setStatus('listening'); return; }
+  if (!buffer || buffer.bytesBuffered === 0) {
+    // User tapped before any audio arrived (e.g. immediately after entering
+    // the lens). Surface the same "no speech" feedback as the gate below
+    // instead of silently returning so the wearer knows the tap registered.
+    await showNoVoiceFeedback('No speech captured');
+    setAppPhase('listening');
+    return;
+  }
 
   const apiKey = settings().geminiApiKey;
   if (!apiKey) { await setStatus('error'); setErrorMessage('No Gemini API key.'); return; }
@@ -613,6 +680,27 @@ async function runAnalysis(): Promise<void> {
     return;
   }
 
+  // No-voice gate: analyse only audio captured *since the last analysis
+  // trigger* (not the whole buffer). This makes re-tapping in silence after
+  // a fresh analysis correctly report "no speech captured" — otherwise the
+  // already-analysed voice content earlier in the buffer would falsely pass
+  // the gate. Always on (no user toggle): the LLM's own noSpeech flag is the
+  // safety net for ambiguous audio that DOES contain at least one voice
+  // frame, so an unconditional client-side gate only ever short-circuits
+  // cases where there is literally nothing new to send.
+  const linearPcm = buffer.toLinearPcm();
+  const sincePcm = buffer.linearPcmSince(lastAnalysisByteOffset);
+  const va = analyzeBufferForVoice(sincePcm, buffer.sampleRate);
+  if (va.voiceFrames === 0) {
+    const noisy = va.noiseFrames > va.silenceFrames;
+    await showNoVoiceFeedback(noisy ? 'Too noisy to pick up voice' : 'No speech captured');
+    setAppPhase('listening');
+    return;
+  }
+  // Snapshot the byte position before the API call so the next gate check
+  // looks only at audio captured after this trigger.
+  lastAnalysisByteOffset = buffer.bytesProduced;
+
   // Clear the store signal for sibling components (settings WebView). The HUD
   // intentionally keeps the previous answer on screen during analysis so the
   // wearer can review it while the spinner animates in the corner status slot
@@ -631,7 +719,11 @@ async function runAnalysis(): Promise<void> {
   startSpinner();
 
   try {
-    const wav = buffer.snapshotWav();
+    const wav = encodePcmToWav(linearPcm, {
+      sampleRate: buffer.sampleRate,
+      bitsPerSample: buffer.bitsPerSample,
+      channels: buffer.channels,
+    });
     const lang = settings().responseLanguage;
     const onRetry = async (attempt: number): Promise<void> => {
       // Keep the spinner running and switch its prefix to the retry label so
@@ -671,6 +763,7 @@ async function runAnalysis(): Promise<void> {
         badge: extractBadge(result),
         quote: extractQuote(result),
         result,
+        tags: extractTags(result),
       }, (k, v) => getBridge().setLocalStorage(k, v));
       await reloadHistoryFromStorage();
       // Pass the full session context so multiple Meeting Prep questions in
@@ -742,6 +835,7 @@ async function runAnalysis(): Promise<void> {
         badge: extractBadge(single),
         quote: extractQuote(single),
         result: single,
+        tags: extractTags(single),
       })),
       (k, v) => getBridge().setLocalStorage(k, v),
     );
@@ -764,7 +858,12 @@ async function runAnalysis(): Promise<void> {
       return;
     }
     if ((err as Error)?.name === 'NoSpeechError') {
-      await setStatus('listening');
+      // The LLM saw the audio but decided no clear speech was present
+      // (typically humming, mouth sounds, or voice-shaped noise that passed
+      // the local gate's voice-band heuristic). Surface the same visual as
+      // the local gate so the wearer's mental model of `○` is consistent —
+      // "no usable speech was found", regardless of which stage caught it.
+      await showNoVoiceFeedback('No speech captured');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('listening');
       return;
@@ -788,11 +887,63 @@ async function runAnalysis(): Promise<void> {
 }
 
 
+/** Fixed cadence for the in-session auto-summary tick. Hardcoded — no user knob. */
+const AUTO_SUMMARY_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Disposer for the Solid effect that watches "critical" settings — the ones
+ * that invalidate the audio capture path when changed (provider, model, API
+ * key, buffer duration). On change, an active session is torn down via
+ * leaveActiveSession so the HUD resets to the picker and the mic releases.
+ */
+let settingsWatchDispose: (() => void) | null = null;
+
+function startSettingsWatcher(): void {
+  if (settingsWatchDispose) return;
+  createRoot((dispose) => {
+    settingsWatchDispose = dispose;
+    // Concatenate only the fields that affect audio capture / send-path
+    // identity into a single tracked key. Unrelated fields (responseLanguage,
+    // discreet, autoSummaryEnabled) are intentionally omitted so toggling
+    // them mid-session does NOT stop recording.
+    const criticalKey = (): string => {
+      const s = settings();
+      return [
+        s.provider,
+        s.geminiApiKey,
+        s.geminiModel,
+        s.geminiAutoModel,
+        s.openaiApiKey,
+        s.openaiBaseUrl,
+        s.openaiModel,
+        s.bufferDuration,
+      ].join('|');
+    };
+    let initial = true;
+    createEffect(on(criticalKey, () => {
+      // `on()` fires once on registration with the initial value — skip it so
+      // startup doesn't immediately call leaveActiveSession.
+      if (initial) { initial = false; return; }
+      // No active session ⇒ nothing to tear down. Also guard against the
+      // re-entry flag inside leaveActiveSession itself.
+      if (!buffer || leavingActiveSession) return;
+      void leaveActiveSession();
+    }));
+  });
+}
+
+function stopSettingsWatcher(): void {
+  if (settingsWatchDispose) {
+    settingsWatchDispose();
+    settingsWatchDispose = null;
+  }
+}
+
 function startAutoSummaryTimer(): void {
   stopAutoSummaryTimer();
   const s = settings();
   if (!s.autoSummaryEnabled) return;
-  autoSummaryTimer = setInterval(() => void runAutoSummary(), s.autoSummaryInterval * 60_000);
+  autoSummaryTimer = setInterval(() => void runAutoSummary(), AUTO_SUMMARY_INTERVAL_MS);
 }
 
 function stopAutoSummaryTimer(): void {
@@ -814,13 +965,23 @@ async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;
   const apiKey = settings().geminiApiKey;
   if (!apiKey) return;
+  // Always gate auto-summary on voice presence — there is no user knob for
+  // this because there is nothing to summarise in a silent/noisy window, and
+  // skipping the API call here is pure upside.
+  const linearPcm = buffer.toLinearPcm();
+  const va = analyzeBufferForVoice(linearPcm, buffer.sampleRate);
+  if (va.totalFrames > 0 && va.voiceFrames === 0) return;
   // Per-tick abort handle so leaveActiveSession / stopHudRuntime can cancel
   // a tick mid-fetch. The identity check on success ensures we don't push a
   // result that arrived after an exit reset the accumulator.
   autoSummaryInflight?.abort();
   const controller = new AbortController();
   autoSummaryInflight = controller;
-  let wav: Uint8Array | null = buffer.snapshotWav();
+  let wav: Uint8Array | null = encodePcmToWav(linearPcm, {
+    sampleRate: buffer.sampleRate,
+    bitsPerSample: buffer.bitsPerSample,
+    channels: buffer.channels,
+  });
   try {
     const rawText = await callLens({
       apiKey,
@@ -863,15 +1024,17 @@ async function runAutoSummary(): Promise<void> {
   }
 }
 
+interface IntermediateSummary {
+  title?: string;
+  summary: string;
+  topics?: string[];
+  keyPoints?: string[];
+  quote?: string;
+}
+
 interface FinalSummaryInputs {
   sessionId: string;
-  intermediates: Array<{
-    title?: string;
-    summary: string;
-    topics?: string[];
-    keyPoints?: string[];
-    quote?: string;
-  }>;
+  intermediates: IntermediateSummary[];
   /** Mutable so runFinalSummary can null it after handing off to callLens, releasing the ~36 MB WAV for GC during the network wait. */
   wav: Uint8Array | null;
   apiKey: string;
@@ -880,23 +1043,153 @@ interface FinalSummaryInputs {
 }
 
 /**
- * Snapshots the data needed for an end-of-session summary while the buffer
- * and module-level session state are still live. Returns null when no
- * intermediates accumulated (the "session shorter than autoSummaryInterval"
- * gate) or when the API key is unset.
+ * Inputs for the stop-time summary chain (last-tick + final-synthesis).
+ * Linear PCM is captured rather than an encoded WAV so the last-tick can run
+ * voice-activity gating before deciding whether to encode and send anything.
  */
-function captureFinalSummaryInputs(): FinalSummaryInputs | null {
-  if (intermediateSummaries.length === 0) return null;
+interface StopTimeInputs {
+  sessionId: string;
+  /** Intermediates accumulated by the periodic timer before the user left. */
+  priorIntermediates: IntermediateSummary[];
+  /** Tail-buffer audio at session end. Null when the buffer was empty. */
+  linearPcm: Uint8Array | null;
+  sampleRate: number;
+  bitsPerSample: number;
+  channels: number;
+  apiKey: string;
+  language: LanguageCode;
+  model: string;
+}
+
+/**
+ * Snapshots inputs for the stop-time summary chain while the buffer and
+ * module-level state are still live. Returns null when neither audio nor
+ * prior intermediates exist — nothing to summarise — or when the feature is
+ * disabled / no API key is set.
+ */
+function captureStopTimeInputs(): StopTimeInputs | null {
   const s = settings();
+  if (!s.autoSummaryEnabled) return null;
   if (!s.geminiApiKey) return null;
+  const linearPcm =
+    buffer && buffer.bytesBuffered > 0 ? buffer.toLinearPcm() : null;
+  if (!linearPcm && intermediateSummaries.length === 0) return null;
   return {
     sessionId: currentSessionId,
-    intermediates: intermediateSummaries.slice(),
-    wav: buffer && buffer.bytesBuffered > 0 ? buffer.snapshotWav() : null,
+    priorIntermediates: intermediateSummaries.slice(),
+    linearPcm,
+    sampleRate: buffer?.sampleRate ?? 16_000,
+    bitsPerSample: buffer?.bitsPerSample ?? 16,
+    channels: buffer?.channels ?? 1,
     apiKey: s.geminiApiKey,
     language: s.responseLanguage,
     model: s.geminiModel,
   };
+}
+
+/**
+ * Runs the stop-time summary chain in the background after the user has left
+ * the active session: first a last-tick summary from the tail audio (writes a
+ * Summary history entry when voice is present), then a final synthesis that
+ * consolidates all intermediates (the prior ticks plus the last tick) into a
+ * separate Summary history entry.
+ *
+ * Skip rules:
+ * - Last tick is skipped when the tail buffer has no voice (or no audio).
+ * - Final synthesis is skipped when no PRIOR intermediates exist — otherwise
+ *   it would just duplicate the last tick.
+ */
+async function runStopTimeSummaries(inputs: StopTimeInputs): Promise<void> {
+  let lastTick: IntermediateSummary | null = null;
+
+  if (inputs.linearPcm) {
+    const va = analyzeBufferForVoice(inputs.linearPcm, inputs.sampleRate);
+    if (va.totalFrames > 0 && va.voiceFrames > 0) {
+      await setSummaryBadgeState('generating');
+      lastTick = await runLastTickSummary(inputs);
+    }
+  }
+
+  if (inputs.priorIntermediates.length === 0) {
+    // Only the last tick fired — synthesising from a single intermediate
+    // would just duplicate it. Flip the badge to ready so the picker reflects
+    // that the summary is done.
+    if (lastTick) await setSummaryBadgeState('ready');
+    return;
+  }
+
+  const allIntermediates = lastTick
+    ? [...inputs.priorIntermediates, lastTick]
+    : inputs.priorIntermediates;
+
+  await runFinalSummary({
+    sessionId: inputs.sessionId,
+    intermediates: allIntermediates,
+    wav: null,
+    apiKey: inputs.apiKey,
+    language: inputs.language,
+    model: inputs.model,
+  });
+}
+
+/**
+ * Summarises the tail-buffer audio with one Gemini call and writes its own
+ * Summary history entry. Returns the resulting segment so the final-synthesis
+ * step can fold it in.
+ */
+async function runLastTickSummary(
+  inputs: StopTimeInputs,
+): Promise<IntermediateSummary | null> {
+  if (!inputs.linearPcm) return null;
+  const controller = new AbortController();
+  finalSummaryInflight = controller;
+  try {
+    const wav = encodePcmToWav(inputs.linearPcm, {
+      sampleRate: inputs.sampleRate,
+      bitsPerSample: inputs.bitsPerSample,
+      channels: inputs.channels,
+    });
+    const rawText = await callLens({
+      apiKey: inputs.apiKey,
+      wav,
+      prompt: buildSessionSummaryPrompt(inputs.language),
+      schema: SESSION_SUMMARY_SCHEMA,
+      model: inputs.model,
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return null;
+    const result = parseSessionSummaryResponse(rawText);
+    if (result.type !== 'session-summary' || result.summary.trim().length === 0) {
+      return null;
+    }
+    await pushHistoryEntry({
+      sessionId: inputs.sessionId,
+      lensId: SESSION_SUMMARY_ID,
+      lensName: SESSION_SUMMARY_NAME,
+      question: extractQuestion(result),
+      badge: 'SUMMARY',
+      quote: result.quote ?? '',
+      result,
+      tags: extractTags(result),
+    }, (k, v) => getBridge().setLocalStorage(k, v));
+    await reloadHistoryFromStorage();
+    return {
+      title: result.title,
+      summary: result.summary,
+      topics: result.topics,
+      keyPoints: result.keyPoints,
+      quote: result.quote,
+    };
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return null;
+    pushDebugEvent({
+      label: 'last-tick-summary-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  } finally {
+    if (finalSummaryInflight === controller) finalSummaryInflight = null;
+  }
 }
 
 /**
@@ -981,6 +1274,7 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
         badge: 'SUMMARY',
         quote: synth.quote ?? '',
         result: synth,
+        tags: extractTags(synth),
       }, (k, v) => getBridge().setLocalStorage(k, v));
       await reloadHistoryFromStorage();
       await setSummaryBadgeState('ready');
@@ -1025,6 +1319,7 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
       badge: 'SUMMARY',
       quote,
       result,
+      tags: extractTags(result),
     }, (k, v) => getBridge().setLocalStorage(k, v));
     await reloadHistoryFromStorage();
     await setSummaryBadgeState('ready');
@@ -1038,6 +1333,98 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
   } finally {
     if (finalSummaryInflight === controller) finalSummaryInflight = null;
   }
+}
+
+/**
+ * Naive content-word extractor for tag derivation. Splits on non-alphanumerics,
+ * drops short tokens and common stop words, returns at most `maxWords`. Kept
+ * deliberately simple — tags are a search-recall aid, not a topic model.
+ */
+function keywordize(text: string, maxWords: number): string[] {
+  if (!text) return [];
+  const stop = new Set([
+    'the','a','an','and','or','but','of','to','in','on','at','for','is','was',
+    'are','were','be','been','being','this','that','these','those','it','its',
+    'as','by','with','from','if','then','than','so','what','which','who','how',
+    'why','when','where','do','does','did','have','has','had','not','no','yes',
+    'his','her','their','our','your','my','they','them','he','she','we',
+  ]);
+  const tokens = text.toLowerCase().split(/[^a-z0-9]+/).filter((t) => t.length >= 3 && !stop.has(t));
+  return tokens.slice(0, maxWords);
+}
+
+/**
+ * Normalises raw tag candidates (lowercase, trim, dedupe, cap length / count).
+ * Stored on each `HistoryEntry.tags` and never rendered — used only to widen
+ * the SettingsView history search predicate so e.g. searching by an entity
+ * name finds the entry even when that name isn't in the recorded question.
+ */
+function normalizeTags(raw: Array<string | undefined | null>): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of raw) {
+    if (!r) continue;
+    const t = r.trim().toLowerCase().slice(0, 32);
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push(t);
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+/**
+ * Derives search tags from a `LensResult`. Exhaustive switch — adding a new
+ * LensResult variant fails the build here until handled. Coverage matches the
+ * full union declared in `src/types.ts`, including `session-summary` which is
+ * driven by the auto-summary path in this file (not via personas/index.ts).
+ */
+export function extractTags(result: LensResult): string[] {
+  const raw: string[] = [];
+  switch (result.type) {
+    case 'fact-check':
+      for (const c of result.claims) {
+        raw.push(c.verdict);
+        for (const t of keywordize(c.claim, 3)) raw.push(t);
+      }
+      break;
+    case 'trivia':
+      for (const c of result.claims) {
+        for (const t of keywordize(c.question, 3)) raw.push(t);
+        for (const t of keywordize(c.answer, 2)) raw.push(t);
+      }
+      break;
+    case 'logical-fallacy':
+      for (const c of result.claims) raw.push(c.fallacy);
+      break;
+    case 'stats-check':
+      for (const c of result.claims) {
+        raw.push(c.verdict);
+        for (const t of keywordize(c.stat, 3)) raw.push(t);
+      }
+      break;
+    case 'bias':
+      for (const c of result.claims) {
+        raw.push(c.verdict);
+        if (c.direction) raw.push(c.direction);
+      }
+      break;
+    case 'eli5':
+      for (const c of result.claims) {
+        for (const t of keywordize(c.explanation, 3)) raw.push(t);
+      }
+      break;
+    case 'session-summary':
+      for (const t of result.topics) raw.push(t);
+      break;
+    case 'meeting-prep':
+      for (const c of result.claims) {
+        if (c.source) raw.push(c.source);
+        for (const t of keywordize(c.text, 3)) raw.push(t);
+      }
+      break;
+  }
+  return normalizeTags(raw);
 }
 
 function extractQuestion(result: LensResult): string {

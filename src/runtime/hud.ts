@@ -633,12 +633,33 @@ export async function flashPickerHint(message: string, ms = 2500): Promise<void>
   }, ms);
 }
 
+let activeHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Briefly replace the active page's hint with a message, then restore
+ * `ACTIVE_HINT_DEFAULT`. Used when an analysis is short-circuited (e.g. the
+ * no-voice gate fires) so the wearer gets feedback without leaving the
+ * listening state. No-op outside the active baseline layout.
+ */
+export async function flashActiveHint(message: string, ms = 2500): Promise<void> {
+  if (currentPage !== 'active') return;
+  if (activeLayout !== 'baseline') return;
+  if (activeHintFlashTimer) clearTimeout(activeHintFlashTimer);
+  await upgradeText(CONTAINER.activeHint, NAME.activeHint, message);
+  activeHintFlashTimer = setTimeout(() => {
+    activeHintFlashTimer = null;
+    if (currentPage !== 'active') return;
+    if (activeLayout !== 'baseline') return;
+    void upgradeText(CONTAINER.activeHint, NAME.activeHint, ACTIVE_HINT_DEFAULT);
+  }, ms);
+}
+
 export type SummaryBadgeState = 'idle' | 'generating' | 'ready';
 
 let summaryBadgeReadyTimer: ReturnType<typeof setTimeout> | null = null;
 
 function summaryBadgeBaseline(): string {
-  return settings().autoSummaryEnabled ? 'auto-summary' : '';
+  return settings().autoSummaryEnabled ? 'summary' : '';
 }
 
 /**
@@ -1203,7 +1224,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     containerID: CONTAINER.summaryBadge, containerName: NAME.summaryBadge,
     xPosition: SCREEN_W - 196, yPosition: 8, width: 180, height: 32,
     borderWidth: 0, paddingLength: 4,
-    content: settings().autoSummaryEnabled ? 'auto-summary' : '',
+    content: settings().autoSummaryEnabled ? 'summary' : '',
     isEventCapture: 0,
   });
   const list = new ListContainerProperty({
@@ -1293,8 +1314,13 @@ function buildActivePage(): RebuildPageContainer {
  */
 function buildBaselineActivePage(): RebuildPageContainer {
   const status = new TextContainerProperty({
+    // Position + dimensions match `makeDiscreetStatus` exactly so the icon
+    // sits in the same screen coordinates across layouts — the wearer's
+    // mental model of "what does that glyph mean" stays anchored to one
+    // visual location. 55-px width comfortably fits the longest content
+    // the slot ever shows (spinner with `R1/3` retry prefix = 5 chars).
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 112, yPosition: 4, width: 96, height: 26,
+    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
     borderWidth: 0, paddingLength: 4, content: pendingStatusFrame, isEventCapture: 0,
   });
   // Body: y=4, h=252 → bottom 256, abuts REC/hint chrome row. Fits 9 lines
@@ -1385,7 +1411,7 @@ function makeFullScreenEventSink(): TextContainerProperty {
 function makeDiscreetStatus(): TextContainerProperty {
   return new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 26,
+    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
     borderWidth: 0, paddingLength: 4,
     content: pendingStatusFrame || '•',
     isEventCapture: 0,
@@ -1398,7 +1424,7 @@ function makeDiscreetStatus(): TextContainerProperty {
 function makeCornerStatus(): TextContainerProperty {
   return new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 26,
+    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
     borderWidth: 0, paddingLength: 4,
     content: pendingStatusFrame,
     isEventCapture: 0,

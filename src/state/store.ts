@@ -6,27 +6,34 @@ import {
   DEFAULT_GEMINI_AUTO_MODEL,
   DEFAULT_LANGUAGE,
   DEFAULT_BUFFER_DURATION,
-  DEFAULT_AUTO_SUMMARY_INTERVAL,
+  DEFAULT_LLM_PROVIDER,
+  DEFAULT_OPENAI_BASE_URL,
+  DEFAULT_OPENAI_MODEL,
   LANGUAGES,
+  OPENAI_BASE_URLS,
   type AppMode,
   type AppPhase,
-  type AutoSummaryInterval,
   type BufferDuration,
   type GeminiModel,
   type HistoryEntry,
   type LanguageCode,
   type LensResult,
+  type LlmProvider,
   type MeetingPrepSection,
+  type OpenAiBaseUrl,
   type Settings,
 } from '@/types';
 
+const SETTINGS_KEY_PROVIDER = 'veritaslens.provider';
 const SETTINGS_KEY_GEMINI = 'veritaslens.geminiKey';
 const SETTINGS_KEY_MODEL = 'veritaslens.geminiModel';
 const SETTINGS_KEY_AUTO_MODEL = 'veritaslens.geminiAutoModel';
+const SETTINGS_KEY_OPENAI_KEY = 'veritaslens.openaiKey';
+const SETTINGS_KEY_OPENAI_BASE_URL = 'veritaslens.openaiBaseUrl';
+const SETTINGS_KEY_OPENAI_MODEL = 'veritaslens.openaiModel';
 const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
-const SETTINGS_KEY_AUTO_SUMMARY_INTERVAL = 'veritaslens.autoSummaryInterval';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 
 const HISTORY_KEY = 'veritaslens.history';
@@ -51,13 +58,16 @@ export const [sessionHistory, setSessionHistory] = createSignal<HistoryEntry[]>(
 export const [meetingPrepSections, setMeetingPrepSectionsSignal] = createSignal<MeetingPrepSection[]>([]);
 
 const [settings, setSettings] = createSignal<Settings>({
+  provider: DEFAULT_LLM_PROVIDER,
   geminiApiKey: '',
   geminiModel: DEFAULT_GEMINI_MODEL,
   geminiAutoModel: DEFAULT_GEMINI_AUTO_MODEL,
+  openaiApiKey: '',
+  openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
+  openaiModel: DEFAULT_OPENAI_MODEL,
   responseLanguage: DEFAULT_LANGUAGE,
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
-  autoSummaryInterval: DEFAULT_AUTO_SUMMARY_INTERVAL,
   discreet: false,
 });
 export { settings };
@@ -68,24 +78,42 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
   const safeGet = async (k: string): Promise<string> => {
     try { return await getLocalStorage(k); } catch { return ''; }
   };
-  const [key, rawModel, rawAutoModel, rawLang, rawBuffer, rawAutoEnabled, rawAutoInterval, rawDiscreet] = await Promise.all([
+  const [
+    rawProvider,
+    key,
+    rawModel,
+    rawAutoModel,
+    rawOpenaiKey,
+    rawOpenaiBaseUrl,
+    rawOpenaiModel,
+    rawLang,
+    rawBuffer,
+    rawAutoEnabled,
+    rawDiscreet,
+  ] = await Promise.all([
+    safeGet(SETTINGS_KEY_PROVIDER),
     safeGet(SETTINGS_KEY_GEMINI),
     safeGet(SETTINGS_KEY_MODEL),
     safeGet(SETTINGS_KEY_AUTO_MODEL),
+    safeGet(SETTINGS_KEY_OPENAI_KEY),
+    safeGet(SETTINGS_KEY_OPENAI_BASE_URL),
+    safeGet(SETTINGS_KEY_OPENAI_MODEL),
     safeGet(SETTINGS_KEY_LANGUAGE),
     safeGet(SETTINGS_KEY_BUFFER_DURATION),
     safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
-    safeGet(SETTINGS_KEY_AUTO_SUMMARY_INTERVAL),
     safeGet(SETTINGS_KEY_DISCREET),
   ]);
   setSettings({
+    provider: coerceProvider(rawProvider),
     geminiApiKey: key,
     geminiModel: coerceModel(rawModel),
     geminiAutoModel: coerceAutoModel(rawAutoModel),
+    openaiApiKey: rawOpenaiKey,
+    openaiBaseUrl: coerceOpenaiBaseUrl(rawOpenaiBaseUrl),
+    openaiModel: rawOpenaiModel || DEFAULT_OPENAI_MODEL,
     responseLanguage: coerceLanguage(rawLang),
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
-    autoSummaryInterval: coerceAutoSummaryInterval(rawAutoInterval),
     discreet: rawDiscreet === 'true',
   });
 }
@@ -103,6 +131,9 @@ async function saveSetting<K extends keyof Settings>(
   return ok;
 }
 
+export const saveProvider = (setLs: SetLs, provider: LlmProvider): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_PROVIDER, 'provider', provider);
+
 export const saveGeminiKey = (setLs: SetLs, key: string): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_GEMINI, 'geminiApiKey', key);
 
@@ -112,6 +143,15 @@ export const saveGeminiModel = (setLs: SetLs, model: GeminiModel): Promise<boole
 export const saveGeminiAutoModel = (setLs: SetLs, model: GeminiModel): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_MODEL, 'geminiAutoModel', model);
 
+export const saveOpenaiKey = (setLs: SetLs, key: string): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_OPENAI_KEY, 'openaiApiKey', key);
+
+export const saveOpenaiBaseUrl = (setLs: SetLs, url: OpenAiBaseUrl): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_OPENAI_BASE_URL, 'openaiBaseUrl', url);
+
+export const saveOpenaiModel = (setLs: SetLs, model: string): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_OPENAI_MODEL, 'openaiModel', model);
+
 export const saveResponseLanguage = (setLs: SetLs, language: LanguageCode): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_LANGUAGE, 'responseLanguage', language);
 
@@ -120,9 +160,6 @@ export const saveBufferDuration = (setLs: SetLs, duration: BufferDuration): Prom
 
 export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_SUMMARY_ENABLED, 'autoSummaryEnabled', enabled);
-
-export const saveAutoSummaryInterval = (setLs: SetLs, interval: AutoSummaryInterval): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_AUTO_SUMMARY_INTERVAL, 'autoSummaryInterval', interval);
 
 export const saveDiscreet = (setLs: SetLs, discreet: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_DISCREET, 'discreet', discreet);
@@ -351,14 +388,22 @@ function coerceLanguage(raw: string | null | undefined): LanguageCode {
 
 function coerceBufferDuration(raw: string | null | undefined): BufferDuration {
   const n = Number(raw);
-  if (n === 30 || n === 120 || n === 300 || n === 600) return n;
+  if (n === 30 || n === 120 || n === 300) return n;
+  // Back-compat: 0.6.x persisted 600 (10 min); clamp to the new 5-min cap.
+  if (n === 600) return 300;
   return DEFAULT_BUFFER_DURATION;
 }
 
-function coerceAutoSummaryInterval(raw: string | null | undefined): AutoSummaryInterval {
-  const n = Number(raw);
-  if (n === 1 || n === 2 || n === 5) return n;
-  return DEFAULT_AUTO_SUMMARY_INTERVAL;
+function coerceProvider(raw: string | null | undefined): LlmProvider {
+  if (raw === 'gemini' || raw === 'openai-compatible') return raw;
+  return DEFAULT_LLM_PROVIDER;
+}
+
+function coerceOpenaiBaseUrl(raw: string | null | undefined): OpenAiBaseUrl {
+  if (raw && (OPENAI_BASE_URLS as readonly string[]).includes(raw)) {
+    return raw as OpenAiBaseUrl;
+  }
+  return DEFAULT_OPENAI_BASE_URL;
 }
 
 // ---------- Meeting Prep context ----------

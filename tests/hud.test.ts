@@ -284,7 +284,7 @@ describe('setSummaryBadgeState', () => {
     expect(badgeWrites()).toEqual(['summarizing...']);
   });
 
-  it('flashes "summary ready" then reverts to "auto-summary" after 2.5s', async () => {
+  it('flashes "summary ready" then reverts to "summary" after 2.5s', async () => {
     vi.useFakeTimers();
     try {
       await saveAutoSummaryEnabled(fakeSetLs, true);
@@ -294,7 +294,7 @@ describe('setSummaryBadgeState', () => {
       expect(badgeWrites()).toEqual(['summary ready']);
       vi.advanceTimersByTime(2500);
       await Promise.resolve();
-      expect(badgeWrites()).toEqual(['summary ready', 'auto-summary']);
+      expect(badgeWrites()).toEqual(['summary ready', 'summary']);
     } finally {
       vi.useRealTimers();
     }

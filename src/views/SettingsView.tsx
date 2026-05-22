@@ -12,13 +12,16 @@ import {
   modelsLoading,
   newSectionId,
   saveAutoSummaryEnabled,
-  saveAutoSummaryInterval,
   saveBufferDuration,
   saveDiscreet,
   saveGeminiKey,
   saveGeminiModel,
   saveGeminiAutoModel,
   saveMeetingPrepSections,
+  saveOpenaiBaseUrl,
+  saveOpenaiKey,
+  saveOpenaiModel,
+  saveProvider,
   saveResponseLanguage,
   sessionHistory,
   setAvailableModels,
@@ -29,13 +32,15 @@ import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import {
   LANGUAGES,
-  type AutoSummaryInterval,
+  OPENAI_BASE_URLS,
   type BufferDuration,
   type GeminiModel,
   type HistoryEntry,
   type LanguageCode,
   type LensResult,
+  type LlmProvider,
   type MeetingPrepSection,
+  type OpenAiBaseUrl,
 } from '@/types';
 import { personas } from '@/personas';
 import { MEETING_PREP_ID } from '@/personas/meetingPrep';
@@ -44,14 +49,59 @@ const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
   { value: 30, label: '30 seconds' },
   { value: 120, label: '2 minutes' },
   { value: 300, label: '5 minutes' },
-  { value: 600, label: '10 minutes' },
 ];
 
-const AUTO_INTERVAL_OPTIONS: { value: AutoSummaryInterval; label: string }[] = [
-  { value: 1, label: 'Every minute' },
-  { value: 2, label: 'Every 2 minutes' },
-  { value: 5, label: 'Every 5 minutes' },
+/**
+ * Flat host/provider list for the single Provider dropdown. Each non-Gemini
+ * entry encodes both `provider` and `openaiBaseUrl` into one composite value
+ * so we can keep the UI as one select instead of radio-group + sub-dropdown.
+ * Value is parsed by `parseProviderOption` on change.
+ */
+type ProviderOption =
+  | { kind: 'gemini'; value: 'gemini'; label: string }
+  | { kind: 'openai-compatible'; value: string; label: string; baseUrl: OpenAiBaseUrl };
+
+const PROVIDER_OPTIONS: ProviderOption[] = [
+  { kind: 'gemini', value: 'gemini', label: 'Google Gemini' },
+  { kind: 'openai-compatible', value: 'openai-compatible:https://api.openai.com/v1', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
+  { kind: 'openai-compatible', value: 'openai-compatible:https://openrouter.ai/api/v1', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  { kind: 'openai-compatible', value: 'openai-compatible:https://api.groq.com/openai/v1', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
 ];
+
+function providerOptionValue(provider: LlmProvider, baseUrl: OpenAiBaseUrl): string {
+  return provider === 'gemini' ? 'gemini' : `openai-compatible:${baseUrl}`;
+}
+
+function parseProviderOption(value: string): { provider: LlmProvider; baseUrl: OpenAiBaseUrl } {
+  if (value === 'gemini') {
+    return { provider: 'gemini', baseUrl: 'https://api.openai.com/v1' };
+  }
+  const sep = value.indexOf(':');
+  const url = sep > -1 ? value.slice(sep + 1) : '';
+  const match = OPENAI_BASE_URLS.find((u) => u === url);
+  return { provider: 'openai-compatible', baseUrl: match ?? 'https://api.openai.com/v1' };
+}
+
+/**
+ * Build the OpenAI model dropdown options. Always includes the currently-
+ * saved model so the `<select>`'s `value` binds to a real `<option>` even
+ * before the live list returns. Fetched models are appended after, de-duped.
+ */
+function openaiModelOptions(saved: string, fetched: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  if (saved) {
+    out.push(saved);
+    seen.add(saved);
+  }
+  for (const m of fetched) {
+    if (!seen.has(m)) {
+      seen.add(m);
+      out.push(m);
+    }
+  }
+  return out;
+}
 
 function badgeIcon(badge: string): string {
   const u = badge.toUpperCase();
@@ -160,13 +210,18 @@ function formatSessionDate(ts: number): string {
 }
 
 export const SettingsView: Component = () => {
+  const [draftProvider, setDraftProvider] = createSignal<LlmProvider>(settings().provider);
   const [draftKey, setDraftKey] = createSignal(settings().geminiApiKey);
   const [draftModel, setDraftModel] = createSignal<GeminiModel>(settings().geminiModel);
   const [draftAutoModel, setDraftAutoModel] = createSignal<GeminiModel>(settings().geminiAutoModel);
+  const [draftOpenaiKey, setDraftOpenaiKey] = createSignal(settings().openaiApiKey);
+  const [draftOpenaiBaseUrl, setDraftOpenaiBaseUrl] = createSignal<OpenAiBaseUrl>(settings().openaiBaseUrl);
+  const [draftOpenaiModel, setDraftOpenaiModel] = createSignal<string>(settings().openaiModel);
+  const [openaiModels, setOpenaiModels] = createSignal<string[]>([]);
+  const [openaiModelsLoading, setOpenaiModelsLoading] = createSignal(false);
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
-  const [draftAutoInterval, setDraftAutoInterval] = createSignal<AutoSummaryInterval>(settings().autoSummaryInterval);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   // Local draft of meeting-prep sections. Mirrors the persisted store value but
   // always carries at least one row so the editor never collapses to nothing.
@@ -244,8 +299,39 @@ export const SettingsView: Component = () => {
     });
   });
 
-  const isConfigured = createMemo(() => settings().geminiApiKey.trim().length >= 10);
-  const canSave = createMemo(() => draftKey().trim().length >= 10);
+  // Mirror of the Gemini models effect, but for the OpenAI-compatible provider.
+  // Refetches whenever the key OR the base URL changes — different hosts under
+  // the same OpenAI API expose different model catalogs, so a URL switch must
+  // invalidate the cached list.
+  createEffect(() => {
+    const key = draftOpenaiKey();
+    const baseUrl = draftOpenaiBaseUrl();
+    if (key.trim().length < 10) return;
+    const ac = new AbortController();
+    const debounce = setTimeout(() => {
+      setOpenaiModelsLoading(true);
+      void import('@/llm/openai').then(({ fetchOpenAiModels }) =>
+        fetchOpenAiModels(key, baseUrl, ac.signal)
+          .then((models) => { if (!ac.signal.aborted && models.length > 0) setOpenaiModels(models); })
+          .catch(() => { /* keep current fallback */ })
+          .finally(() => { if (!ac.signal.aborted) setOpenaiModelsLoading(false); }),
+      );
+    }, 300);
+    onCleanup(() => {
+      clearTimeout(debounce);
+      ac.abort();
+    });
+  });
+
+  const isConfigured = createMemo(() => {
+    const s = settings();
+    if (s.provider === 'openai-compatible') return s.openaiApiKey.trim().length >= 10;
+    return s.geminiApiKey.trim().length >= 10;
+  });
+  const canSave = createMemo(() => {
+    if (draftProvider() === 'openai-compatible') return draftOpenaiKey().trim().length >= 10;
+    return draftKey().trim().length >= 10;
+  });
 
   // Autosave the meeting-prep draft on debounce. Stays separate from the main
   // Save button (which handles every other setting) because the editor is
@@ -346,8 +432,14 @@ export const SettingsView: Component = () => {
   );
 
   // Search returns most-recent-first matches across the entire history.
-  // Each entry is indexed by question + quote + badge + lensName, joined
-  // and lowercased. Empty query collapses back to the session list view.
+  // Each entry is indexed by question + quote + badge + lensName + tags,
+  // joined and lowercased. `tags` are auto-derived at write time (lifecycle's
+  // extractTags) and never rendered — they exist purely to broaden recall on
+  // this search box, e.g. surfacing an entry by a named entity that only
+  // appears in the lens result's detail fields, not the recorded question.
+  // Entries written by 0.6.x lack `tags`; the `?? ''` fallback keeps them
+  // searchable through the other fields. Empty query collapses back to the
+  // session list view.
   const searchMatches = createMemo<HistoryEntry[]>(() => {
     const q = searchQuery().trim().toLowerCase();
     if (q.length === 0) return [];
@@ -355,7 +447,8 @@ export const SettingsView: Component = () => {
     const history = sessionHistory();
     for (let i = history.length - 1; i >= 0; i--) {
       const e = history[i]!;
-      const haystack = `${e.question} ${e.quote} ${e.badge} ${e.lensName}`.toLowerCase();
+      const tagBlob = e.tags?.join(' ') ?? '';
+      const haystack = `${e.question} ${e.quote} ${e.badge} ${e.lensName} ${tagBlob}`.toLowerCase();
       if (haystack.includes(q)) hits.push(e);
     }
     return hits;
@@ -370,13 +463,16 @@ export const SettingsView: Component = () => {
       const bridge = getBridge();
       const setLs = (k: string, v: string) => bridge.setLocalStorage(k, v);
       const results = await Promise.all([
+        saveProvider(setLs, draftProvider()),
         saveGeminiKey(setLs, draftKey().trim()),
         saveGeminiModel(setLs, draftModel()),
         saveGeminiAutoModel(setLs, draftAutoModel()),
+        saveOpenaiKey(setLs, draftOpenaiKey().trim()),
+        saveOpenaiBaseUrl(setLs, draftOpenaiBaseUrl()),
+        saveOpenaiModel(setLs, draftOpenaiModel()),
         saveResponseLanguage(setLs, draftLanguage()),
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
-        saveAutoSummaryInterval(setLs, draftAutoInterval()),
         saveDiscreet(setLs, draftDiscreet()),
       ]);
       if (results.every(Boolean)) {
@@ -826,54 +922,123 @@ export const SettingsView: Component = () => {
             }}
           >
             <label class="field">
-              <span class="field-label">Gemini API key</span>
-              <input
-                type="password"
-                autocomplete="off"
-                spellcheck={false}
-                placeholder="AIza…"
-                value={draftKey()}
-                onInput={(e) => setDraftKey(e.currentTarget.value)}
-              />
+              <span class="field-label">Provider</span>
+              <select
+                value={providerOptionValue(draftProvider(), draftOpenaiBaseUrl())}
+                onChange={(e) => {
+                  const parsed = parseProviderOption(e.currentTarget.value);
+                  setDraftProvider(parsed.provider);
+                  if (parsed.provider === 'openai-compatible') {
+                    setDraftOpenaiBaseUrl(parsed.baseUrl);
+                  }
+                }}
+              >
+                <For each={PROVIDER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
+              </select>
               <span class="field-hint">
-                Stored only on this device. Get one at{' '}
-                <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer">
-                  aistudio.google.com
-                </a>
-                .
+                Gemini sends audio directly. The OpenAI-compatible providers
+                transcribe via the same key first, then analyse the transcript —
+                Groq and OpenRouter do not currently host Whisper, so pick Gemini
+                if you need audio analysis at those hosts.
               </span>
             </label>
 
-            <label class="field">
-              <span class="field-label">
-                Model
-                <Show when={modelsLoading()}>
-                  <span class="spinner inline" />
+            <Show when={draftProvider() === 'gemini'}>
+              <label class="field">
+                <span class="field-label">API key</span>
+                <input
+                  type="password"
+                  autocomplete="off"
+                  spellcheck={false}
+                  placeholder="AIza…"
+                  value={draftKey()}
+                  onInput={(e) => setDraftKey(e.currentTarget.value)}
+                />
+                <span class="field-hint">
+                  Stored only on this device. Get one at{' '}
+                  <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer">
+                    aistudio.google.com
+                  </a>
+                  .
+                </span>
+              </label>
+
+              <label class="field">
+                <span class="field-label">
+                  Model
+                  <Show when={modelsLoading()}>
+                    <span class="spinner inline" />
+                  </Show>
+                </span>
+                <select
+                  value={draftModel()}
+                  onChange={(e) => setDraftModel(e.currentTarget.value as GeminiModel)}
+                >
+                  <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
+                </select>
+                <Show when={!isConfigured() && !modelsLoading()}>
+                  <span class="field-hint">Enter an API key above to load available models.</span>
                 </Show>
-              </span>
-              <select
-                value={draftModel()}
-                onChange={(e) => setDraftModel(e.currentTarget.value as GeminiModel)}
-              >
-                <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
-              </select>
-              <Show when={!isConfigured() && !modelsLoading()}>
-                <span class="field-hint">Enter an API key above to load available models.</span>
-              </Show>
-            </label>
+              </label>
 
-            <label class="field">
-              <span class="field-label">Auto-lens classifier model</span>
-              <select
-                value={draftAutoModel()}
-                onChange={(e) => setDraftAutoModel(e.currentTarget.value as GeminiModel)}
-              >
-                <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
-              </select>
-              <span class="field-hint">
-                The Auto lens makes an extra fast call to pick a lens. Use a lighter model (e.g. flash-lite) to stay under rate limits.
-              </span>
-            </label>
+              <label class="field">
+                <span class="field-label">Auto-lens classifier model</span>
+                <select
+                  value={draftAutoModel()}
+                  onChange={(e) => setDraftAutoModel(e.currentTarget.value as GeminiModel)}
+                >
+                  <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
+                </select>
+                <span class="field-hint">
+                  The Auto lens makes an extra fast call to pick a lens. Use a lighter model (e.g. flash-lite) to stay under rate limits.
+                </span>
+              </label>
+            </Show>
+
+            <Show when={draftProvider() === 'openai-compatible'}>
+              <label class="field">
+                <span class="field-label">API key</span>
+                <input
+                  type="password"
+                  autocomplete="off"
+                  spellcheck={false}
+                  placeholder="sk-…"
+                  value={draftOpenaiKey()}
+                  onInput={(e) => setDraftOpenaiKey(e.currentTarget.value)}
+                />
+                <span class="field-hint">
+                  Stored only on this device. Get one from your provider's
+                  dashboard.
+                </span>
+              </label>
+
+              <label class="field">
+                <span class="field-label">
+                  Model
+                  <Show when={openaiModelsLoading()}>
+                    <span class="spinner inline" />
+                  </Show>
+                </span>
+                <select
+                  value={draftOpenaiModel()}
+                  onChange={(e) => setDraftOpenaiModel(e.currentTarget.value)}
+                >
+                  {/*
+                    Always render as a dropdown. Before the fetch lands the only
+                    option is whatever's persisted; once the live list arrives
+                    we union it with the saved model so a model that's no longer
+                    served (or one we couldn't fetch yet) is still selectable
+                    until the user picks a fresh one.
+                  */}
+                  <For each={openaiModelOptions(draftOpenaiModel(), openaiModels())}>
+                    {(m) => <option value={m}>{m}</option>}
+                  </For>
+                </select>
+                <Show when={openaiModels().length === 0 && !openaiModelsLoading()}>
+                  <span class="field-hint">Enter an API key above to load the full model list.</span>
+                </Show>
+              </label>
+            </Show>
 
             <label class="field">
               <span class="field-label">Response language</span>
@@ -919,7 +1084,7 @@ export const SettingsView: Component = () => {
             </div>
 
             <div class="field">
-              <span class="field-label">Auto-summary</span>
+              <span class="field-label">Summary</span>
               <label class="toggle-row">
                 <input
                   type="checkbox"
@@ -929,19 +1094,11 @@ export const SettingsView: Component = () => {
                 <span>Enable background summaries</span>
               </label>
               <Show when={draftAutoEnabled()}>
-                <select
-                  value={draftAutoInterval()}
-                  onChange={(e) => setDraftAutoInterval(Number(e.currentTarget.value) as AutoSummaryInterval)}
-                >
-                  <For each={AUTO_INTERVAL_OPTIONS}>
-                    {(opt) => <option value={opt.value}>{opt.label}</option>}
-                  </For>
-                </select>
                 <span class="field-hint warning">
-                  ⚠ Auto-summary sends a Gemini request at each interval plus one final
-                  request when you exit the session. Intermediate ticks are kept in memory
-                  only; one consolidated summary appears in History per session. Sessions
-                  shorter than the interval produce no entry.
+                  ⚠ Sends a Gemini request every 5 minutes during a session, plus a
+                  last-tick and a final-synthesis request when you exit the session
+                  (or change provider/model/key/buffer-duration settings). Both
+                  appear in History; ticks with no voice are skipped automatically.
                 </span>
               </Show>
             </div>
