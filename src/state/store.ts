@@ -35,6 +35,7 @@ const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
+const SETTINGS_KEY_VOICE_GATE = 'veritaslens.voiceGateEnabled';
 
 const HISTORY_KEY = 'veritaslens.history';
 const HISTORY_BYTE_BUDGET = 400 * 1024;
@@ -69,6 +70,9 @@ const [settings, setSettings] = createSignal<Settings>({
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
   discreet: false,
+  // VAD gate defaults ON — that's the whole point of the local Silero model.
+  // Users can opt out via the Settings toggle if the gate misclassifies them.
+  voiceGateEnabled: true,
 });
 export { settings };
 
@@ -90,6 +94,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawBuffer,
     rawAutoEnabled,
     rawDiscreet,
+    rawVoiceGate,
   ] = await Promise.all([
     safeGet(SETTINGS_KEY_PROVIDER),
     safeGet(SETTINGS_KEY_GEMINI),
@@ -102,6 +107,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     safeGet(SETTINGS_KEY_BUFFER_DURATION),
     safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
     safeGet(SETTINGS_KEY_DISCREET),
+    safeGet(SETTINGS_KEY_VOICE_GATE),
   ]);
   setSettings({
     provider: coerceProvider(rawProvider),
@@ -115,6 +121,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
     discreet: rawDiscreet === 'true',
+    // Default-on: missing/blank value (first run, never saved) ⇒ true.
+    voiceGateEnabled: rawVoiceGate === '' ? true : rawVoiceGate !== 'false',
   });
 }
 
@@ -160,6 +168,9 @@ export const saveBufferDuration = (setLs: SetLs, duration: BufferDuration): Prom
 
 export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_SUMMARY_ENABLED, 'autoSummaryEnabled', enabled);
+
+export const saveVoiceGateEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_VOICE_GATE, 'voiceGateEnabled', enabled);
 
 export const saveDiscreet = (setLs: SetLs, discreet: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_DISCREET, 'discreet', discreet);

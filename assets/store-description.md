@@ -1,21 +1,30 @@
-# VeritasLens — Even Hub store copy
+**VeritasLens — Silent intelligence for your G2.**
 
-## Tagline
+A conversation is happening around you. Someone makes a confident claim. A statistic flies past. Jargon goes unexplained. A double-tap on your Even Realities G2 captures the last few minutes of audio, sends it to your chosen AI, and draws a glanceable verdict on the HUD. No phone in hand. No interruption.
 
-Silent intelligence for your G2 — tap to fact-check what was just said.
+**Seven lenses**
+- **Fact Check** — TRUE / FALSE / UNVERIFIED.
+- **Stats Check** — flags numbers as PLAUSIBLE or SUSPICIOUS.
+- **Fallacy Check** — names the logical move.
+- **Bias Check** — surfaces political or emotional spin.
+- **Trivia** — direct answers, on demand.
+- **Simplify** — jargon in plain language.
+- **Meeting Prep** — answers grounded in notes and attachments you write on your phone beforehand, each cited with a verbatim excerpt.
 
-## Short description (~50 words)
+Or leave **Auto** on and let VeritasLens pick the right lens for what it just heard.
 
-Tap your Even Realities G2 to analyse the last few seconds of conversation. VeritasLens sends a short audio snippet to Google Gemini and returns a glanceable verdict on the HUD — fact, fallacy, bias, stats, summary, and more. Bring your own key. Audio never leaves the device unless you trigger a check.
+**Built for real conversations**
+- Multi-claim per tap — swipe through up to five findings on the HUD.
+- Silence-aware — a local voice-activity model skips the API call when no one's speaking.
+- End-of-session Summary — a consolidated synthesis written to History when you exit.
+- Discreet mode — only a small dot on the lens; bystanders see no UI chrome.
+- Searchable on-device History across topic, verdict, entity.
+- 11 European response languages.
 
-## Long description (~200 words)
+**Bring your own AI**
+Pick **Google Gemini** (analyses audio directly), **OpenAI**, or **Groq** (Whisper-transcribes first). One API key, stored only on this device.
 
-VeritasLens turns the right temple of your Even Realities G2 into a contextual intelligence trigger. A configurable in-memory audio buffer (30 seconds to 10 minutes) captures the conversation around you. Tap the temple and VeritasLens sends a single audio snippet to Google Gemini, then draws a glanceable result on the 576×288 HUD.
+**Privacy by architecture**
+No companion server. No telemetry. No account. Audio lives in a rolling in-memory buffer (30 s, 2 min, or 5 min), is never written to disk, and is dropped the instant your request returns. The only outbound traffic is to the provider you chose.
 
-Pick the right lens for the moment, or leave **Auto** on and let VeritasLens classify the audio and route to the best one: Fact Check, Trivia, Fallacy Check, Stats Check, Bias Check, Simplify, or Summary. Responses are returned in any of 11 European languages. Verdict labels stay canonical so the HUD always renders correctly.
-
-Every analysis is saved to a local on-device session log, browsable from the HUD or the Settings → History tab on your phone. Optional auto-summary runs quietly in the background on a 1, 2, or 5 minute cadence.
-
-Bring your own Gemini API key. The key is stored on-device, never synced. Audio lives only in memory and is dropped immediately after each request — nothing is written to disk, ever. The single outbound host is `generativelanguage.googleapis.com`.
-
-No companion server. No telemetry. Tap, analyse, glance.
+Tap. Analyse. Glance. The conversation never paused.

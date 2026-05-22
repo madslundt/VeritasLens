@@ -195,6 +195,14 @@ export interface Settings {
    * Back item, which also returns the layout to the dot-only view.
    */
   discreet: boolean;
+  /**
+   * When true (default), the in-browser VAD (Silero, with an FFT fallback)
+   * short-circuits taps on silence / non-voice noise — the HUD shows `○`
+   * (no voice) or `~` (too noisy) instead of calling the LLM. Disable as a
+   * bail-out if the gate misclassifies the user's language or environment;
+   * with the gate off, every tap is sent to Gemini regardless of content.
+   */
+  voiceGateEnabled: boolean;
 }
 
 /** Runtime app state. */

@@ -12,6 +12,7 @@ import {
   modelsLoading,
   newSectionId,
   saveAutoSummaryEnabled,
+  saveVoiceGateEnabled,
   saveBufferDuration,
   saveDiscreet,
   saveGeminiKey,
@@ -222,6 +223,7 @@ export const SettingsView: Component = () => {
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
+  const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateEnabled);
   // Local draft of meeting-prep sections. Mirrors the persisted store value but
   // always carries at least one row so the editor never collapses to nothing.
   // Autosaves on debounce; cap violations surface inline in `prepError`.
@@ -473,6 +475,7 @@ export const SettingsView: Component = () => {
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
         saveDiscreet(setLs, draftDiscreet()),
+        saveVoiceGateEnabled(setLs, draftVoiceGate()),
       ]);
       if (results.every(Boolean)) {
         setSaveState('saved');
@@ -492,8 +495,14 @@ export const SettingsView: Component = () => {
     setTestState('running');
     setTestMessage('');
     try {
-      const { runSelfTest } = await import('@/llm/gemini');
-      const result = await runSelfTest(settings().geminiApiKey, draftModel());
+      const { runSelfTest } = await import('@/llm');
+      // Facade picks the active-provider key + model. For Gemini this hits
+      // generateContent with a 1-byte ping; for OpenAI-compatible providers
+      // it pings /models (no audio dependency to verify).
+      const s = settings();
+      const apiKey = s.provider === 'openai-compatible' ? s.openaiApiKey : s.geminiApiKey;
+      const model = s.provider === 'openai-compatible' ? s.openaiModel : draftModel();
+      const result = await runSelfTest(apiKey, model);
       setTestState('ok');
       setTestMessage(`Reachable · ${result.latencyMs} ms`);
     } catch (err) {
@@ -936,8 +945,7 @@ export const SettingsView: Component = () => {
               </select>
               <span class="field-hint">
                 Gemini analyses audio directly. OpenAI and Groq transcribe the
-                audio first (Whisper), then analyse the transcript — one API
-                key per provider.
+                audio first (Whisper), then analyse the transcript.
               </span>
             </label>
 
@@ -1062,6 +1070,25 @@ export const SettingsView: Component = () => {
                 Longer buffers give Gemini more context but use more tokens per request.
               </span>
             </label>
+
+            <div class="field">
+              <span class="field-label">Voice detection</span>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftVoiceGate()}
+                  onChange={(e) => setDraftVoiceGate(e.currentTarget.checked)}
+                />
+                <span>Skip silence and non-voice noise</span>
+              </label>
+              <span class="field-hint">
+                Skips the LLM call when no speech is detected.
+                <br />
+                <strong>○</strong> no voice / silence
+                <br />
+                <strong>~</strong> too noisy to pick up voice
+              </span>
+            </div>
 
             <div class="field">
               <span class="field-label">Discreet HUD</span>

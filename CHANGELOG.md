@@ -2,7 +2,7 @@
 
 ## 0.7.0 — 2026-05-22
 - **More providers**: bring your own OpenAI or Groq key as an alternative to Gemini. OpenAI and Groq transcribe the audio first (Whisper) and then analyse the transcript; one API key per provider.
-- **Skip silence and noise**: taps with nothing to analyse short-circuit before an API call. The HUD flashes an `○` icon and shows "No speech captured" instead of waiting on a pointless request.
+- **Skip silence and noise**: a small voice-activity model runs locally on each tap, so taps with nothing to analyse short-circuit before an API call. The HUD flashes `○` (no voice) or `~` (too noisy) instead of waiting on a pointless request. Toggleable in Settings.
 - **End-of-session Summary**: leaving the lens — manually or by changing provider / model / API key / buffer length — now writes a final interval Summary plus an overall session synthesis. Silent intervals are skipped.
 - **Recording buffer** capped at 5 minutes (down from 10) to match the new fixed Summary cadence (every 5 minutes, no longer configurable).
 - **History search** now also matches auto-derived tags from each entry's content, so a topic, verdict, or entity name finds entries that don't have the word in the recorded question.

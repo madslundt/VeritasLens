@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   PcmRingBuffer,
-  analyzeBufferForVoice,
+  analyzeBufferForVoiceFFT,
   encodePcmToWav,
   uint8ToBase64,
 } from '../src/runtime/audioBuffer';
+import {
+  analyzeBufferForVoice,
+  __resetVADAvailabilityForTests,
+} from '../src/runtime/vad';
 
 /** Build a Uint8Array of LE int16 samples from a number[] of samples. */
 function pcm(samples: number[] | Int16Array): Uint8Array {
@@ -201,16 +205,16 @@ describe('uint8ToBase64', () => {
   });
 });
 
-describe('analyzeBufferForVoice', () => {
+describe('analyzeBufferForVoiceFFT (fallback path)', () => {
   it('returns zero frames for an empty buffer', () => {
-    const a = analyzeBufferForVoice(new Uint8Array(0), 16_000);
+    const a = analyzeBufferForVoiceFFT(new Uint8Array(0), 16_000);
     expect(a.totalFrames).toBe(0);
     expect(a.voiceFrames).toBe(0);
   });
 
   it('classifies pure silence as silence everywhere', () => {
     const buf = buildSignal(2, () => 0);
-    const a = analyzeBufferForVoice(buf, 16_000);
+    const a = analyzeBufferForVoiceFFT(buf, 16_000);
     expect(a.totalFrames).toBeGreaterThan(0);
     expect(a.voiceFrames).toBe(0);
     expect(a.silenceFrames).toBe(a.totalFrames);
@@ -227,7 +231,7 @@ describe('analyzeBufferForVoice', () => {
       return ((seed >>> 0) / 0xffffffff) * 2 - 1;
     };
     const buf = buildSignal(2, () => rand() * 8000);
-    const a = analyzeBufferForVoice(buf, 16_000);
+    const a = analyzeBufferForVoiceFFT(buf, 16_000);
     expect(a.totalFrames).toBeGreaterThan(0);
     expect(a.voiceFrames).toBe(0);
     expect(a.noiseFrames).toBeGreaterThan(0);
@@ -241,7 +245,7 @@ describe('analyzeBufferForVoice', () => {
       3000 * Math.sin(2 * Math.PI * 800 * t) +
       2000 * Math.sin(2 * Math.PI * 1500 * t)
     );
-    const a = analyzeBufferForVoice(buf, 16_000);
+    const a = analyzeBufferForVoiceFFT(buf, 16_000);
     expect(a.voiceFrames).toBeGreaterThanOrEqual(1);
     // Early-exit returns as soon as voice is found, so totalFrames is small.
     expect(a.totalFrames).toBeGreaterThanOrEqual(1);
@@ -254,7 +258,7 @@ describe('analyzeBufferForVoice', () => {
     const combined = new Uint8Array(voicePart.length + silentPart.length);
     combined.set(voicePart, 0);
     combined.set(silentPart, voicePart.length);
-    const a = analyzeBufferForVoice(combined, 16_000);
+    const a = analyzeBufferForVoiceFFT(combined, 16_000);
     expect(a.voiceFrames).toBeGreaterThanOrEqual(1);
   });
 
@@ -266,7 +270,7 @@ describe('analyzeBufferForVoice', () => {
     for (let i = 0; i < 4000; i++) {
       samples[i] = Math.round(5000 * Math.sin((2 * Math.PI * 440 * i) / 16_000));
     }
-    const a = analyzeBufferForVoice(pcm(samples), 16_000);
+    const a = analyzeBufferForVoiceFFT(pcm(samples), 16_000);
     expect(a.voiceFrames).toBe(1);
     expect(a.totalFrames).toBe(1);
   });
@@ -274,8 +278,30 @@ describe('analyzeBufferForVoice', () => {
   it('handles a buffer shorter than one frame by analyzing what is available', () => {
     // 100 ms of voice — shorter than the 250 ms frame size.
     const buf = buildSignal(0.1, (t) => 5000 * Math.sin(2 * Math.PI * 440 * t));
-    const a = analyzeBufferForVoice(buf, 16_000);
+    const a = analyzeBufferForVoiceFFT(buf, 16_000);
     expect(a.totalFrames).toBeGreaterThanOrEqual(1);
     expect(a.voiceFrames + a.silenceFrames + a.noiseFrames).toBe(a.totalFrames);
+  });
+});
+
+describe('analyzeBufferForVoice (Silero-first wrapper)', () => {
+  it('falls back to the FFT path when Silero cannot initialize', async () => {
+    // The test environment is `node`, so dynamic-import of @ricky0123/vad-web
+    // followed by an attempt to fetch the model URL will reject. The wrapper
+    // must catch that and return the FFT result instead of throwing.
+    __resetVADAvailabilityForTests();
+    const buf = buildSignal(1, (t) =>
+      4000 * Math.sin(2 * Math.PI * 220 * t) +
+      3000 * Math.sin(2 * Math.PI * 800 * t)
+    );
+    const a = await analyzeBufferForVoice(buf, 16_000);
+    expect(a.voiceFrames).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reports silence on an empty buffer via the fallback', async () => {
+    __resetVADAvailabilityForTests();
+    const a = await analyzeBufferForVoice(new Uint8Array(0), 16_000);
+    expect(a.totalFrames).toBe(0);
+    expect(a.voiceFrames).toBe(0);
   });
 });

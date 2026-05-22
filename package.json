@@ -1,7 +1,7 @@
 {
   "name": "veritaslens",
   "private": true,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "type": "module",
   "description": "Silent Intelligence layer for Even Realities G2 — fact-check the last 30 seconds with a gesture.",
   "scripts": {
@@ -13,10 +13,12 @@
     "lint": "tsc --noEmit",
     "pack": "evenhub pack app.json ./dist -o veritaslens.ehpk",
     "qr": "evenhub qr",
-    "sim": "evenhub-simulator http://localhost:5173"
+    "sim": "evenhub-simulator http://localhost:5173 --automation-port 9898"
   },
   "dependencies": {
     "@evenrealities/even_hub_sdk": "^0.0.10",
+    "@ricky0123/vad-web": "^0.0.30",
+    "onnxruntime-web": "^1.26.0",
     "solid-js": "^1.9.3"
   },
   "devDependencies": {

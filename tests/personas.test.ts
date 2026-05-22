@@ -1,7 +1,8 @@
 // tests/personas.test.ts
 import { describe, it, expect } from 'vitest';
-import { trimTo, isRecord, parseJsonResponse, coerceQuote, readClaimsArray, MAX_QUOTE_CHARS } from '../src/personas/_utils';
+import { trimTo, isRecord, parseJsonResponse, coerceQuote, readClaimsArray, MAX_QUOTE_CHARS, NoSpeechError } from '../src/personas/_utils';
 import { parseFactCheckerResponse, buildFactCheckerPrompt } from '../src/personas/factChecker';
+import { toStrictSchema } from '../src/llm/openai';
 
 describe('_utils', () => {
   it('trimTo leaves short strings unchanged', () => {
@@ -55,6 +56,57 @@ describe('_utils', () => {
   it('readClaimsArray returns [] when claims is missing or wrong type', () => {
     expect(readClaimsArray({})).toEqual([]);
     expect(readClaimsArray({ claims: 'nope' })).toEqual([]);
+  });
+
+  it('parseJsonResponse throws NoSpeechError when noSpeech=true', () => {
+    // Same shape returned by both Gemini (via responseSchema) and OpenAI
+    // (via the toStrictSchema-augmented response_format) — the lifecycle
+    // layer relies on this throw to render the `○` glyph, so the route
+    // must stay consistent across providers.
+    expect(() => parseJsonResponse('{"noSpeech":true,"claims":[]}')).toThrow(NoSpeechError);
+  });
+});
+
+describe('toStrictSchema (OpenAI provider augmentation)', () => {
+  it('injects additionalProperties:false and forces required on every object', () => {
+    const input = {
+      type: 'object',
+      properties: {
+        claim: { type: 'string' },
+        nested: { type: 'object', properties: { x: { type: 'number' } } },
+      },
+    };
+    const out = toStrictSchema(input) as Record<string, unknown>;
+    expect(out['additionalProperties']).toBe(false);
+    expect(out['required']).toEqual(['claim', 'nested']);
+    const nested = (out['properties'] as Record<string, Record<string, unknown>>)['nested'];
+    expect(nested?.['additionalProperties']).toBe(false);
+    expect(nested?.['required']).toEqual(['x']);
+  });
+
+  it('recurses into array item schemas', () => {
+    const input = {
+      type: 'object',
+      properties: {
+        claims: {
+          type: 'array',
+          items: { type: 'object', properties: { quote: { type: 'string' } } },
+        },
+      },
+    };
+    const out = toStrictSchema(input) as Record<string, unknown>;
+    const items = ((out['properties'] as Record<string, Record<string, unknown>>)['claims']?.['items']) as Record<string, unknown>;
+    expect(items['additionalProperties']).toBe(false);
+    expect(items['required']).toEqual(['quote']);
+  });
+
+  it('preserves the noSpeech contract end-to-end (OpenAI shape parses through parseJsonResponse)', () => {
+    // Emulates the body OpenAI/Groq actually returns when the model decides no
+    // human speech is present: strict-schema JSON with the augmented top-level
+    // `noSpeech: true` field. Must throw NoSpeechError so the lifecycle
+    // surfaces `○` instead of writing an empty claim into history.
+    const openaiBody = JSON.stringify({ noSpeech: true, claims: [] });
+    expect(() => parseJsonResponse(openaiBody)).toThrow(NoSpeechError);
   });
 });
 

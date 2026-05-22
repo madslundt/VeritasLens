@@ -1,6 +1,8 @@
 // src/runtime/lifecycle.ts
 import { getBridge } from './bridge';
-import { PcmRingBuffer, analyzeBufferForVoice, encodePcmToWav } from './audioBuffer';
+import { PcmRingBuffer, encodePcmToWav } from './audioBuffer';
+import { analyzeBufferForVoice, resetVADAvailability, warmupVAD } from './vad';
+import { getSileroVAD } from './vad/silero';
 import {
   ACTIVE_HINT_ANALYZING,
   ACTIVE_HINT_DEFAULT,
@@ -68,6 +70,28 @@ import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { createEffect, createRoot, on } from 'solid-js';
 import type { LanguageCode, LensResult, MeetingPrepSection } from '@/types';
+
+/**
+ * Maximum amount of recent audio the no-voice gate inspects on each
+ * user-triggered analysis. The full ring buffer can hold up to 5 minutes,
+ * but the user's tap-after-utterance intent is "what just happened" — looking
+ * further back wastes Silero inference time on already-stale audio without
+ * changing the verdict. 10 seconds comfortably spans a typical English
+ * sentence at conversational pace.
+ */
+const VAD_GATE_WINDOW_SEC = 10;
+
+/**
+ * Return the API key for the currently-active provider. Empty string when
+ * unset. The LLM facade (`src/llm/index.ts`) routes by `settings().provider`
+ * and falls back to the matching provider key when `opts.apiKey` is omitted,
+ * so call sites in this file only use this helper for the upfront "is the
+ * user configured" check — they no longer forward the key into callLens.
+ */
+function activeApiKey(): string {
+  const s = settings();
+  return s.provider === 'openai-compatible' ? s.openaiApiKey : s.geminiApiKey;
+}
 
 let running = false;
 let buffer: PcmRingBuffer | null = null;
@@ -143,6 +167,10 @@ export async function startHudRuntime(): Promise<void> {
   try {
     setAppPhase('booting');
     await bootstrapHud(configured ? 'picker' : 'unconfigured');
+    // Kick off Silero VAD warmup in the background so the first user tap
+    // pays no cold-start latency. Fire-and-forget — failures fall back to
+    // the FFT heuristic inside `analyzeBufferForVoice`.
+    void warmupVAD();
     setAppPhase('idle');
     unsubscribeEvents = getBridge().onEvenHubEvent(handleEvent);
     startSettingsWatcher();
@@ -192,6 +220,14 @@ export async function stopHudRuntime(): Promise<void> {
   analyzing = false;
   buffer?.clear();
   buffer = null;
+  // Drop the Silero session reference (calls release/destroy if exposed by the
+  // wrapped library) and clear the cached availability flag so the next
+  // `startHudRuntime → warmupVAD()` re-probes from scratch. Without the
+  // availability reset, a previous-session init failure would lock the
+  // runtime to the FFT fallback for the rest of the page lifetime even
+  // after the underlying network / fetch issue clears.
+  getSileroVAD().dispose();
+  resetVADAvailability();
   try { await getBridge().audioControl(false); } catch { /* ignore */ }
   setAppPhase('idle');
 }
@@ -648,8 +684,13 @@ async function runAnalysis(): Promise<void> {
     return;
   }
 
-  const apiKey = settings().geminiApiKey;
-  if (!apiKey) { await setStatus('error'); setErrorMessage('No Gemini API key.'); return; }
+  const s = settings();
+  const apiKey = s.provider === 'openai-compatible' ? s.openaiApiKey : s.geminiApiKey;
+  if (!apiKey) {
+    await setStatus('error');
+    setErrorMessage(s.provider === 'openai-compatible' ? 'No OpenAI API key.' : 'No Gemini API key.');
+    return;
+  }
 
   const persona = getPersona(activePersona());
   if (!persona) return;
@@ -684,21 +725,27 @@ async function runAnalysis(): Promise<void> {
   // trigger* (not the whole buffer). This makes re-tapping in silence after
   // a fresh analysis correctly report "no speech captured" — otherwise the
   // already-analysed voice content earlier in the buffer would falsely pass
-  // the gate. Always on (no user toggle): the LLM's own noSpeech flag is the
-  // safety net for ambiguous audio that DOES contain at least one voice
-  // frame, so an unconditional client-side gate only ever short-circuits
-  // cases where there is literally nothing new to send.
-  const linearPcm = buffer.toLinearPcm();
-  const sincePcm = buffer.linearPcmSince(lastAnalysisByteOffset);
-  const va = analyzeBufferForVoice(sincePcm, buffer.sampleRate);
-  if (va.voiceFrames === 0) {
-    const noisy = va.noiseFrames > va.silenceFrames;
-    await showNoVoiceFeedback(noisy ? 'Too noisy to pick up voice' : 'No speech captured');
-    setAppPhase('listening');
-    return;
+  // the gate. The LLM's own noSpeech flag remains the safety net for
+  // ambiguous audio that DOES contain at least one voice frame.
+  //
+  // Bypassed entirely when the user has disabled `voiceGateEnabled` (Settings
+  // → Voice detection) — useful as a bail-out if Silero misclassifies their
+  // language or environment.
+  if (settings().voiceGateEnabled) {
+    const sincePcm = buffer.linearPcmSince(lastAnalysisByteOffset);
+    const gatePcm = tailPcm(sincePcm, buffer.sampleRate, VAD_GATE_WINDOW_SEC);
+    const va = await analyzeBufferForVoice(gatePcm, buffer.sampleRate);
+    if (va.voiceFrames === 0) {
+      const noisy = va.noiseFrames > va.silenceFrames;
+      await showNoVoiceFeedback(noisy ? 'Too noisy to pick up voice' : 'No speech captured');
+      setAppPhase('listening');
+      return;
+    }
   }
-  // Snapshot the byte position before the API call so the next gate check
-  // looks only at audio captured after this trigger.
+  // Snapshot the buffer + byte position only after the gate passes. Allocating
+  // the linear PCM copy (~10 MB at the default buffer, ~190 MB at 5 min) and
+  // bumping the byte offset are wasted work when the gate rejects.
+  const linearPcm = buffer.toLinearPcm();
   lastAnalysisByteOffset = buffer.bytesProduced;
 
   // Clear the store signal for sibling components (settings WebView). The HUD
@@ -744,11 +791,9 @@ async function runAnalysis(): Promise<void> {
       const meetingSchema = buildMeetingPrepSchema(sections);
       const meetingContext = buildContextBlock(persona.name);
       const rawText = await callLens({
-        apiKey,
         wav,
         prompt: `${meetingContext}\n\n${meetingPrompt}`,
         schema: meetingSchema,
-        model: settings().geminiModel,
         signal: controller.signal,
         onRetry,
       });
@@ -784,12 +829,17 @@ async function runAnalysis(): Promise<void> {
     if (persona.id === 'auto') {
       const classifierPrompt = buildPromptWithContext(persona, lang);
       const classifierContext = buildContextBlock(persona.name);
+      // Only Gemini exposes a dedicated lighter classifier model. On the
+      // OpenAI-compatible path the regular chat model is used (no override),
+      // since there's no separate "auto" model knob in that provider's
+      // settings.
+      const classifierModel =
+        settings().provider === 'gemini' ? settings().geminiAutoModel : undefined;
       const classifierRaw = await callLens({
-        apiKey,
         wav,
         prompt: `${classifierContext}\n\n${classifierPrompt}`,
         schema: AUTO_CLASSIFIER_SCHEMA,
-        model: settings().geminiAutoModel,
+        model: classifierModel,
         signal: controller.signal,
         onRetry,
       });
@@ -809,11 +859,9 @@ async function runAnalysis(): Promise<void> {
     const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
     const analysisContext = buildContextBlock(analysisPersona.name);
     const rawText = await callLens({
-      apiKey,
       wav,
       prompt: `${analysisContext}\n\n${analysisPrompt}`,
       schema: analysisPersona.schema,
-      model: settings().geminiModel,
       signal: controller.signal,
       onRetry,
     });
@@ -891,6 +939,17 @@ async function runAnalysis(): Promise<void> {
 const AUTO_SUMMARY_INTERVAL_MS = 5 * 60_000;
 
 /**
+ * Return at most the most-recent `maxSeconds` of audio from a 16-bit LE PCM
+ * buffer. Used by the VAD gate to bound Silero inference latency on long
+ * ring-buffer windows. Returns the original buffer if it's already shorter.
+ */
+function tailPcm(pcm: Uint8Array, sampleRate: number, maxSeconds: number): Uint8Array {
+  const maxBytes = maxSeconds * sampleRate * 2; // 16-bit mono ⇒ 2 bytes/sample
+  if (pcm.length <= maxBytes) return pcm;
+  return pcm.subarray(pcm.length - maxBytes);
+}
+
+/**
  * Disposer for the Solid effect that watches "critical" settings — the ones
  * that invalidate the audio capture path when changed (provider, model, API
  * key, buffer duration). On change, an active session is torn down via
@@ -963,14 +1022,17 @@ function canGenerateFinalSummary(): boolean {
 
 async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;
-  const apiKey = settings().geminiApiKey;
-  if (!apiKey) return;
+  // Skip when the active provider has no API key — the facade would throw
+  // and we'd just be burning Silero inference time before discovering that.
+  if (!activeApiKey()) return;
   // Always gate auto-summary on voice presence — there is no user knob for
   // this because there is nothing to summarise in a silent/noisy window, and
   // skipping the API call here is pure upside.
   const linearPcm = buffer.toLinearPcm();
-  const va = analyzeBufferForVoice(linearPcm, buffer.sampleRate);
-  if (va.totalFrames > 0 && va.voiceFrames === 0) return;
+  if (settings().voiceGateEnabled) {
+    const va = await analyzeBufferForVoice(linearPcm, buffer.sampleRate);
+    if (va.totalFrames > 0 && va.voiceFrames === 0) return;
+  }
   // Per-tick abort handle so leaveActiveSession / stopHudRuntime can cancel
   // a tick mid-fetch. The identity check on success ensures we don't push a
   // result that arrived after an exit reset the accumulator.
@@ -984,11 +1046,9 @@ async function runAutoSummary(): Promise<void> {
   });
   try {
     const rawText = await callLens({
-      apiKey,
       wav,
       prompt: buildSessionSummaryPrompt(settings().responseLanguage),
       schema: SESSION_SUMMARY_SCHEMA,
-      model: settings().geminiModel,
       signal: controller.signal,
     });
     // Release the WAV reference as soon as the network call resolves so GC can
@@ -1035,17 +1095,14 @@ interface IntermediateSummary {
 interface FinalSummaryInputs {
   sessionId: string;
   intermediates: IntermediateSummary[];
-  /** Mutable so runFinalSummary can null it after handing off to callLens, releasing the ~36 MB WAV for GC during the network wait. */
-  wav: Uint8Array | null;
-  apiKey: string;
-  language: LanguageCode;
-  model: string;
 }
 
 /**
  * Inputs for the stop-time summary chain (last-tick + final-synthesis).
  * Linear PCM is captured rather than an encoded WAV so the last-tick can run
  * voice-activity gating before deciding whether to encode and send anything.
+ * Provider/model/key are not captured — the LLM facade resolves them from
+ * `settings()` at call time, so a mid-session settings change is respected.
  */
 interface StopTimeInputs {
   sessionId: string;
@@ -1056,9 +1113,7 @@ interface StopTimeInputs {
   sampleRate: number;
   bitsPerSample: number;
   channels: number;
-  apiKey: string;
   language: LanguageCode;
-  model: string;
 }
 
 /**
@@ -1070,7 +1125,7 @@ interface StopTimeInputs {
 function captureStopTimeInputs(): StopTimeInputs | null {
   const s = settings();
   if (!s.autoSummaryEnabled) return null;
-  if (!s.geminiApiKey) return null;
+  if (!activeApiKey()) return null;
   const linearPcm =
     buffer && buffer.bytesBuffered > 0 ? buffer.toLinearPcm() : null;
   if (!linearPcm && intermediateSummaries.length === 0) return null;
@@ -1081,9 +1136,7 @@ function captureStopTimeInputs(): StopTimeInputs | null {
     sampleRate: buffer?.sampleRate ?? 16_000,
     bitsPerSample: buffer?.bitsPerSample ?? 16,
     channels: buffer?.channels ?? 1,
-    apiKey: s.geminiApiKey,
     language: s.responseLanguage,
-    model: s.geminiModel,
   };
 }
 
@@ -1103,8 +1156,10 @@ async function runStopTimeSummaries(inputs: StopTimeInputs): Promise<void> {
   let lastTick: IntermediateSummary | null = null;
 
   if (inputs.linearPcm) {
-    const va = analyzeBufferForVoice(inputs.linearPcm, inputs.sampleRate);
-    if (va.totalFrames > 0 && va.voiceFrames > 0) {
+    const hasVoice = settings().voiceGateEnabled
+      ? (await analyzeBufferForVoice(inputs.linearPcm, inputs.sampleRate)).voiceFrames > 0
+      : true;
+    if (hasVoice) {
       await setSummaryBadgeState('generating');
       lastTick = await runLastTickSummary(inputs);
     }
@@ -1125,10 +1180,6 @@ async function runStopTimeSummaries(inputs: StopTimeInputs): Promise<void> {
   await runFinalSummary({
     sessionId: inputs.sessionId,
     intermediates: allIntermediates,
-    wav: null,
-    apiKey: inputs.apiKey,
-    language: inputs.language,
-    model: inputs.model,
   });
 }
 
@@ -1150,11 +1201,9 @@ async function runLastTickSummary(
       channels: inputs.channels,
     });
     const rawText = await callLens({
-      apiKey: inputs.apiKey,
       wav,
       prompt: buildSessionSummaryPrompt(inputs.language),
       schema: SESSION_SUMMARY_SCHEMA,
-      model: inputs.model,
       signal: controller.signal,
     });
     if (controller.signal.aborted) return null;
@@ -1248,78 +1297,36 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
   finalSummaryInflight = controller;
   await setSummaryBadgeState('generating');
   try {
-    // Empty-buffer fallback: synthesize a history entry from the intermediates
-    // alone rather than discarding the whole session. Skips the Gemini call
-    // entirely — there's no audio to send and the intermediates already cover
-    // the session content.
-    if (!inputs.wav) {
-      const synth = synthesizeSummaryFromIntermediates(inputs.intermediates);
-      if (!synth) {
-        pushDebugEvent({
-          label: 'final-summary-skip',
-          detail: 'no audio and no intermediates at session end',
-        });
-        await setSummaryBadgeState('idle');
-        return;
-      }
+    // The last-tick audio summary is already written by runLastTickSummary at
+    // this point, so the final synthesis consolidates intermediates only — no
+    // fresh audio call. Skip entirely when no intermediates exist (e.g. when
+    // the last tick was the very first one to fire).
+    const synth = synthesizeSummaryFromIntermediates(inputs.intermediates);
+    if (!synth) {
       pushDebugEvent({
-        label: 'final-summary-synth',
-        detail: `no audio at session end; synthesized from ${inputs.intermediates.length} intermediate tick(s)`,
+        label: 'final-summary-skip',
+        detail: 'no intermediates at session end',
       });
-      await pushHistoryEntry({
-        sessionId: inputs.sessionId,
-        lensId: SESSION_SUMMARY_ID,
-        lensName: SESSION_SUMMARY_NAME,
-        question: extractQuestion(synth),
-        badge: 'SUMMARY',
-        quote: synth.quote ?? '',
-        result: synth,
-        tags: extractTags(synth),
-      }, (k, v) => getBridge().setLocalStorage(k, v));
-      await reloadHistoryFromStorage();
-      await setSummaryBadgeState('ready');
+      await setSummaryBadgeState('idle');
       return;
     }
-    const prompt = buildSessionSummaryPrompt(inputs.language, {
-      previousSummaries: inputs.intermediates,
-    });
-    // Pull wav off the inputs object so the network call holds the last
-    // reference. After callLens resolves we drop it immediately, freeing the
-    // ~36 MB linear PCM / WAV pair for GC during JSON parsing rather than
-    // pinning it through the parse + history-write path.
-    const wav = inputs.wav;
-    inputs.wav = null;
-    const rawText = await callLens({
-      apiKey: inputs.apiKey,
-      wav,
-      prompt,
-      schema: SESSION_SUMMARY_SCHEMA,
-      model: inputs.model,
-      signal: controller.signal,
-    });
     if (controller.signal.aborted) {
       await setSummaryBadgeState('idle');
       return;
     }
-    const result = parseSessionSummaryResponse(rawText);
-    if (result.type !== 'session-summary') {
-      await setSummaryBadgeState('idle');
-      return;
-    }
-    // Fall back to the most-recent intermediate quote if the final response
-    // didn't include one — keeps the history row from rendering with an empty
-    // quote column when prior ticks already captured a salient line.
-    const lastIntermediate = inputs.intermediates[inputs.intermediates.length - 1];
-    const quote = result.quote ?? lastIntermediate?.quote ?? '';
+    pushDebugEvent({
+      label: 'final-summary-synth',
+      detail: `synthesized from ${inputs.intermediates.length} intermediate tick(s)`,
+    });
     await pushHistoryEntry({
       sessionId: inputs.sessionId,
       lensId: SESSION_SUMMARY_ID,
       lensName: SESSION_SUMMARY_NAME,
-      question: extractQuestion(result),
+      question: extractQuestion(synth),
       badge: 'SUMMARY',
-      quote,
-      result,
-      tags: extractTags(result),
+      quote: synth.quote ?? '',
+      result: synth,
+      tags: extractTags(synth),
     }, (k, v) => getBridge().setLocalStorage(k, v));
     await reloadHistoryFromStorage();
     await setSummaryBadgeState('ready');

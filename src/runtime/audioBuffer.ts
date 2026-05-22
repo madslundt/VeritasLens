@@ -193,16 +193,16 @@ export interface VoiceBufferAnalysis {
 }
 
 /**
- * Analyzes a little-endian 16-bit PCM buffer for the presence of voice.
- * Returns frame tallies; callers gate on `voiceFrames === 0` to short-circuit
- * silent/noisy buffers before sending them to the LLM.
+ * FFT-based voice-activity heuristic. Kept as the fallback path for the
+ * Silero-backed gate in `src/runtime/vad`; the runtime always tries Silero
+ * first and only invokes this when the model cannot load.
  *
  * Algorithm: ~250 ms frames; cheap RMS pass first; for non-silent frames a
  * 1024-point FFT with Hann window classifies "voice" vs "noise" by the share
  * of magnitude in the 85–3000 Hz band. Returns early as soon as one voice
  * frame is found — the only consumer cares about presence, not exact counts.
  */
-export function analyzeBufferForVoice(
+export function analyzeBufferForVoiceFFT(
   pcm: Uint8Array,
   sampleRate: number,
 ): VoiceBufferAnalysis {
