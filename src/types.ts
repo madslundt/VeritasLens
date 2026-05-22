@@ -116,10 +116,14 @@ export const DEFAULT_LLM_PROVIDER: LlmProvider = 'gemini';
  * network.whitelist` is fixed at pack time, so a URL the user types into the
  * settings would be blocked by the WebView's permission policy anyway. Each
  * entry in this list must have its host added to `app.json` too.
+ *
+ * Only providers that host a Whisper-style transcription endpoint qualify:
+ * VeritasLens captures audio from the glasses mic, so a chat-only host would
+ * fail every analysis. OpenRouter was previously listed here but is chat-only
+ * across all its backends, so it was removed.
  */
 export const OPENAI_BASE_URLS = [
   'https://api.openai.com/v1',
-  'https://openrouter.ai/api/v1',
   'https://api.groq.com/openai/v1',
 ] as const;
 export type OpenAiBaseUrl = (typeof OPENAI_BASE_URLS)[number];
@@ -130,12 +134,18 @@ export const DEFAULT_OPENAI_BASE_URL: OpenAiBaseUrl = 'https://api.openai.com/v1
  * hasn't been populated yet (first run before `fetchAvailableModels`).
  */
 export const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
+
 /**
- * Transcription model used by the OpenAI-compatible path before chat
- * completions. Same key as the analysis model. OpenRouter / Groq do not host
- * Whisper today — the runtime falls back to a friendly error in that case.
+ * Per-host transcription model name. The Whisper endpoint path is the same
+ * across OpenAI and Groq (`/audio/transcriptions`), but the model id differs
+ * — OpenAI calls it `whisper-1`, Groq calls it `whisper-large-v3`. One API
+ * key per host authenticates both this endpoint and chat-completions, so the
+ * user doesn't need to supply a separate transcription credential.
  */
-export const DEFAULT_OPENAI_TRANSCRIBE_MODEL = 'whisper-1';
+export const OPENAI_TRANSCRIBE_MODELS: Record<OpenAiBaseUrl, string> = {
+  'https://api.openai.com/v1': 'whisper-1',
+  'https://api.groq.com/openai/v1': 'whisper-large-v3',
+};
 
 export const LANGUAGES = {
   en: 'English',

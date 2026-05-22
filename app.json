@@ -9,11 +9,10 @@
   "permissions": [
     {
       "name": "network",
-      "desc": "VeritasLens sends a short audio snippet to the LLM provider you pick (Google Gemini directly, or an OpenAI-compatible host: OpenAI / OpenRouter / Groq — these transcribe the audio first, then analyse the text). Your API key and audio leave the device only as part of that request.",
+      "desc": "VeritasLens sends a short audio snippet to the LLM provider you pick (Google Gemini directly, or an OpenAI-compatible host: OpenAI / Groq — these transcribe the audio first, then analyse the text). Your API key and audio leave the device only as part of that request.",
       "whitelist": [
         "https://generativelanguage.googleapis.com",
         "https://api.openai.com",
-        "https://openrouter.ai",
         "https://api.groq.com"
       ]
     },

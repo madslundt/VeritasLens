@@ -11,7 +11,7 @@
 // OpenAI's structured-output strict mode requires `additionalProperties:
 // false` and that every property appear in `required`. `toStrictSchema`
 // recurses the schema and injects both.
-import { DEFAULT_OPENAI_TRANSCRIBE_MODEL, type OpenAiBaseUrl } from '@/types';
+import type { OpenAiBaseUrl } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 
 export interface CallOpenAiLensOptions {
@@ -19,8 +19,8 @@ export interface CallOpenAiLensOptions {
   baseUrl: OpenAiBaseUrl;
   /** Chat-completions model. */
   model: string;
-  /** Transcription model. Falls back to whisper-1 when undefined. */
-  transcribeModel?: string;
+  /** Transcription model id for the chosen host (e.g. `whisper-1` on OpenAI, `whisper-large-v3` on Groq). The facade resolves this from a per-host map. */
+  transcribeModel: string;
   /** WAV-encoded audio bytes. Transcribed before chat completions. */
   wav: Uint8Array;
   /** Fully-built, language-aware system prompt. */
@@ -105,7 +105,7 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
   const transcript = await transcribeAudio({
     apiKey: opts.apiKey,
     baseUrl: opts.baseUrl,
-    model: opts.transcribeModel ?? DEFAULT_OPENAI_TRANSCRIBE_MODEL,
+    model: opts.transcribeModel,
     wav: opts.wav,
     signal: opts.signal,
   });
@@ -205,9 +205,7 @@ async function transcribeAudio(opts: TranscribeOptions): Promise<string> {
   if (!response.ok) {
     const errText = await response.text();
     throw new Error(
-      `OpenAI transcription HTTP ${response.status}: ${truncate(errText, 200)}. ` +
-        `(This provider may not host the "${opts.model}" model — Groq/OpenRouter ` +
-        `do not currently support Whisper. Switch back to Gemini for audio analysis.)`,
+      `OpenAI transcription HTTP ${response.status} (model "${opts.model}"): ${truncate(errText, 200)}`,
     );
   }
   const payload = (await response.json()) as TranscriptionResponse;

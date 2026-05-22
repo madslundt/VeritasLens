@@ -64,7 +64,6 @@ type ProviderOption =
 const PROVIDER_OPTIONS: ProviderOption[] = [
   { kind: 'gemini', value: 'gemini', label: 'Google Gemini' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.openai.com/v1', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
-  { kind: 'openai-compatible', value: 'openai-compatible:https://openrouter.ai/api/v1', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.groq.com/openai/v1', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
 ];
 
@@ -936,10 +935,9 @@ export const SettingsView: Component = () => {
                 <For each={PROVIDER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
               </select>
               <span class="field-hint">
-                Gemini sends audio directly. The OpenAI-compatible providers
-                transcribe via the same key first, then analyse the transcript —
-                Groq and OpenRouter do not currently host Whisper, so pick Gemini
-                if you need audio analysis at those hosts.
+                Gemini analyses audio directly. OpenAI and Groq transcribe the
+                audio first (Whisper), then analyse the transcript — one API
+                key per provider.
               </span>
             </label>
 

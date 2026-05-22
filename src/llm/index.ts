@@ -22,7 +22,7 @@ import {
   type CallLensOptions as GeminiCallLensOptions,
 } from './gemini';
 import { callOpenAiLens, fetchOpenAiModels } from './openai';
-import type { GeminiModel } from '@/types';
+import { OPENAI_TRANSCRIBE_MODELS, type GeminiModel } from '@/types';
 
 export { MAX_RETRIES, parseRetryAfterMs, parseGoogleRetryDelayMs };
 
@@ -52,6 +52,10 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       apiKey: opts.apiKey ?? s.openaiApiKey,
       baseUrl: s.openaiBaseUrl,
       model: opts.model ?? s.openaiModel,
+      // Per-host transcription model id (OpenAI calls Whisper `whisper-1`,
+      // Groq calls it `whisper-large-v3`). Defaulted from the static map so
+      // the user never has to pick this themselves.
+      transcribeModel: OPENAI_TRANSCRIBE_MODELS[s.openaiBaseUrl],
       wav: opts.wav,
       prompt: opts.prompt,
       schema: opts.schema,
