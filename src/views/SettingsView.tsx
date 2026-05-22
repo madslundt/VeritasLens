@@ -34,6 +34,7 @@ import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecyc
 import {
   LANGUAGES,
   OPENAI_BASE_URLS,
+  openaiHostLabel,
   type BufferDuration,
   type GeminiModel,
   type HistoryEntry,
@@ -69,6 +70,7 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
   { kind: 'gemini', value: 'gemini', label: 'Google Gemini' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.openai.com/v1', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.groq.com/openai/v1', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
+  { kind: 'openai-compatible', value: 'openai-compatible:https://openrouter.ai/api/v1', label: 'OpenRouter (audio models)', baseUrl: 'https://openrouter.ai/api/v1' },
 ];
 
 function providerOptionValue(provider: LlmProvider, baseUrl: OpenAiBaseUrl): string {
@@ -85,14 +87,7 @@ function openaiKeyPlaceholder(baseUrl: OpenAiBaseUrl): string {
   switch (baseUrl) {
     case 'https://api.groq.com/openai/v1': return 'gsk_…';
     case 'https://api.openai.com/v1': return 'sk-…';
-  }
-}
-
-/** Human-readable name for an OpenAI-compatible host. Used in inline errors. */
-function hostLabel(baseUrl: OpenAiBaseUrl): string {
-  switch (baseUrl) {
-    case 'https://api.groq.com/openai/v1': return 'Groq';
-    case 'https://api.openai.com/v1': return 'OpenAI';
+    case 'https://openrouter.ai/api/v1': return 'sk-or-…';
   }
 }
 
@@ -653,7 +648,7 @@ export const SettingsView: Component = () => {
     if (apiKey.trim().length < 10) {
       setKeyError(
         isOpenAi
-          ? `Missing ${hostLabel(baseUrl)} API key.`
+          ? `Missing ${openaiHostLabel(baseUrl)} API key.`
           : 'Missing Gemini API key.',
       );
       setMainTest(IDLE_TEST);
@@ -1115,7 +1110,9 @@ export const SettingsView: Component = () => {
               </select>
               <span class="field-hint">
                 Gemini analyses audio directly. OpenAI and Groq transcribe the
-                audio first (Whisper), then analyse the transcript.
+                audio first (Whisper), then analyse the transcript. OpenRouter
+                sends the audio inline to multimodal models. One API key per
+                host, stored only on this device.
               </span>
             </label>
 

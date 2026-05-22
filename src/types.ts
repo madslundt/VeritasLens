@@ -122,14 +122,19 @@ export const DEFAULT_LLM_PROVIDER: LlmProvider = 'gemini';
  * settings would be blocked by the WebView's permission policy anyway. Each
  * entry in this list must have its host added to `app.json` too.
  *
- * Only providers that host a Whisper-style transcription endpoint qualify:
- * VeritasLens captures audio from the glasses mic, so a chat-only host would
- * fail every analysis. OpenRouter was previously listed here but is chat-only
- * across all its backends, so it was removed.
+ * Two flavors live in this list:
+ *   - **Transcribe-then-chat hosts** (OpenAI, Groq): expose `/audio/transcriptions`
+ *     so the runtime can Whisper the WAV before chat completions. Each needs
+ *     an entry in `OPENAI_TRANSCRIBE_MODELS` below.
+ *   - **Inline-audio hosts** (OpenRouter): no transcription endpoint, but
+ *     forward `input_audio` chat-completion content parts to backends that
+ *     accept them. Listed in `OPENAI_INLINE_AUDIO_HOSTS`; the model picker
+ *     filters to audio-capable models from `/models`.
  */
 export const OPENAI_BASE_URLS = [
   'https://api.openai.com/v1',
   'https://api.groq.com/openai/v1',
+  'https://openrouter.ai/api/v1',
 ] as const;
 export type OpenAiBaseUrl = (typeof OPENAI_BASE_URLS)[number];
 export const DEFAULT_OPENAI_BASE_URL: OpenAiBaseUrl = 'https://api.openai.com/v1';
@@ -141,16 +146,38 @@ export const DEFAULT_OPENAI_BASE_URL: OpenAiBaseUrl = 'https://api.openai.com/v1
 export const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 
 /**
- * Per-host transcription model name. The Whisper endpoint path is the same
- * across OpenAI and Groq (`/audio/transcriptions`), but the model id differs
- * — OpenAI calls it `whisper-1`, Groq calls it `whisper-large-v3`. One API
- * key per host authenticates both this endpoint and chat-completions, so the
- * user doesn't need to supply a separate transcription credential.
+ * Per-host transcription model name. Partial because inline-audio hosts
+ * (OpenRouter) have no transcription endpoint — the absence of a key is the
+ * typed signal that `callOpenAiLens` should take the inline-audio branch
+ * instead of calling `/audio/transcriptions`.
+ *
+ * Same `/audio/transcriptions` path across OpenAI and Groq, only the model
+ * id differs (`whisper-1` vs `whisper-large-v3`). One API key per host
+ * authenticates both that endpoint and chat-completions.
  */
-export const OPENAI_TRANSCRIBE_MODELS: Record<OpenAiBaseUrl, string> = {
+export const OPENAI_TRANSCRIBE_MODELS: Partial<Record<OpenAiBaseUrl, string>> = {
   'https://api.openai.com/v1': 'whisper-1',
   'https://api.groq.com/openai/v1': 'whisper-large-v3',
 };
+
+/**
+ * Hosts that accept audio inline in chat-completions (`input_audio` content
+ * part) instead of via a separate transcription endpoint. The model list for
+ * these hosts is filtered to entries whose `/models` metadata declares
+ * `audio` as an input modality.
+ */
+export const OPENAI_INLINE_AUDIO_HOSTS: ReadonlySet<OpenAiBaseUrl> = new Set<OpenAiBaseUrl>([
+  'https://openrouter.ai/api/v1',
+]);
+
+/** Human-readable host name. Shared by error messages, UI labels, and the settings placeholder lookup. */
+export function openaiHostLabel(baseUrl: OpenAiBaseUrl): string {
+  switch (baseUrl) {
+    case 'https://api.openai.com/v1': return 'OpenAI';
+    case 'https://api.groq.com/openai/v1': return 'Groq';
+    case 'https://openrouter.ai/api/v1': return 'OpenRouter';
+  }
+}
 
 export const LANGUAGES = {
   en: 'English',

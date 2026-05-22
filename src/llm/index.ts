@@ -56,9 +56,9 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       apiKey: opts.apiKey ?? (s.openaiApiKeys[s.openaiBaseUrl] ?? ''),
       baseUrl: s.openaiBaseUrl,
       model: opts.model ?? s.openaiModel,
-      // Per-host transcription model id (OpenAI calls Whisper `whisper-1`,
-      // Groq calls it `whisper-large-v3`). Defaulted from the static map so
-      // the user never has to pick this themselves.
+      // Per-host transcription model id (OpenAI: `whisper-1`, Groq:
+      // `whisper-large-v3`). Undefined for inline-audio hosts (OpenRouter) —
+      // callOpenAiLens branches on OPENAI_INLINE_AUDIO_HOSTS and skips STT.
       transcribeModel: OPENAI_TRANSCRIBE_MODELS[s.openaiBaseUrl],
       wav: opts.wav,
       prompt: opts.prompt,

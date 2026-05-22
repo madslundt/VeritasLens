@@ -68,6 +68,7 @@ import {
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { createEffect, createRoot, on } from 'solid-js';
+import { openaiHostLabel } from '@/types';
 import type { LanguageCode, LensResult, MeetingPrepSection } from '@/types';
 
 /**
@@ -696,7 +697,7 @@ async function runAnalysis(): Promise<void> {
     await setStatus('error');
     setErrorMessage(
       s.provider === 'openai-compatible'
-        ? `No ${s.openaiBaseUrl === 'https://api.groq.com/openai/v1' ? 'Groq' : 'OpenAI'} API key.`
+        ? `No ${openaiHostLabel(s.openaiBaseUrl)} API key.`
         : 'No Gemini API key.',
     );
     return;
