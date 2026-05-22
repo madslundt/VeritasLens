@@ -90,7 +90,9 @@ const VAD_GATE_WINDOW_SEC = 10;
  */
 function activeApiKey(): string {
   const s = settings();
-  return s.provider === 'openai-compatible' ? s.openaiApiKey : s.geminiApiKey;
+  return s.provider === 'openai-compatible'
+    ? (s.openaiApiKeys[s.openaiBaseUrl] ?? '')
+    : s.geminiApiKey;
 }
 
 let running = false;
@@ -154,7 +156,7 @@ async function reloadHistoryFromStorage(): Promise<void> {
 export async function startHudRuntime(): Promise<void> {
   const isProviderConfigured = (): boolean => {
     const s = settings();
-    if (s.provider === 'openai-compatible') return s.openaiApiKey.trim().length >= 10;
+    if (s.provider === 'openai-compatible') return (s.openaiApiKeys[s.openaiBaseUrl] ?? '').trim().length >= 10;
     return s.geminiApiKey.trim().length >= 10;
   };
   const configured = isProviderConfigured();
@@ -187,7 +189,7 @@ export async function refreshHudPage(): Promise<void> {
   const s = settings();
   const configured =
     s.provider === 'openai-compatible'
-      ? s.openaiApiKey.trim().length >= 10
+      ? (s.openaiApiKeys[s.openaiBaseUrl] ?? '').trim().length >= 10
       : s.geminiApiKey.trim().length >= 10;
   if (configured) await showPickerPage();
   else await showUnconfiguredPage();
@@ -685,10 +687,16 @@ async function runAnalysis(): Promise<void> {
   }
 
   const s = settings();
-  const apiKey = s.provider === 'openai-compatible' ? s.openaiApiKey : s.geminiApiKey;
+  const apiKey = s.provider === 'openai-compatible'
+    ? (s.openaiApiKeys[s.openaiBaseUrl] ?? '')
+    : s.geminiApiKey;
   if (!apiKey) {
     await setStatus('error');
-    setErrorMessage(s.provider === 'openai-compatible' ? 'No OpenAI API key.' : 'No Gemini API key.');
+    setErrorMessage(
+      s.provider === 'openai-compatible'
+        ? `No ${s.openaiBaseUrl === 'https://api.groq.com/openai/v1' ? 'Groq' : 'OpenAI'} API key.`
+        : 'No Gemini API key.',
+    );
     return;
   }
 
@@ -829,12 +837,15 @@ async function runAnalysis(): Promise<void> {
     if (persona.id === 'auto') {
       const classifierPrompt = buildPromptWithContext(persona, lang);
       const classifierContext = buildContextBlock(persona.name);
-      // Only Gemini exposes a dedicated lighter classifier model. On the
-      // OpenAI-compatible path the regular chat model is used (no override),
-      // since there's no separate "auto" model knob in that provider's
-      // settings.
+      // Only Gemini exposes a dedicated lighter classifier model — and it's
+      // optional: `geminiAutoModel === null` means "reuse the main model for
+      // the classifier call", so we pass `undefined` and callLens defaults to
+      // the main model. The OpenAI-compatible path has no separate "auto"
+      // knob, so it always reuses the main chat model.
       const classifierModel =
-        settings().provider === 'gemini' ? settings().geminiAutoModel : undefined;
+        settings().provider === 'gemini'
+          ? (settings().geminiAutoModel ?? undefined)
+          : undefined;
       const classifierRaw = await callLens({
         wav,
         prompt: `${classifierContext}\n\n${classifierPrompt}`,
@@ -972,7 +983,7 @@ function startSettingsWatcher(): void {
         s.geminiApiKey,
         s.geminiModel,
         s.geminiAutoModel,
-        s.openaiApiKey,
+        s.openaiApiKeys[s.openaiBaseUrl] ?? '',
         s.openaiBaseUrl,
         s.openaiModel,
         s.bufferDuration,

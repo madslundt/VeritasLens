@@ -1,5 +1,5 @@
 // src/views/SettingsView.tsx
-import { createEffect, createMemo, createSignal, For, Index, onCleanup, Show, type Component } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, Index, on, onCleanup, Show, untrack, type Component } from 'solid-js';
 import {
   MEETING_PREP_BYTE_BUDGET,
   MEETING_PREP_LABEL_MAX,
@@ -20,7 +20,7 @@ import {
   saveGeminiAutoModel,
   saveMeetingPrepSections,
   saveOpenaiBaseUrl,
-  saveOpenaiKey,
+  saveOpenaiKeys,
   saveOpenaiModel,
   saveProvider,
   saveResponseLanguage,
@@ -46,6 +46,9 @@ import {
 import { personas } from '@/personas';
 import { MEETING_PREP_ID } from '@/personas/meetingPrep';
 
+type ModelTestStatus = { state: 'idle' | 'running' | 'ok' | 'fail'; message: string };
+const IDLE_TEST: ModelTestStatus = { state: 'idle', message: '' };
+
 const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
   { value: 30, label: '30 seconds' },
   { value: 120, label: '2 minutes' },
@@ -70,6 +73,27 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
 
 function providerOptionValue(provider: LlmProvider, baseUrl: OpenAiBaseUrl): string {
   return provider === 'gemini' ? 'gemini' : `openai-compatible:${baseUrl}`;
+}
+
+/**
+ * Per-host placeholder showing the real prefix issued by that provider so the
+ * user immediately sees they're pasting the right kind of key:
+ *   OpenAI → `sk-…`
+ *   Groq   → `gsk_…`
+ */
+function openaiKeyPlaceholder(baseUrl: OpenAiBaseUrl): string {
+  switch (baseUrl) {
+    case 'https://api.groq.com/openai/v1': return 'gsk_…';
+    case 'https://api.openai.com/v1': return 'sk-…';
+  }
+}
+
+/** Human-readable name for an OpenAI-compatible host. Used in inline errors. */
+function hostLabel(baseUrl: OpenAiBaseUrl): string {
+  switch (baseUrl) {
+    case 'https://api.groq.com/openai/v1': return 'Groq';
+    case 'https://api.openai.com/v1': return 'OpenAI';
+  }
 }
 
 function parseProviderOption(value: string): { provider: LlmProvider; baseUrl: OpenAiBaseUrl } {
@@ -213,12 +237,29 @@ export const SettingsView: Component = () => {
   const [draftProvider, setDraftProvider] = createSignal<LlmProvider>(settings().provider);
   const [draftKey, setDraftKey] = createSignal(settings().geminiApiKey);
   const [draftModel, setDraftModel] = createSignal<GeminiModel>(settings().geminiModel);
-  const [draftAutoModel, setDraftAutoModel] = createSignal<GeminiModel>(settings().geminiAutoModel);
-  const [draftOpenaiKey, setDraftOpenaiKey] = createSignal(settings().openaiApiKey);
+  const [draftAutoModel, setDraftAutoModel] = createSignal<GeminiModel | null>(settings().geminiAutoModel);
+  // Per-host draft of OpenAI keys so switching providers (OpenAI ↔ Groq) does
+  // not lose what the user typed in another slot. `draftOpenaiKey()` reads the
+  // value for whichever host is currently selected in the Provider dropdown.
+  const [draftOpenaiKeys, setDraftOpenaiKeys] = createSignal<Record<OpenAiBaseUrl, string>>({ ...settings().openaiApiKeys });
   const [draftOpenaiBaseUrl, setDraftOpenaiBaseUrl] = createSignal<OpenAiBaseUrl>(settings().openaiBaseUrl);
+  const draftOpenaiKey = (): string => draftOpenaiKeys()[draftOpenaiBaseUrl()] ?? '';
+  const setDraftOpenaiKey = (key: string): void => {
+    setDraftOpenaiKeys((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: key }));
+  };
   const [draftOpenaiModel, setDraftOpenaiModel] = createSignal<string>(settings().openaiModel);
   const [openaiModels, setOpenaiModels] = createSignal<string[]>([]);
   const [openaiModelsLoading, setOpenaiModelsLoading] = createSignal(false);
+  // Outcome of the most recent /models probe per provider. Used to gate
+  // `canSave` so a 401 from the model-list endpoint (the cheapest way to
+  // verify a key in this codebase) prevents persisting a bogus key.
+  //   idle    — no key yet, or provider currently inactive
+  //   loading — debounce + in-flight
+  //   ok      — request returned model ids
+  //   fail    — network error, non-200, or empty list
+  type FetchState = 'idle' | 'loading' | 'ok' | 'fail';
+  const [geminiFetchState, setGeminiFetchState] = createSignal<FetchState>('idle');
+  const [openaiFetchState, setOpenaiFetchState] = createSignal<FetchState>('idle');
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
@@ -236,8 +277,30 @@ export const SettingsView: Component = () => {
   const [prepError, setPrepError] = createSignal('');
   const [prepExpanded, setPrepExpanded] = createSignal(false);
   const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
-  const [testState, setTestState] = createSignal<'idle' | 'running' | 'ok' | 'fail'>('idle');
-  const [testMessage, setTestMessage] = createSignal('');
+  // Per-model test status. The Auto-classifier slot is only meaningful when
+  // it's distinct from the main model (otherwise we'd double-probe the same
+  // endpoint). `running` on either drives the Test button's spinner.
+  const [mainTest, setMainTest] = createSignal<ModelTestStatus>(IDLE_TEST);
+  const [autoTest, setAutoTest] = createSignal<ModelTestStatus>(IDLE_TEST);
+  // Field-level error surfaced under the API key input when Test is hit with
+  // an empty/too-short key. Stays attached to the key field (not the model
+  // dropdown) because the model isn't the reason for the failure. Cleared as
+  // soon as the user edits the API key input.
+  const [keyError, setKeyError] = createSignal<string | null>(null);
+  /**
+   * Reset every transient status surfaced under the form so changing what's
+   * being saved/tested doesn't leave stale results visible. Wired to all the
+   * inputs that invalidate the previous probe (provider, API key, model
+   * pickers) so the next test/save starts from a clean slate.
+   */
+  const clearStatuses = (): void => {
+    setMainTest(IDLE_TEST);
+    setAutoTest(IDLE_TEST);
+    setKeyError(null);
+    setSaveState('idle');
+  };
+  const anyTestRunning = (): boolean =>
+    mainTest().state === 'running' || autoTest().state === 'running';
   const [activeTab, setActiveTab] = createSignal<'config' | 'history'>('config');
 
   // Session log navigation
@@ -281,16 +344,55 @@ export const SettingsView: Component = () => {
     await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
   };
 
+  // Provider/host change → clear the previously-fetched list immediately so
+  // a stale carryover (e.g. OpenAI's gpt-* ids while you've just switched to
+  // Groq) doesn't linger while the refetch is in flight. `defer: true` skips
+  // the initial run so the persisted list survives first paint. Untracking
+  // `draftModel` prevents this effect from re-firing when the user picks a
+  // different model from the dropdown.
+  createEffect(on([draftProvider, draftOpenaiBaseUrl], ([provider]) => {
+    if (provider === 'gemini') {
+      setAvailableModels([untrack(draftModel)]);
+    } else {
+      setOpenaiModels([]);
+    }
+    // A key-shape error from a previous host doesn't apply to the new one —
+    // clear it so the user isn't looking at a red field after switching.
+    setKeyError(null);
+  }, { defer: true }));
+
   createEffect(() => {
+    const provider = draftProvider();
     const key = draftKey();
-    if (key.trim().length < 10) return;
+    if (provider !== 'gemini') {
+      setModelsLoading(false);
+      setGeminiFetchState('idle');
+      return;
+    }
+    if (key.trim().length < 10) {
+      setModelsLoading(false);
+      setGeminiFetchState('idle');
+      return;
+    }
+    // Flip loading on immediately so the model dropdown stays disabled across
+    // the debounce window (otherwise it briefly re-enables between key-entry
+    // and the actual fetch start).
+    setModelsLoading(true);
+    setGeminiFetchState('loading');
     const ac = new AbortController();
     const debounce = setTimeout(() => {
-      setModelsLoading(true);
       void import('@/llm/gemini').then(({ fetchAvailableModels }) =>
         fetchAvailableModels(key, ac.signal)
-          .then((models) => { if (!ac.signal.aborted && models.length > 0) setAvailableModels(models); })
-          .catch(() => { /* keep static fallback */ })
+          .then((models) => {
+            if (ac.signal.aborted) return;
+            if (models.length > 0) {
+              setAvailableModels(models);
+              setGeminiFetchState('ok');
+            } else {
+              setGeminiFetchState('fail');
+            }
+          })
+          .catch(() => { if (!ac.signal.aborted) setGeminiFetchState('fail'); })
           .finally(() => { if (!ac.signal.aborted) setModelsLoading(false); }),
       );
     }, 300);
@@ -305,16 +407,35 @@ export const SettingsView: Component = () => {
   // the same OpenAI API expose different model catalogs, so a URL switch must
   // invalidate the cached list.
   createEffect(() => {
+    const provider = draftProvider();
     const key = draftOpenaiKey();
     const baseUrl = draftOpenaiBaseUrl();
-    if (key.trim().length < 10) return;
+    if (provider !== 'openai-compatible') {
+      setOpenaiModelsLoading(false);
+      setOpenaiFetchState('idle');
+      return;
+    }
+    if (key.trim().length < 10) {
+      setOpenaiModelsLoading(false);
+      setOpenaiFetchState('idle');
+      return;
+    }
+    setOpenaiModelsLoading(true);
+    setOpenaiFetchState('loading');
     const ac = new AbortController();
     const debounce = setTimeout(() => {
-      setOpenaiModelsLoading(true);
       void import('@/llm/openai').then(({ fetchOpenAiModels }) =>
         fetchOpenAiModels(key, baseUrl, ac.signal)
-          .then((models) => { if (!ac.signal.aborted && models.length > 0) setOpenaiModels(models); })
-          .catch(() => { /* keep current fallback */ })
+          .then((models) => {
+            if (ac.signal.aborted) return;
+            if (models.length > 0) {
+              setOpenaiModels(models);
+              setOpenaiFetchState('ok');
+            } else {
+              setOpenaiFetchState('fail');
+            }
+          })
+          .catch(() => { if (!ac.signal.aborted) setOpenaiFetchState('fail'); })
           .finally(() => { if (!ac.signal.aborted) setOpenaiModelsLoading(false); }),
       );
     }, 300);
@@ -324,15 +445,32 @@ export const SettingsView: Component = () => {
     });
   });
 
-  const isConfigured = createMemo(() => {
-    const s = settings();
-    if (s.provider === 'openai-compatible') return s.openaiApiKey.trim().length >= 10;
-    return s.geminiApiKey.trim().length >= 10;
-  });
+  /**
+   * Gate Save on a verifiable configuration:
+   *  - an API key of plausible length is present, and
+   *  - the /models endpoint accepted that key (so 401s don't get persisted),
+   *    and
+   *  - if the user ran Test model, neither probe failed.
+   * The fetch is `idle` momentarily after the key crosses the 10-char
+   * threshold (before the 300 ms debounce fires) — we accept that by also
+   * allowing `idle`, since the next state transition will quickly disable
+   * Save again if the key turns out to be wrong.
+   */
   const canSave = createMemo(() => {
-    if (draftProvider() === 'openai-compatible') return draftOpenaiKey().trim().length >= 10;
-    return draftKey().trim().length >= 10;
+    const provider = draftProvider();
+    if (mainTest().state === 'fail' || autoTest().state === 'fail') return false;
+    if (provider === 'gemini') {
+      if (draftKey().trim().length < 10) return false;
+      const st = geminiFetchState();
+      if (st === 'loading' || st === 'fail') return false;
+    } else {
+      if (draftOpenaiKey().trim().length < 10) return false;
+      const st = openaiFetchState();
+      if (st === 'loading' || st === 'fail') return false;
+    }
+    return true;
   });
+
 
   // Autosave the meeting-prep draft on debounce. Stays separate from the main
   // Save button (which handles every other setting) because the editor is
@@ -468,7 +606,9 @@ export const SettingsView: Component = () => {
         saveGeminiKey(setLs, draftKey().trim()),
         saveGeminiModel(setLs, draftModel()),
         saveGeminiAutoModel(setLs, draftAutoModel()),
-        saveOpenaiKey(setLs, draftOpenaiKey().trim()),
+        saveOpenaiKeys(setLs, Object.fromEntries(
+          (Object.entries(draftOpenaiKeys()) as Array<[OpenAiBaseUrl, string]>).map(([u, v]) => [u, v.trim()]),
+        ) as Record<OpenAiBaseUrl, string>),
         saveOpenaiBaseUrl(setLs, draftOpenaiBaseUrl()),
         saveOpenaiModel(setLs, draftOpenaiModel()),
         saveResponseLanguage(setLs, draftLanguage()),
@@ -492,23 +632,52 @@ export const SettingsView: Component = () => {
   };
 
   const onTest = async () => {
-    setTestState('running');
-    setTestMessage('');
-    try {
-      const { runSelfTest } = await import('@/llm');
-      // Facade picks the active-provider key + model. For Gemini this hits
-      // generateContent with a 1-byte ping; for OpenAI-compatible providers
-      // it pings /models (no audio dependency to verify).
-      const s = settings();
-      const apiKey = s.provider === 'openai-compatible' ? s.openaiApiKey : s.geminiApiKey;
-      const model = s.provider === 'openai-compatible' ? s.openaiModel : draftModel();
-      const result = await runSelfTest(apiKey, model);
-      setTestState('ok');
-      setTestMessage(`Reachable · ${result.latencyMs} ms`);
-    } catch (err) {
-      setTestState('fail');
-      setTestMessage(err instanceof Error ? err.message : String(err));
+    // Read everything from drafts so the probe matches what the user is about
+    // to save. Without this, switching provider/model and hitting Test would
+    // test the previously-persisted configuration.
+    const provider = draftProvider();
+    const baseUrl = draftOpenaiBaseUrl();
+    const isOpenAi = provider === 'openai-compatible';
+    const apiKey = isOpenAi ? draftOpenaiKey() : draftKey();
+    const mainModel = isOpenAi ? draftOpenaiModel() : draftModel();
+    // Auto classifier only exists on the Gemini path today, and is optional —
+    // a null draft means "reuse the main model", so we don't double-probe.
+    // Also skip when the user explicitly picked the same model as the main
+    // one (both probes would hit the same endpoint, wasting tokens).
+    const auto = draftAutoModel();
+    const autoModel = !isOpenAi && auto && auto !== mainModel ? auto : null;
+
+    // Pre-flight: a missing API key isn't a model failure, so surface it on
+    // the key input instead of as a model-test result. Skips the network call
+    // entirely (and avoids polluting `mainTest` with a key-shaped error).
+    if (apiKey.trim().length < 10) {
+      setKeyError(
+        isOpenAi
+          ? `Missing ${hostLabel(baseUrl)} API key.`
+          : 'Missing Gemini API key.',
+      );
+      setMainTest(IDLE_TEST);
+      setAutoTest(IDLE_TEST);
+      return;
     }
+    setKeyError(null);
+
+    setMainTest({ state: 'running', message: '' });
+    setAutoTest(autoModel ? { state: 'running', message: '' } : IDLE_TEST);
+
+    const { runSelfTest } = await import('@/llm');
+    const probe = async (model: string): Promise<ModelTestStatus> => {
+      try {
+        const r = await runSelfTest(apiKey, model, { provider, baseUrl });
+        return { state: 'ok', message: `Works · ${r.latencyMs} ms` };
+      } catch (err) {
+        return { state: 'fail', message: err instanceof Error ? err.message : String(err) };
+      }
+    };
+
+    const tasks: Promise<void>[] = [probe(mainModel).then((r) => { setMainTest(r); })];
+    if (autoModel) tasks.push(probe(autoModel).then((r) => { setAutoTest(r); }));
+    await Promise.all(tasks);
   };
 
   // Session detail view. Claim-style answers are the primary content; the
@@ -939,6 +1108,7 @@ export const SettingsView: Component = () => {
                   if (parsed.provider === 'openai-compatible') {
                     setDraftOpenaiBaseUrl(parsed.baseUrl);
                   }
+                  clearStatuses();
                 }}
               >
                 <For each={PROVIDER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
@@ -957,9 +1127,13 @@ export const SettingsView: Component = () => {
                   autocomplete="off"
                   spellcheck={false}
                   placeholder="AIza…"
+                  classList={{ 'input-error': keyError() !== null }}
                   value={draftKey()}
-                  onInput={(e) => setDraftKey(e.currentTarget.value)}
+                  onInput={(e) => { setDraftKey(e.currentTarget.value); clearStatuses(); }}
                 />
+                <Show when={keyError()}>
+                  <span class="field-error">{keyError()}</span>
+                </Show>
                 <span class="field-hint">
                   Stored only on this device. Get one at{' '}
                   <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer">
@@ -978,25 +1152,68 @@ export const SettingsView: Component = () => {
                 </span>
                 <select
                   value={draftModel()}
-                  onChange={(e) => setDraftModel(e.currentTarget.value as GeminiModel)}
+                  disabled={draftKey().trim().length < 10 || modelsLoading()}
+                  onChange={(e) => { setDraftModel(e.currentTarget.value as GeminiModel); clearStatuses(); }}
                 >
                   <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
                 </select>
-                <Show when={!isConfigured() && !modelsLoading()}>
+                <Show when={draftKey().trim().length < 10}>
                   <span class="field-hint">Enter an API key above to load available models.</span>
                 </Show>
+                <Show when={draftKey().trim().length >= 10 && modelsLoading()}>
+                  <span class="field-hint">Loading models from Gemini…</span>
+                </Show>
+                <Show when={draftKey().trim().length >= 10 && !modelsLoading() && geminiFetchState() === 'ok'}>
+                  <span class="field-hint">Models available.</span>
+                </Show>
+                <Show when={draftKey().trim().length >= 10 && !modelsLoading() && geminiFetchState() === 'fail'}>
+                  <span class="field-error">Could not load models — check the API key.</span>
+                </Show>
+                <div class="model-test-row">
+                  <button
+                    type="button"
+                    class="secondary"
+                    onClick={onTest}
+                    disabled={anyTestRunning() || draftKey().trim().length < 10}
+                  >
+                    <Show when={anyTestRunning()} fallback="Test model">
+                      <span class="spinner inline" />
+                      Testing…
+                    </Show>
+                  </button>
+                  <Show when={mainTest().state === 'ok' && mainTest().message}>
+                    <span class="status ok">{mainTest().message}</span>
+                  </Show>
+                  <Show when={mainTest().state === 'fail' && mainTest().message}>
+                    <span class="status err">{mainTest().message}</span>
+                  </Show>
+                  <Show when={autoTest().state === 'ok' && autoTest().message}>
+                    <span class="status ok">Classifier: {autoTest().message}</span>
+                  </Show>
+                  <Show when={autoTest().state === 'fail' && autoTest().message}>
+                    <span class="status err">Classifier: {autoTest().message}</span>
+                  </Show>
+                </div>
               </label>
 
               <label class="field">
                 <span class="field-label">Auto-lens classifier model</span>
                 <select
-                  value={draftAutoModel()}
-                  onChange={(e) => setDraftAutoModel(e.currentTarget.value as GeminiModel)}
+                  value={draftAutoModel() ?? ''}
+                  disabled={draftKey().trim().length < 10 || modelsLoading()}
+                  onChange={(e) => {
+                    const v = e.currentTarget.value;
+                    setDraftAutoModel(v === '' ? null : (v as GeminiModel));
+                    clearStatuses();
+                  }}
                 >
+                  <option value="">Use main model (default)</option>
                   <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
                 </select>
                 <span class="field-hint">
-                  The Auto lens makes an extra fast call to pick a lens. Use a lighter model (e.g. flash-lite) to stay under rate limits.
+                  Optional. The Auto lens makes an extra fast call to pick a lens.
+                  Leave on “Use main model” to reuse your chosen model, or pick a
+                  lighter one (e.g. flash-lite) to stay under per-model rate limits.
                 </span>
               </label>
             </Show>
@@ -1008,10 +1225,14 @@ export const SettingsView: Component = () => {
                   type="password"
                   autocomplete="off"
                   spellcheck={false}
-                  placeholder="sk-…"
+                  placeholder={openaiKeyPlaceholder(draftOpenaiBaseUrl())}
+                  classList={{ 'input-error': keyError() !== null }}
                   value={draftOpenaiKey()}
-                  onInput={(e) => setDraftOpenaiKey(e.currentTarget.value)}
+                  onInput={(e) => { setDraftOpenaiKey(e.currentTarget.value); clearStatuses(); }}
                 />
+                <Show when={keyError()}>
+                  <span class="field-error">{keyError()}</span>
+                </Show>
                 <span class="field-hint">
                   Stored only on this device. Get one from your provider's
                   dashboard.
@@ -1027,7 +1248,8 @@ export const SettingsView: Component = () => {
                 </span>
                 <select
                   value={draftOpenaiModel()}
-                  onChange={(e) => setDraftOpenaiModel(e.currentTarget.value)}
+                  disabled={draftOpenaiKey().trim().length < 10 || openaiModelsLoading() || openaiModels().length === 0}
+                  onChange={(e) => { setDraftOpenaiModel(e.currentTarget.value); clearStatuses(); }}
                 >
                   {/*
                     Always render as a dropdown. Before the fetch lands the only
@@ -1040,11 +1262,43 @@ export const SettingsView: Component = () => {
                     {(m) => <option value={m}>{m}</option>}
                   </For>
                 </select>
-                <Show when={openaiModels().length === 0 && !openaiModelsLoading()}>
-                  <span class="field-hint">Enter an API key above to load the full model list.</span>
+                <Show when={draftOpenaiKey().trim().length < 10}>
+                  <span class="field-hint">Enter an API key above to load available models.</span>
                 </Show>
+                <Show when={draftOpenaiKey().trim().length >= 10 && openaiModelsLoading()}>
+                  <span class="field-hint">Loading models from this provider…</span>
+                </Show>
+                <Show when={draftOpenaiKey().trim().length >= 10 && !openaiModelsLoading() && openaiFetchState() === 'ok'}>
+                  <span class="field-hint">Models available.</span>
+                </Show>
+                <Show when={draftOpenaiKey().trim().length >= 10 && !openaiModelsLoading() && openaiFetchState() === 'fail'}>
+                  <span class="field-error">Could not load models — check the API key.</span>
+                </Show>
+                <div class="model-test-row">
+                  <button
+                    type="button"
+                    class="secondary"
+                    onClick={onTest}
+                    disabled={anyTestRunning() || draftOpenaiKey().trim().length < 10}
+                  >
+                    <Show when={anyTestRunning()} fallback="Test model">
+                      <span class="spinner inline" />
+                      Testing…
+                    </Show>
+                  </button>
+                  <Show when={mainTest().state === 'ok' && mainTest().message}>
+                    <span class="status ok">{mainTest().message}</span>
+                  </Show>
+                  <Show when={mainTest().state === 'fail' && mainTest().message}>
+                    <span class="status err">{mainTest().message}</span>
+                  </Show>
+                </div>
               </label>
             </Show>
+
+            <div class="config-section-divider" role="separator">
+              <span>App settings</span>
+            </div>
 
             <label class="field">
               <span class="field-label">Response language</span>
@@ -1101,10 +1355,7 @@ export const SettingsView: Component = () => {
                 <span>Hide REC indicator and hint while listening</span>
               </label>
               <span class="field-hint">
-                Shows only a small recording dot on the glasses while a lens is active.
-                Double-tap reveals the answer (without the REC label or the tap hint at the
-                bottom). The answer stays on screen until you open the menu and tap Hide.
-                Takes effect on the next lens session.
+                Shows only a small recording dot; double-tap reveals the answer until hidden via the menu.
               </span>
             </div>
 
@@ -1132,28 +1383,11 @@ export const SettingsView: Component = () => {
               <button type="submit" class="primary" disabled={!canSave() || saveState() === 'saving'}>
                 {saveState() === 'saving' ? 'Saving…' : 'Save'}
               </button>
-              <button
-                type="button"
-                class="secondary"
-                onClick={onTest}
-                disabled={testState() === 'running' || !isConfigured()}
-              >
-                <Show when={testState() === 'running'} fallback="Test connection">
-                  <span class="spinner inline" />
-                  Testing…
-                </Show>
-              </button>
               <Show when={saveState() === 'saved'}>
                 <span class="status ok">Saved</span>
               </Show>
               <Show when={saveState() === 'error'}>
                 <span class="status err">Could not save</span>
-              </Show>
-              <Show when={testState() === 'ok' && testMessage()}>
-                <span class="status ok">{testMessage()}</span>
-              </Show>
-              <Show when={testState() === 'fail' && testMessage()}>
-                <span class="status err">{testMessage()}</span>
               </Show>
             </div>
           </form>

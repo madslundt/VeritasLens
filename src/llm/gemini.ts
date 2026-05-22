@@ -180,6 +180,25 @@ interface ModelsListResponse {
   models?: Array<{ name?: string; supportedGenerationMethods?: string[] }>;
 }
 
+// Positive metadata signal: only models that advertise `generateContent` can
+// be called by this app's pipeline. TTS / image / native-audio Live variants
+// also expose generateContent though (modality isn't reflected in the model
+// list), so we strip them by category keyword. These keywords are stable
+// across releases — new chat families (gemini-3.x, …) appear automatically.
+const GEMINI_NON_CHAT_KEYWORDS: readonly RegExp[] = [
+  /-tts(\b|-)/i,           // gemini-2.5-flash-preview-tts
+  /-image(\b|-)/i,         // gemini-2.5-flash-image-preview
+  /-native-audio/i,        // Live API
+  /-dialog/i,
+  /-live/i,
+  /-search/i,
+  /embedding/i,
+];
+
+export function isSupportedGeminiModel(id: string): boolean {
+  return id.length > 0 && !GEMINI_NON_CHAT_KEYWORDS.some((re) => re.test(id));
+}
+
 /** Fetch available Gemini models that support generateContent, sorted newest-first. */
 export async function fetchAvailableModels(apiKey: string, signal?: AbortSignal): Promise<string[]> {
   const response = await fetch(
@@ -195,7 +214,7 @@ export async function fetchAvailableModels(apiKey: string, signal?: AbortSignal)
         m.supportedGenerationMethods?.includes('generateContent'),
     )
     .map((m) => m.name?.replace('models/', '') ?? '')
-    .filter((n) => n.length > 0)
+    .filter(isSupportedGeminiModel)
     .sort()
     .reverse();
 }

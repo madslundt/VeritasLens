@@ -11,7 +11,20 @@
 // OpenAI's structured-output strict mode requires `additionalProperties:
 // false` and that every property appear in `required`. `toStrictSchema`
 // recurses the schema and injects both.
-import type { OpenAiBaseUrl } from '@/types';
+import { encodePcmToWav } from '@/runtime/audioBuffer';
+import { OPENAI_TRANSCRIBE_MODELS, type OpenAiBaseUrl } from '@/types';
+
+/**
+ * Human-readable host names used in error messages. Falls through to a
+ * sensible default if a new base URL is added without updating this map.
+ */
+const HOST_LABELS: Record<OpenAiBaseUrl, string> = {
+  'https://api.openai.com/v1': 'OpenAI',
+  'https://api.groq.com/openai/v1': 'Groq',
+};
+function hostLabel(baseUrl: OpenAiBaseUrl): string {
+  return HOST_LABELS[baseUrl] ?? 'OpenAI-compatible';
+}
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 
 export interface CallOpenAiLensOptions {
@@ -87,7 +100,7 @@ interface TranscriptionResponse {
  * Gemini provider.
  */
 export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<string> {
-  if (!opts.apiKey) throw new Error('Missing OpenAI API key.');
+  if (!opts.apiKey) throw new Error(`Missing ${hostLabel(opts.baseUrl)} API key.`);
 
   const baseSchema = opts.schema as Record<string, unknown>;
   const augmentedSchema = {
@@ -219,6 +232,68 @@ interface ModelsListResponse {
   data?: Array<{ id?: string }>;
 }
 
+// OpenAI's /v1/models response shape is `{id, object, created, owned_by}` —
+// it carries no capability metadata, and Groq's OpenAI-compatible endpoint
+// is the same. So we can't *verify* chat-capability from the API. Instead
+// we filter out ids that name a non-chat product category: these keywords
+// are stable across vendors and won't collide with future chat-model launches
+// (gpt-6, llama-5, qwen-4, …), so the list does not need maintenance when
+// new chat families ship.
+const NON_CHAT_KEYWORDS: readonly RegExp[] = [
+  /whisper/i,            // STT — both OpenAI (whisper-1) and Groq (whisper-large-v3, distil-whisper)
+  /transcribe/i,         // gpt-4o-transcribe, gpt-4o-mini-transcribe
+  /\btts\b|-tts-|^tts-/i, // tts-1, tts-1-hd, playai-tts-*
+  /embedding/i,          // text-embedding-3-*
+  /moderation/i,         // omni-moderation-*, text-moderation-*
+  /dall-e/i,             // image
+  /gpt-image/i,
+  /-image-preview/i,     // image-output preview variants
+  /-realtime/i,          // websocket-only API
+  /-audio-preview/i,     // audio-output variants — our path uses Whisper
+  /-search-preview/i,    // tool-bound
+  /computer-use/i,       // agent-tool API
+  /^babbage-/i,
+  /^davinci-/i,
+  /^gpt-3\.5-turbo-instruct/i,
+];
+
+export function isSupportedChatModel(id: string): boolean {
+  return id.length > 0 && !NON_CHAT_KEYWORDS.some((re) => re.test(id));
+}
+
+/**
+ * End-to-end probe for an OpenAI-compatible host + chat model. Sends 1 s of
+ * silence through `/audio/transcriptions` then through `/chat/completions`
+ * with a strict JSON schema, mirroring the real lens path. Surfaces failures
+ * from either step (bad key, model that doesn't exist on this host, model
+ * that rejects strict json_schema).
+ */
+export async function runSelfTest(
+  apiKey: string,
+  baseUrl: OpenAiBaseUrl,
+  model: string,
+): Promise<{ latencyMs: number }> {
+  const silentPcm = new Uint8Array(16_000 * 2);
+  const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
+  const prompt = 'Respond with `{"ok": true}` to confirm reachability.';
+  const schema = {
+    type: 'object',
+    properties: { ok: { type: 'boolean' } },
+    required: ['ok'],
+  };
+  const t0 = performance.now();
+  await callOpenAiLens({
+    apiKey,
+    baseUrl,
+    model,
+    transcribeModel: OPENAI_TRANSCRIBE_MODELS[baseUrl],
+    wav,
+    prompt,
+    schema,
+  });
+  return { latencyMs: Math.round(performance.now() - t0) };
+}
+
 /** Fetch chat-completion-capable model ids exposed by the provider. */
 export async function fetchOpenAiModels(
   apiKey: string,
@@ -233,7 +308,7 @@ export async function fetchOpenAiModels(
   const data = (await response.json()) as ModelsListResponse;
   return (data.data ?? [])
     .map((m) => m.id ?? '')
-    .filter((id) => id.length > 0)
+    .filter(isSupportedChatModel)
     .sort();
 }
 

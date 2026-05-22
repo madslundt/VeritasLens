@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "lint": "tsc --noEmit",
     "pack": "evenhub pack app.json ./dist -o veritaslens.ehpk",
-    "qr": "evenhub qr",
+    "qr": "evenhub qr -p 5173",
     "sim": "evenhub-simulator http://localhost:5173 --automation-port 9898"
   },
   "dependencies": {

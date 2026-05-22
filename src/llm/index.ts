@@ -21,8 +21,12 @@ import {
   parseRetryAfterMs,
   type CallLensOptions as GeminiCallLensOptions,
 } from './gemini';
-import { callOpenAiLens, fetchOpenAiModels } from './openai';
-import { OPENAI_TRANSCRIBE_MODELS, type GeminiModel } from '@/types';
+import {
+  callOpenAiLens,
+  fetchOpenAiModels,
+  runSelfTest as runOpenAiSelfTest,
+} from './openai';
+import { OPENAI_TRANSCRIBE_MODELS, type GeminiModel, type LlmProvider, type OpenAiBaseUrl } from '@/types';
 
 export { MAX_RETRIES, parseRetryAfterMs, parseGoogleRetryDelayMs };
 
@@ -49,7 +53,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
   const s = settings();
   if (s.provider === 'openai-compatible') {
     return callOpenAiLens({
-      apiKey: opts.apiKey ?? s.openaiApiKey,
+      apiKey: opts.apiKey ?? (s.openaiApiKeys[s.openaiBaseUrl] ?? ''),
       baseUrl: s.openaiBaseUrl,
       model: opts.model ?? s.openaiModel,
       // Per-host transcription model id (OpenAI calls Whisper `whisper-1`,
@@ -90,23 +94,27 @@ export async function fetchAvailableModels(
 }
 
 /**
- * Reachability self-test for the active provider. Currently only the Gemini
- * path is exercised by the settings "Test connection" button; the OpenAI
- * path runs the equivalent at first lens trigger.
+ * End-to-end probe for the active provider against a specific model. Sends a
+ * 1 s silence WAV through the real lens path (Gemini: generateContent with
+ * inline audio; OpenAI-compatible: Whisper transcription then chat
+ * completions with strict JSON schema) so failures from a wrong key, an
+ * unavailable model, or a model that rejects structured output all surface
+ * here rather than at first real use.
  */
 export async function runSelfTest(
   apiKey: string,
   model?: string,
+  /**
+   * Optional overrides for callers that want to probe an unsaved draft. When
+   * omitted the function falls back to the persisted settings store as before.
+   */
+  overrides?: { provider?: LlmProvider; baseUrl?: OpenAiBaseUrl },
 ): Promise<{ latencyMs: number }> {
   const s = settings();
-  if (s.provider === 'gemini') {
+  const provider = overrides?.provider ?? s.provider;
+  const baseUrl = overrides?.baseUrl ?? s.openaiBaseUrl;
+  if (provider === 'gemini') {
     return runGeminiSelfTest(apiKey, model as GeminiModel | undefined);
   }
-  // OpenAI-compatible: no audio dependency to test, just hit /models which
-  // we already validated via fetchAvailableModels. The picker enforces a
-  // non-empty model list before the user can save, so 'idle' is a reasonable
-  // stand-in here.
-  const t0 = performance.now();
-  await fetchOpenAiModels(apiKey, s.openaiBaseUrl);
-  return { latencyMs: Math.round(performance.now() - t0) };
+  return runOpenAiSelfTest(apiKey, baseUrl, model ?? s.openaiModel);
 }

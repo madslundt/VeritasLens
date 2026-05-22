@@ -24,11 +24,22 @@ import {
   type Settings,
 } from '@/types';
 
+const emptyOpenaiKeys = (): Record<OpenAiBaseUrl, string> =>
+  OPENAI_BASE_URLS.reduce((acc, url) => {
+    acc[url] = '';
+    return acc;
+  }, {} as Record<OpenAiBaseUrl, string>);
+
 const SETTINGS_KEY_PROVIDER = 'veritaslens.provider';
 const SETTINGS_KEY_GEMINI = 'veritaslens.geminiKey';
 const SETTINGS_KEY_MODEL = 'veritaslens.geminiModel';
 const SETTINGS_KEY_AUTO_MODEL = 'veritaslens.geminiAutoModel';
-const SETTINGS_KEY_OPENAI_KEY = 'veritaslens.openaiKey';
+/** Legacy single-key storage. Read once on load and migrated into the per-host map. */
+const SETTINGS_KEY_OPENAI_KEY_LEGACY = 'veritaslens.openaiKey';
+/** Per-host OpenAI API key. The host base URL is appended as a suffix. */
+const SETTINGS_KEY_OPENAI_KEY_PREFIX = 'veritaslens.openaiKey.';
+const openaiKeyStorageKey = (baseUrl: OpenAiBaseUrl): string =>
+  `${SETTINGS_KEY_OPENAI_KEY_PREFIX}${baseUrl}`;
 const SETTINGS_KEY_OPENAI_BASE_URL = 'veritaslens.openaiBaseUrl';
 const SETTINGS_KEY_OPENAI_MODEL = 'veritaslens.openaiModel';
 const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
@@ -63,7 +74,7 @@ const [settings, setSettings] = createSignal<Settings>({
   geminiApiKey: '',
   geminiModel: DEFAULT_GEMINI_MODEL,
   geminiAutoModel: DEFAULT_GEMINI_AUTO_MODEL,
-  openaiApiKey: '',
+  openaiApiKeys: emptyOpenaiKeys(),
   openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
   openaiModel: DEFAULT_OPENAI_MODEL,
   responseLanguage: DEFAULT_LANGUAGE,
@@ -82,12 +93,15 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
   const safeGet = async (k: string): Promise<string> => {
     try { return await getLocalStorage(k); } catch { return ''; }
   };
+  const perHostKeyReads = OPENAI_BASE_URLS.map((u) =>
+    safeGet(openaiKeyStorageKey(u)).then((v) => [u, v] as const),
+  );
   const [
     rawProvider,
     key,
     rawModel,
     rawAutoModel,
-    rawOpenaiKey,
+    rawLegacyOpenaiKey,
     rawOpenaiBaseUrl,
     rawOpenaiModel,
     rawLang,
@@ -95,12 +109,13 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoEnabled,
     rawDiscreet,
     rawVoiceGate,
+    ...perHostKeys
   ] = await Promise.all([
     safeGet(SETTINGS_KEY_PROVIDER),
     safeGet(SETTINGS_KEY_GEMINI),
     safeGet(SETTINGS_KEY_MODEL),
     safeGet(SETTINGS_KEY_AUTO_MODEL),
-    safeGet(SETTINGS_KEY_OPENAI_KEY),
+    safeGet(SETTINGS_KEY_OPENAI_KEY_LEGACY),
     safeGet(SETTINGS_KEY_OPENAI_BASE_URL),
     safeGet(SETTINGS_KEY_OPENAI_MODEL),
     safeGet(SETTINGS_KEY_LANGUAGE),
@@ -108,14 +123,27 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
     safeGet(SETTINGS_KEY_DISCREET),
     safeGet(SETTINGS_KEY_VOICE_GATE),
+    ...perHostKeyReads,
   ]);
+  // Build the per-host key map. If no per-host key exists for the host that
+  // was last active, fall back to the legacy single-key storage so users who
+  // upgrade from a pre-per-host build don't lose their saved credential.
+  const coercedBaseUrl = coerceOpenaiBaseUrl(rawOpenaiBaseUrl);
+  const openaiApiKeys = emptyOpenaiKeys();
+  for (const entry of perHostKeys) {
+    const [url, value] = entry as readonly [OpenAiBaseUrl, string];
+    if (value) openaiApiKeys[url] = value;
+  }
+  if (!openaiApiKeys[coercedBaseUrl] && rawLegacyOpenaiKey) {
+    openaiApiKeys[coercedBaseUrl] = rawLegacyOpenaiKey;
+  }
   setSettings({
     provider: coerceProvider(rawProvider),
     geminiApiKey: key,
     geminiModel: coerceModel(rawModel),
     geminiAutoModel: coerceAutoModel(rawAutoModel),
-    openaiApiKey: rawOpenaiKey,
-    openaiBaseUrl: coerceOpenaiBaseUrl(rawOpenaiBaseUrl),
+    openaiApiKeys,
+    openaiBaseUrl: coercedBaseUrl,
     openaiModel: rawOpenaiModel || DEFAULT_OPENAI_MODEL,
     responseLanguage: coerceLanguage(rawLang),
     bufferDuration: coerceBufferDuration(rawBuffer),
@@ -148,11 +176,33 @@ export const saveGeminiKey = (setLs: SetLs, key: string): Promise<boolean> =>
 export const saveGeminiModel = (setLs: SetLs, model: GeminiModel): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_MODEL, 'geminiModel', model);
 
-export const saveGeminiAutoModel = (setLs: SetLs, model: GeminiModel): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_AUTO_MODEL, 'geminiAutoModel', model);
+export async function saveGeminiAutoModel(
+  setLs: SetLs,
+  model: GeminiModel | null,
+): Promise<boolean> {
+  // Persist `null` as an empty string so loadSettings round-trips it back to
+  // null via coerceAutoModel. `String(null)` would write the literal "null".
+  const ok = await setLs(SETTINGS_KEY_AUTO_MODEL, model ?? '');
+  if (ok) setSettings({ ...settings(), geminiAutoModel: model });
+  return ok;
+}
 
-export const saveOpenaiKey = (setLs: SetLs, key: string): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_OPENAI_KEY, 'openaiApiKey', key);
+/**
+ * Persist all per-host OpenAI keys. Writes the storage entry for each host
+ * (so a user who entered a key on multiple hosts has all of them saved at
+ * once when they hit Save), then updates the in-memory map.
+ */
+export async function saveOpenaiKeys(
+  setLs: SetLs,
+  keys: Record<OpenAiBaseUrl, string>,
+): Promise<boolean> {
+  const writes = await Promise.all(
+    OPENAI_BASE_URLS.map((u) => setLs(openaiKeyStorageKey(u), keys[u] ?? '')),
+  );
+  const ok = writes.every(Boolean);
+  if (ok) setSettings({ ...settings(), openaiApiKeys: { ...keys } });
+  return ok;
+}
 
 export const saveOpenaiBaseUrl = (setLs: SetLs, url: OpenAiBaseUrl): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_OPENAI_BASE_URL, 'openaiBaseUrl', url);
@@ -387,7 +437,7 @@ function coerceModel(raw: string | null | undefined): GeminiModel {
   return DEFAULT_GEMINI_MODEL;
 }
 
-function coerceAutoModel(raw: string | null | undefined): GeminiModel {
+function coerceAutoModel(raw: string | null | undefined): GeminiModel | null {
   if (raw && raw.startsWith('gemini-')) return raw as GeminiModel;
   return DEFAULT_GEMINI_AUTO_MODEL;
 }

@@ -24,12 +24,14 @@ body {
   margin: 0;
   padding: 0;
   min-height: 100vh;
+  min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
 }
 
 #root {
   min-height: 100vh;
+  min-height: 100dvh;
 }
 
 button,
@@ -50,6 +52,7 @@ a {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
+  min-height: 100dvh;
   color: var(--muted);
 }
 
@@ -80,7 +83,13 @@ a {
 .settings {
   max-width: 520px;
   margin: 0 auto;
-  padding: 1.75rem 1.25rem max(3rem, env(safe-area-inset-bottom));
+  /* The Even App's WebView doesn't shrink the layout viewport when the soft
+     keyboard opens, so the bottom of the form ends up shifted above the
+     visible area with no scroll room to reveal it. A permanent +350px below
+     the form gives enough scrollable space to bring every field up above the
+     keyboard. 350px was empirically the smallest value that comfortably
+     clears the keyboard on test hardware. */
+  padding: 1.75rem 1.25rem calc(max(3rem, env(safe-area-inset-bottom)) + 350px);
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -169,6 +178,28 @@ a {
 .field-hint {
   font-size: 0.78rem;
   color: var(--muted);
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.field-test {
+  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.field-test-running {
+  color: var(--muted);
+}
+
+.field-test-ok {
+  color: var(--accent);
+}
+
+.field-test-fail {
+  color: var(--err);
 }
 
 .config input,
@@ -186,6 +217,66 @@ a {
 .config select:focus,
 .history-search-input:focus {
   border-color: var(--accent);
+}
+
+.config input.input-error {
+  border-color: var(--err);
+  box-shadow: 0 0 0 1px var(--err);
+}
+
+.field-error {
+  color: var(--err);
+  font-size: 0.78rem;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.config-section-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 0.4rem;
+}
+
+.config-section-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.model-test-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.8rem;
+  margin-top: 0.4rem;
+  /* Allow the row to shrink inside its column-flex .field parent without
+     pushing the card width — the wrapped status text can then break long
+     tokens (URLs, error codes) instead of overflowing horizontally. */
+  min-width: 0;
+  max-width: 100%;
+}
+
+.model-test-row > button {
+  flex: 0 0 auto;
+}
+
+.model-test-row > .status {
+  /* Drop the status onto its own row whenever the message is non-trivial so
+     it can't overlap the button or get truncated against the card edge.
+     Combined with the wrap rules below, long backend errors are always
+     readable on one or more wrapped lines. */
+  flex: 1 1 100%;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .history-search-input {

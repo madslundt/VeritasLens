@@ -98,8 +98,13 @@ export const GEMINI_MODELS = [
 
 export type GeminiModel = (typeof GEMINI_MODELS)[number];
 export const DEFAULT_GEMINI_MODEL: GeminiModel = 'gemini-2.0-flash';
-/** Model used by the Auto lens to classify which lens fits best. Lighter/faster by default. */
-export const DEFAULT_GEMINI_AUTO_MODEL: GeminiModel = 'gemini-2.0-flash-lite';
+/**
+ * Optional override model for the Auto lens classifier. `null` (the default)
+ * means the Auto lens reuses the main model for the classifier call — no
+ * separate model is invoked. Set to a lighter/cheaper Gemini model to spend
+ * fewer tokens / dodge per-model rate limits on the classify step.
+ */
+export const DEFAULT_GEMINI_AUTO_MODEL: GeminiModel | null = null;
 
 /**
  * LLM provider id. `gemini` calls Google directly with audio in-line.
@@ -175,11 +180,20 @@ export interface Settings {
 
   geminiApiKey: string;
   geminiModel: GeminiModel;
-  /** Model used by the Auto lens classifier (typically a lighter/cheaper model). */
-  geminiAutoModel: GeminiModel;
+  /**
+   * Optional override model for the Auto lens classifier. `null` means the
+   * classifier call reuses the main `geminiModel` — no separate model is
+   * configured. Pick a lighter/cheaper model when you want to keep the
+   * classify step under a different rate-limit envelope from the analysis.
+   */
+  geminiAutoModel: GeminiModel | null;
 
-  /** API key for the OpenAI-compatible provider (OpenAI, OpenRouter, Groq, …). */
-  openaiApiKey: string;
+  /**
+   * API keys for the OpenAI-compatible providers, keyed by host base URL.
+   * Each host (OpenAI, Groq, …) needs its own key, so switching between them
+   * via the Provider dropdown does not lose previously-entered credentials.
+   */
+  openaiApiKeys: Record<OpenAiBaseUrl, string>;
   /** Base URL of the OpenAI-compatible host. Must be one of OPENAI_BASE_URLS. */
   openaiBaseUrl: OpenAiBaseUrl;
   /** Chat-completions model. Populated via fetchAvailableModels after key entry. */
