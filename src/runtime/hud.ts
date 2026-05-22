@@ -185,8 +185,27 @@ let pendingMenuSpinnerFrame = '';
 // Last status frame written by setStatus. Used to seed the vl-status container
 // of any active-page layout that gets rebuilt during analysis (e.g. when the
 // wearer scrolls to a previous answer mid-check), so the spinner stays visible
-// instead of vanishing until the next ticker tick.
+// instead of vanishing until the next ticker tick. Stored as the *canonical*
+// content (empty when idle / displaying, '...' while thinking, spinner frame
+// while a request is in flight) — the layout-local "show a recording dot when
+// status is empty" rule is applied by `statusDisplayText()` so that '•' is
+// never baked into the canonical frame.
 let pendingStatusFrame = '';
+
+// True while the corner status slot may double as a recording indicator —
+// i.e. the mic is hot AND no answer is currently visible. Flipped to false
+// the moment an answer is being rendered (so the wearer sees a clean answer
+// view), and back to true when the answer is dismissed / hidden.
+let recordingDotEligible = true;
+
+/** Compute the text that should currently be in the corner status slot for
+ *  the active layout. Combines the canonical status frame with the recording
+ *  dot fallback used on the listening-state layouts. */
+function statusDisplayText(): string {
+  if (pendingStatusFrame !== '') return pendingStatusFrame;
+  if (!recordingDotEligible) return '';
+  return activeLayout === 'discreet-minimal' || activeLayout === 'baseline' ? '•' : '';
+}
 
 let bootstrapped = false;
 let currentPage: HudPage = 'none';
@@ -365,17 +384,15 @@ export async function restoreActivePage(): Promise<void> {
 
 export async function setStatus(label: keyof typeof STATUS_LABEL | string): Promise<void> {
   const content = STATUS_LABEL[label] ?? label;
-  // On discreet-minimal the status slot doubles as the recording dot — when
-  // status clears (e.g. 'listening'), restore '•' so the user always sees a
-  // recording indicator. Other layouts (baseline, discreet-result, scroll)
-  // keep the slot empty when content is empty so the wearer doesn't see
-  // chrome on the "pure answer" views unless an analysis is actually running.
-  const text = activeLayout === 'discreet-minimal' && content === '' ? '•' : content;
-  // Record the frame even when off the active page so the next rebuild can
-  // seed the status container with the current spinner state.
-  pendingStatusFrame = text;
+  // Record the canonical status content even when off the active page so the
+  // next rebuild can seed the status container with the current spinner /
+  // listening state. The recording-dot fallback is applied at write time by
+  // statusDisplayText() so it never persists into pendingStatusFrame — a
+  // subsequent layout switch (e.g. discreet-minimal → discreet-result) would
+  // otherwise carry the dot into the answer view.
+  pendingStatusFrame = content;
   if (currentPage !== 'active') return;
-  await upgradeText(CONTAINER.status, NAME.status, text);
+  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
 }
 
 /** Optional context the lifecycle passes after running a new analysis.
@@ -451,8 +468,18 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
     sessionPageIndex = 0;
     activeHidden = false;
     latestAnalysisRange = null;
+    // Re-enable the recording dot — the wearer is back to a listening view.
+    // Only write the corner when an answer was previously suppressing the
+    // dot, so an already-idle discreet-minimal stays a true no-op.
+    const wasSuppressed = !recordingDotEligible;
+    recordingDotEligible = true;
     if (currentPage !== 'active') return;
-    if (activeLayout === 'discreet-minimal') return; // already idle
+    if (activeLayout === 'discreet-minimal') {
+      if (wasSuppressed) {
+        await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+      }
+      return;
+    }
     if (isDiscreetLayout(activeLayout)) {
       setActiveLayout('discreet-minimal');
       const ok = await getBridge().rebuildPageContainer(buildActivePage());
@@ -460,6 +487,9 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
       return;
     }
     await upgradeText(CONTAINER.reason, NAME.reason, '');
+    if (wasSuppressed) {
+      await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+    }
     return;
   }
 
@@ -556,6 +586,8 @@ export async function scrollActiveReason(dir: 1 | -1): Promise<ScrollActiveResul
  * tap-back from the menu. */
 async function hideActiveResultInPlace(): Promise<void> {
   activeHidden = true;
+  // Re-enable the recording dot — the wearer is back to a listening view.
+  recordingDotEligible = true;
   const targetIdle: ActiveLayout = isDiscreetLayout(activeLayout) ? 'discreet-minimal' : 'baseline';
   if (activeLayout !== targetIdle) {
     setActiveLayout(targetIdle);
@@ -564,8 +596,10 @@ async function hideActiveResultInPlace(): Promise<void> {
     return;
   }
   // Already on the idle layout (e.g., single-page baseline). Wipe the unified
-  // body so the wearer sees a blank screen between answers.
+  // body so the wearer sees a blank screen between answers and restore the
+  // corner recording dot suppressed while the answer was visible.
   await upgradeText(CONTAINER.reason, NAME.reason, '');
+  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
 }
 
 /** Mark the active result as hidden without clearing it. Used by the menu's
@@ -576,14 +610,6 @@ export function markActiveHidden(): void {
 
 /** True iff the active result is preserved in memory but currently hidden. */
 export function isActiveHidden(): boolean { return activeHidden; }
-
-/** Toggle the recording indicator in the bottom-right of the active page. */
-export async function setRecIndicator(on: boolean): Promise<void> {
-  if (currentPage !== 'active') return;
-  // Discreet layouts have no REC container; suppress unconditionally.
-  if (activeLayout !== 'baseline') return;
-  await upgradeText(CONTAINER.recIndicator, NAME.recIndicator, on ? '● REC' : '');
-}
 
 export async function setActiveHint(content: string): Promise<void> {
   if (currentPage !== 'active') return;
@@ -732,25 +758,19 @@ function claimCount(result: LensResult): number {
 
 /** Build the unified body string for a single claim's page-0 — combines the
  *  heading, verdict/source, and reason/detail into one text block with
- *  blank-line separators. Empty sections are elided. The position tag (X/Y)
- *  and optional Auto badge prefix the heading line so the wearer always sees
- *  where they are in a multi-claim or auto-classifier flow. */
+ *  blank-line separators. Empty sections are elided. */
 function formatUnifiedBody(
   result: LensResult,
   claimIdx: number,
-  autoSelected: boolean,
+  _autoSelected: boolean,
 ): string {
   const { top, middle, bottom } = formatLensResultBase(result, claimIdx);
-  // Compose the optional Auto badge prefix for the first line.
-  const firstLine = autoSelected && top
-    ? `Auto · ${top}`
-    : (autoSelected ? 'Auto' : top);
 
   // Stitch non-empty sections together with a blank line between them so the
   // visual hierarchy (heading | verdict/source | body) remains legible without
   // separate positioned containers.
   const sections: string[] = [];
-  if (firstLine) sections.push(firstLine);
+  if (top) sections.push(top);
   if (middle) sections.push(middle);
   if (bottom) sections.push(bottom);
   return sections.join('\n\n');
@@ -1154,11 +1174,23 @@ async function renderActivePage(): Promise<void> {
   const entry = currentActiveEntry();
   if (!page || !entry) return;
   const target = targetLayoutForActivePage();
+  // Suppress the recording dot the moment an answer is about to land — the
+  // dot is the "listening, nothing on screen" indicator. Set this BEFORE any
+  // page rebuild so the rebuild seeds the corner with '' instead of '•'.
+  const wasDotEligible = recordingDotEligible;
+  recordingDotEligible = false;
   const layoutChanged = target !== activeLayout;
   if (layoutChanged) {
     setActiveLayout(target);
     const ok = await getBridge().rebuildPageContainer(buildActivePage());
     if (!ok) throw new Error('rebuildPageContainer (active) failed.');
+  } else if (wasDotEligible && (activeLayout === 'baseline' || activeLayout === 'discreet-minimal')) {
+    // First render of an answer with no layout change, on a layout where the
+    // corner was showing the '•' listening dot. Push '' into the corner so
+    // the dot gives way to a clean answer view. Subsequent scrolls within
+    // the same answer already have wasDotEligible=false and skip this write.
+    // Discreet-result has no '•' fallback so no clear write is needed.
+    await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
   }
   await upgradeText(CONTAINER.reason, NAME.reason, page.text);
 }
@@ -1319,11 +1351,14 @@ function buildBaselineActivePage(): RebuildPageContainer {
     // mental model of "what does that glyph mean" stays anchored to one
     // visual location. 55-px width comfortably fits the longest content
     // the slot ever shows (spinner with `R1/3` retry prefix = 5 chars).
+    // Doubles as the recording dot when listening — statusDisplayText() falls
+    // back to '•' when the canonical status is empty and an answer isn't on
+    // screen, so baseline and discreet share one visual recording indicator.
     containerID: CONTAINER.status, containerName: NAME.status,
     xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
-    borderWidth: 0, paddingLength: 4, content: pendingStatusFrame, isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: statusDisplayText(), isEventCapture: 0,
   });
-  // Body: y=4, h=252 → bottom 256, abuts REC/hint chrome row. Fits 9 lines
+  // Body: y=4, h=252 → bottom 256, abuts the hint chrome row. Fits 9 lines
   // (9 × 27 + 8 = 251 ≤ 252). One container holds the entire heading +
   // verdict + reason, paginated upstream into per-page chunks.
   const body = new TextContainerProperty({
@@ -1331,17 +1366,12 @@ function buildBaselineActivePage(): RebuildPageContainer {
     xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: BASELINE_PAGE_LINES * LINE_PX + 8,
     borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 1,
   });
-  const rec = new TextContainerProperty({
-    containerID: CONTAINER.recIndicator, containerName: NAME.recIndicator,
-    xPosition: SCREEN_W - 96, yPosition: 260, width: 80, height: 28,
-    borderWidth: 0, paddingLength: 4, content: '● REC', isEventCapture: 0,
-  });
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
-    xPosition: 16, yPosition: 260, width: SCREEN_W - 120, height: 28,
+    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
     borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
   });
-  const textObject = [status, body, rec, hint];
+  const textObject = [status, body, hint];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
@@ -1413,7 +1443,7 @@ function makeDiscreetStatus(): TextContainerProperty {
     containerID: CONTAINER.status, containerName: NAME.status,
     xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
     borderWidth: 0, paddingLength: 4,
-    content: pendingStatusFrame || '•',
+    content: statusDisplayText(),
     isEventCapture: 0,
   });
 }
@@ -1426,7 +1456,7 @@ function makeCornerStatus(): TextContainerProperty {
     containerID: CONTAINER.status, containerName: NAME.status,
     xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
     borderWidth: 0, paddingLength: 4,
-    content: pendingStatusFrame,
+    content: statusDisplayText(),
     isEventCapture: 0,
   });
 }
@@ -1497,6 +1527,7 @@ export function resetHudSessionState(): void {
   pendingActiveResult = null;
   pendingMenuSpinnerFrame = '';
   pendingStatusFrame = '';
+  recordingDotEligible = true;
   // Cancel any pending picker-hint flash so its 2.5s callback can't fire after
   // the session has been torn down and attempt to upgradeText on a stale page.
   if (pickerHintFlashTimer) {

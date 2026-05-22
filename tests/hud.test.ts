@@ -68,7 +68,6 @@ import {
   setActiveLayout,
   setLensResult,
   setMenuSpinner,
-  setRecIndicator,
   setSummaryBadgeState,
   showActivePage,
   showHistoryDetailPage,
@@ -214,12 +213,16 @@ describe('setLensResult', () => {
       claims: [{ quote: '', verdict: 'TRUE', claim: 'The Earth is round.', reason: 'Established by science.' }],
     };
     await setLensResult(result);
-    // Unified body: 1 upgrade (only vl-reason). The body composes heading +
-    // verdict glyph + reason with blank-line separators.
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
+    // 2 upgrades on first answer landing: clear the listening-state '•' in
+    // the corner status slot, then push the unified body. The body composes
+    // heading + verdict glyph + reason with blank-line separators.
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(2);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
-    expect(calls[0]![0].payload.containerName).toBe('vl-reason');
-    const body = calls[0]![0].payload.content;
+    const statusCall = calls.find((c) => c[0].payload.containerName === 'vl-status');
+    expect(statusCall?.[0].payload.content).toBe('');
+    const bodyCall = calls.find((c) => c[0].payload.containerName === 'vl-reason');
+    expect(bodyCall).toBeDefined();
+    const body = bodyCall![0].payload.content;
     expect(body).toContain('The Earth is round.');
     expect(body).toContain('+ TRUE');
     expect(body).toContain('Established by science.');
@@ -232,7 +235,7 @@ describe('setLensResult', () => {
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
 
-  it('prefixes the body heading with "Auto · " when autoSelected is set', async () => {
+  it('does not stamp an "Auto" badge into the heading when autoSelected is set', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     bridge.textContainerUpgrade.mockClear();
@@ -246,23 +249,8 @@ describe('setLensResult', () => {
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
     const bodyCall = calls.find((c) => c[0].payload.containerName === 'vl-reason');
     expect(bodyCall).toBeDefined();
-    // Session-relative X/Y prefix comes first ("1/1 · "), then the Auto badge
-    // sits inside the entry body just before the heading.
-    expect(bodyCall![0].payload.content).toContain('Auto · X');
-  });
-});
-
-describe('setRecIndicator', () => {
-  it('only writes on the active page', async () => {
-    await bootstrapHud('picker');
-    bridge.textContainerUpgrade.mockClear();
-    await setRecIndicator(true);
-    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
-
-    await showActivePage(getPersona('fact-checker')!);
-    bridge.textContainerUpgrade.mockClear();
-    await setRecIndicator(true);
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledOnce();
+    expect(bodyCall![0].payload.content).not.toContain('Auto');
+    expect(bodyCall![0].payload.content).toContain('X');
   });
 });
 
@@ -364,14 +352,17 @@ describe('discreet mode', () => {
     expect(menuOptionAtIndex(0)).toBe('back');
   });
 
-  it('baseline layout renders REC + hint and omits the rec dot', async () => {
+  it('baseline layout renders the corner recording dot + bottom hint (no separate REC chip)', async () => {
     await saveDiscreet(fakeSetLs, false);
     setActiveLayout('baseline');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
     const payload = lastRebuildPayload();
-    expect(findText(payload, 'vl-rec')?.content).toBe('● REC');
+    // The recording indicator is the same corner '•' shared with discreet —
+    // no separate '● REC' chip at the bottom anymore.
+    expect(findText(payload, 'vl-rec')).toBeUndefined();
+    expect(findText(payload, 'vl-status')?.content).toBe('•');
     expect(findText(payload, 'vl-act-hint')?.content).toBe('Tap: menu · Double-tap: check');
     expect(findText(payload, 'vl-clock')).toBeUndefined();
   });
@@ -419,15 +410,6 @@ describe('discreet mode', () => {
     expect(payload.listObject).toHaveLength(0);
   });
 
-  it('setRecIndicator is a no-op while a discreet layout is active', async () => {
-    setActiveLayout('discreet-minimal');
-    await bootstrapHud('picker');
-    await showActivePage(getPersona('fact-checker')!);
-
-    bridge.textContainerUpgrade.mockClear();
-    await setRecIndicator(true);
-    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
-  });
 
   it('setStatus on discreet-minimal writes to the shared top-right slot', async () => {
     setActiveLayout('discreet-minimal');
@@ -594,8 +576,8 @@ describe('pending result on menu', () => {
 
     expect(currentHudPage()).toBe('active');
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
-    // 1 upgrade: the unified body container.
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
+    // 2 upgrades on first answer landing: clear the corner '•' + push body.
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(2);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
     const reason = calls.find((c) => c[0].payload.containerName === 'vl-reason');
     expect(reason).toBeDefined();
@@ -1183,9 +1165,10 @@ describe('line-aware pagination', () => {
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
     });
 
-    // Initial layout: baseline unified body (sink + status + body + rec + hint).
+    // Initial layout: baseline unified body (status corner + body + hint).
     const payload = lastRebuildPayload();
-    expect(findText(payload, 'vl-rec')).toBeDefined();
+    expect(findText(payload, 'vl-rec')).toBeUndefined();
+    expect(findText(payload, 'vl-status')).toBeDefined();
     expect(findText(payload, 'vl-act-hint')).toBeDefined();
     expect(findText(payload, 'vl-reason')).toBeDefined();
     expect(findText(payload, 'vl-claim')).toBeUndefined();

@@ -24,7 +24,6 @@ import {
   setActiveLayout,
   setLensResult,
   setMenuSpinner,
-  setRecIndicator,
   setStatus,
   setSummaryBadgeState,
   showActivePage,
@@ -488,7 +487,6 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   const micOk = await getBridge().audioControl(true);
   if (!micOk) {
     await setStatus('error');
-    await setRecIndicator(false);
     setErrorMessage('Microphone could not be opened.');
     setAppPhase('error');
     return;
@@ -577,6 +575,10 @@ function stopSpinner(): void {
   spinnerPrefix = '';
   spinnerGen++;
   void setMenuSpinner('');
+  // Clear the corner status frame synchronously so a subsequent page rebuild
+  // (e.g. baseline → discreet-result inside setLensResult) doesn't bake the
+  // last spinner glyph back into the freshly-built status container.
+  void setStatus('listening');
 }
 
 function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
