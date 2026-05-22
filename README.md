@@ -1,6 +1,6 @@
 # VeritasLens
 
-A real-time **contextual intelligence layer** for [Even Realities G2](https://www.evenrealities.com) smart glasses. VeritasLens listens to a configurable rolling buffer of conversation audio and — on a single temple tap — sends the audio to Google Gemini, displaying a glanceable result on the HUD.
+A real-time **contextual intelligence layer** for [Even Realities G2](https://www.evenrealities.com) smart glasses. VeritasLens listens to a configurable rolling buffer of conversation audio and — on a single temple tap — sends it to Google Gemini (or an OpenAI-compatible host that transcribes first), displaying a glanceable result on the HUD.
 
 > **Silent intelligence for your G2.** Built as a single-bundle web app that runs inside the Even App WebView. No native code, no companion server, no audio leaves the device until *you* trigger a check.
 
@@ -8,7 +8,7 @@ A real-time **contextual intelligence layer** for [Even Realities G2](https://ww
 
 ## Features
 
-- **8 built-in lenses.** Choose the right tool for the moment or let Auto decide:
+- **8 built-in lenses.** Pick the right tool for the moment or let Auto decide:
   - **Auto** — classifies the audio and routes to the best lens automatically.
   - **Fact Check** — labels the most check-worthy claim as `TRUE / FALSE / UNVERIFIED`.
   - **Trivia** — answers trivia questions with a direct answer and brief description.
@@ -16,30 +16,37 @@ A real-time **contextual intelligence layer** for [Even Realities G2](https://ww
   - **Stats Check** — rates a numerical claim as `PLAUSIBLE / SUSPICIOUS`.
   - **Bias Check** — detects political, emotional, or factional bias; rates `NEUTRAL / BIASED`.
   - **Simplify** — explains jargon or complex statements in plain language.
-  - **Summary** — summarizes the conversation recorded so far (requires extended buffer).
-- **Auto lens.** Makes a fast classification call (using a configurable lighter model) to pick the best analysis lens, then runs the full analysis. Adds ~300–500 ms but requires no manual lens selection.
+  - **Meeting Prep** — grounds answers in notes and labeled attachments you wrote on your phone before the meeting. Every answer carries a verbatim **evidence** excerpt from the cited attachment; the model emits an opt-in **follow-up** only when prep is silent on a decision-changing detail. HUD swipes through `answer → evidence → follow-up`.
+- **Multiple LLM providers.** Bring your own key for **Gemini**, **OpenAI**, or **Groq** — one API key per provider, stored per-host. OpenAI / Groq transcribe the audio first (Whisper) and then analyse the transcript; Gemini consumes audio directly. End-to-end **self-test** in Settings validates the chosen key + model in one click.
+- **Auto lens.** Makes a fast classification call (configurable lighter model, default `gemini-2.0-flash-lite`) to pick the best analysis lens, then runs the full analysis. Adds ~300–500 ms but requires no manual lens selection.
+- **Multi-claim per tap.** Fact, Stats, Fallacy, Bias, Trivia, and Simplify can return up to 5 distinct claims/questions/terms per request. Single-tap on the active HUD walks forward through claims; the bottom hint reflects the next action.
+- **Per-claim verbatim source quote** (≤140 chars) attached to every result. Most recent claim returned first.
+- **Skip silence and noise.** A local voice-activity model (Silero VAD via `@ricky0123/vad-web`) runs on each tap, so taps with nothing to analyse short-circuit before an API call. The HUD flashes `○` (no voice) or `~` (too noisy) instead of waiting on a pointless request. Toggleable in Settings.
 - **Multi-language responses.** Pick from 11 Latin-script European languages (English, Dansk, Svenska, Norsk, Deutsch, Français, Español, Italiano, Português, Nederlands, Polski). Verdict labels stay in canonical English so HUD glyphs always render correctly.
-- **Glanceable HUD layout.** Lens-specific result (verdict, claim, answer, etc.) displayed on the 576×288, 4-bit greyscale display. Result persists until the user takes another action.
-- **Session history.** Every analysis is saved to device local storage. Browse the full session log from the HUD (history pages) or the Settings → History tab on your phone.
-- **Configurable buffer.** Choose 30 seconds, 2 minutes, 5 minutes, or 10 minutes of rolling PCM. Longer buffers give Gemini more context at the cost of more tokens per request.
-- **Auto-summary.** Optionally enable background summaries on a 1, 2, or 5 minute interval. Results appear in History only — no interruption to the HUD.
-- **Continuous recording.** The PCM ring buffer keeps filling during compute, display, and menu states so the next analysis can pick up whatever was said in between. A `● REC` indicator shows when the mic is hot.
-- **Discreet HUD (optional).** Enabled from Settings. While listening, the on-glasses display shows only a small recording dot — no `● REC` label, no affordance hint. Double-tap reveals an analysis result; the result stays on screen until you open the menu and tap `← Back`. Mic capture is unchanged; this is a display-only mode.
+- **Glanceable HUD layout.** Lens-specific result (verdict, claim, answer, etc.) on the 576×288 4-bit greyscale display. Result persists until the user takes another action.
+- **Searchable session history.** Every analysis is saved to device local storage. Browse from the HUD (history pages) or the phone's Settings → History tab. The search input matches quote / question / verdict / lens name **and auto-derived tags** from each entry's content, so a topic, verdict, or entity name finds entries that don't have the word in the recorded question.
+- **End-of-session Summary.** Leaving a session — manually or by changing provider, model, API key, or buffer length — writes a final 5-minute interval summary plus an overall session synthesis. Silent intervals are skipped. Sessions shorter than the interval produce no entry.
+- **Configurable buffer.** Choose 30 seconds, 1 minute, 2 minutes, or 5 minutes of rolling PCM (capped at 5 minutes to match the Summary cadence). Longer buffers give the model more context at the cost of more tokens per request.
+- **Continuous recording.** The PCM ring buffer keeps filling during compute, display, and menu states so the next analysis can pick up whatever was said in between. A small `●` indicator shows when the mic is hot.
+- **Hide / re-reveal via swipe.** Swipe down past the last answer page hides the result and returns the HUD to recording; a follow-up swipe up brings the same last page back.
+- **Session-wide swipe scroll.** Swipe up/down on the active page walks every answer in the current session, not just the most recent analysis. The `X/Y` indicator counts session entries (questions asked).
+- **Previous answer stays on screen during analysis.** The HUD no longer collapses to a dot mid-check — the last result stays visible with a small spinner in the top-right corner.
+- **Discreet HUD (optional).** Enabled from Settings. While listening, the glasses show only a small recording dot — no `● REC` label, no affordance hint. Double-tap reveals an analysis result; result stays on screen until you open the menu and tap `← Back`. Mic capture is unchanged; this is a display-only mode.
 - **Zero-persistence audio.** PCM is held in a single in-memory `Uint8Array` ring buffer. Nothing is written to disk, ever.
-- **BYOK (Bring Your Own Key).** Your Gemini API key never leaves the device except as part of the `generateContent` request *you* initiate.
+- **BYOK (Bring Your Own Key).** Per-host keys for Gemini / OpenAI / Groq never leave the device except as part of the `generateContent` / `chat.completions` request *you* initiate.
 
 ---
 
 ## Gestures
 
-| On glasses      | Picker page         | Active session              | Menu                          | History list               |
-|-----------------|---------------------|-----------------------------|-------------------------------|----------------------------|
-| Single tap      | Start selected lens | Open menu                   | Confirm highlighted option    | Open highlighted entry     |
-| Double tap      | Trigger analysis    | Trigger analysis            | Trigger analysis              | Trigger analysis           |
-| Swipe up        | —                   | Scroll reason text up       | Cycle highlight up            | Cycle highlight up         |
-| Swipe down      | —                   | Scroll reason text down     | Cycle highlight down          | Cycle highlight down       |
+| On glasses      | Picker page         | Active session                                    | Menu                          | History list               |
+|-----------------|---------------------|---------------------------------------------------|-------------------------------|----------------------------|
+| Single tap      | Start selected lens | Next claim → menu (after last)                    | Confirm highlighted option    | Open highlighted entry     |
+| Double tap      | Trigger analysis    | Trigger analysis (cancels in-flight)              | Trigger analysis              | Trigger analysis           |
+| Swipe up        | —                   | Previous answer in session (cross-entry)          | Cycle highlight up            | Cycle highlight up         |
+| Swipe down      | —                   | Next answer / hide past last                      | Cycle highlight down          | Cycle highlight down       |
 
-Menu options (in order): `← Back` (dismiss any visible answer and return to listening), `Check` (run analysis now), `History` (open the session log), `Exit` (end the session).
+Menu options (in order): `← Back` (dismiss any visible answer and return to listening), `Check` (run analysis now), `History` (open the session log), `Exit` (end the session and write the final summary).
 
 On the History Detail page: tap returns to the history list; swipe up/down scrolls the detail text.
 
@@ -54,39 +61,45 @@ The right temple touchpad is the primary input. The host normalizes `CLICK_EVENT
        │                              │                                            │
        │ 16 kHz PCM mic               │ onEvenHubEvent (audio / list / sys)        │ fetch
        │ touchpad gestures            │ callEvenApp (audioControl, rebuild …)      ▼
-       └─ text + image HUD draws                                              [ Gemini 2.x API ]
+       └─ text + image HUD draws                                 [ Gemini 2.x  /  OpenAI  /  Groq ]
 ```
 
-- **Runtime**: SolidJS + Vite + TypeScript (fine-grained reactivity, ~7 KB runtime).
+- **Runtime**: SolidJS + Vite + TypeScript (fine-grained reactivity).
 - **Display**: declarative container model via `@evenrealities/even_hub_sdk` (text + list containers, rebuilt per page transition).
-- **Audio**: fixed-capacity PCM ring buffer (configurable 30 s – 10 min × 16 kHz × 16-bit) with in-memory WAV encoding.
-- **LLM**: direct REST call to `generativelanguage.googleapis.com` with the audio inline-base64'd as `audio/wav`. Gemini Flash variants typically return results in ~1–3 s.
+- **Audio**: fixed-capacity PCM ring buffer (configurable 30 s – 5 min × 16 kHz × 16-bit) with in-memory WAV encoding.
+- **VAD**: Silero (ONNX) via `@ricky0123/vad-web` + `onnxruntime-web`, run locally on each tap.
+- **LLM**: direct REST call to `generativelanguage.googleapis.com`, `api.openai.com`, or `api.groq.com`. Gemini takes the audio inline-base64'd as `audio/wav`; OpenAI / Groq transcribe via Whisper first, then analyse the transcript. Typical end-to-end latency: 1–3 s.
 
 ```
 src/
 ├── main.tsx                # bootstrap; bridge init; auto-launch HUD
 ├── main.css                # global styles
 ├── App.tsx                 # SettingsView shell
-├── views/SettingsView.tsx  # config UI (lenses, key, model, language, history)
+├── views/SettingsView.tsx  # config UI (lenses, providers, keys, models, language, history)
 ├── runtime/
 │   ├── bridge.ts           # SDK singleton + raw-message wiretap
 │   ├── audioBuffer.ts      # ring buffer + WAV encoder + base64
 │   ├── hud.ts              # HUD pages: unconfigured / picker / active / menu / history
-│   └── lifecycle.ts        # event routing, gestures, session state machine
+│   ├── lifecycle.ts        # event routing, gestures, session state machine
+│   └── vad/                # Silero VAD adapter (local voice-activity detection)
 ├── personas/
 │   ├── index.ts            # persona registry (8 built-in lenses)
 │   ├── _utils.ts           # shared prompt helpers
-│   ├── auto.ts             # Auto lens classifier prompt + schema + parser
-│   ├── factChecker.ts      # Fact Check prompt + schema + parser
-│   ├── trivia.ts           # Trivia prompt + schema + parser
-│   ├── logicalFallacy.ts   # Fallacy Check prompt + schema + parser
-│   ├── statsCheck.ts       # Stats Check prompt + schema + parser
-│   ├── biasDetector.ts     # Bias Check prompt + schema + parser
-│   ├── eli5.ts             # Simplify prompt + schema + parser
-│   └── sessionSummary.ts   # Summary prompt + schema + parser
-├── llm/gemini.ts           # generateContent client + model list fetch
+│   ├── auto.ts             # Auto classifier
+│   ├── factChecker.ts      # Fact Check
+│   ├── trivia.ts           # Trivia
+│   ├── logicalFallacy.ts   # Fallacy Check
+│   ├── statsCheck.ts       # Stats Check
+│   ├── biasDetector.ts     # Bias Check
+│   ├── eli5.ts             # Simplify
+│   ├── meetingPrep.ts      # Meeting Prep (prep-grounded answers)
+│   └── sessionSummary.ts   # End-of-session summary
+├── llm/
+│   ├── index.ts            # provider router (Gemini / OpenAI / Groq)
+│   ├── gemini.ts           # generateContent client + model list fetch
+│   └── openai.ts           # Whisper + chat.completions client (OpenAI / Groq)
 ├── state/store.ts          # Solid signals + settings + history persistence
-└── types.ts                # LensResult, Settings, GeminiModel, LanguageCode, HistoryEntry
+└── types.ts                # LensResult, Settings, model lists, LanguageCode, HistoryEntry
 ```
 
 ---
@@ -111,18 +124,20 @@ npm run sim
 
 Once the bundle loads inside the Even App / simulator:
 
-1. The phone shows the configuration screen, the glasses show **"Configure on your phone to begin."**
-2. Paste your Gemini API key (get one at [aistudio.google.com](https://aistudio.google.com/)), pick a model and language, hit **Save**.
+1. The phone shows the configuration screen; glasses show **"Configure on your phone to begin."**
+2. Pick a provider (Gemini / OpenAI / Groq), paste the API key for that provider, choose a model and language, optionally run **Test connection**, hit **Save**.
 3. Glasses transition to the **lens picker**. Scroll to highlight a lens, or leave **Auto** selected to let VeritasLens choose.
-4. Tap the right temple to start a session. Speak for several seconds, then double-tap to fire an analysis (or single-tap → open menu → Fact-check now).
+4. Tap the right temple to start a session. Speak for several seconds, then double-tap to fire an analysis (or single-tap → open menu → Check).
 5. The result appears within ~1–3 s and stays on the HUD until you take the next action.
+
+API keys: [aistudio.google.com](https://aistudio.google.com/) (Gemini) · [platform.openai.com](https://platform.openai.com/) (OpenAI) · [console.groq.com](https://console.groq.com/) (Groq).
 
 ---
 
 ## Tests + build
 
 ```bash
-npm test          # vitest — 5 test files covering audio buffer, WAV encoder, base64, HUD, personas, store, and Gemini client
+npm test          # vitest — covers audio buffer, WAV encoder, base64, HUD, personas, store, providers, VAD
 npm run lint      # tsc --noEmit
 npm run build     # tsc check + vite production build → dist/
 ```
@@ -157,6 +172,8 @@ Confirm every field is correct before packing:
 | `entrypoint` | `"index.html"` |
 | `permissions` | array of objects with `name` + `desc` (+ `whitelist` for `network`) |
 | `supported_languages` | `["en"]` |
+
+The `network` whitelist must contain `https://generativelanguage.googleapis.com`, `https://api.openai.com`, and `https://api.groq.com`.
 
 ### 2. Build
 
@@ -194,19 +211,21 @@ Upload `veritaslens.ehpk` to the **Even Hub developer portal** for review. The p
 
 ## Privacy
 
-- Audio is held in a configurable rolling **in-memory** buffer (30 s – 10 min, `Uint8Array`). Eviction is FIFO and the buffer is released when the session ends.
+- Audio is held in a configurable rolling **in-memory** buffer (30 s – 5 min, `Uint8Array`). Eviction is FIFO and the buffer is released when the session ends.
 - Nothing is written to disk, IndexedDB, or any external audio store.
+- Voice-activity detection (Silero ONNX) runs **locally** in the WebView before any network call; silent or too-noisy taps short-circuit and never leave the device.
 - Session history (analysis results) is persisted to the Even App's local key-value store via `bridge.setLocalStorage`. It stays on-device and is never sent to any server.
-- The Gemini API key is saved via `bridge.setLocalStorage` (Even App's secure key-value store) and only ever leaves the device as the URL parameter on the `generateContent` request **you trigger**.
-- The only outbound network host declared in `app.json` is `https://generativelanguage.googleapis.com`.
+- API keys are saved per-host via `bridge.setLocalStorage` and only ever leave the device as part of the request **you trigger**.
+- The only outbound hosts declared in `app.json` are `https://generativelanguage.googleapis.com`, `https://api.openai.com`, and `https://api.groq.com`.
 
 ---
 
 ## Tech notes
 
 - **Why list containers for input?** Text containers with `isEventCapture=1` emit scroll events on this hardware but not click events. List containers reliably emit both, so every interactive page uses a `ListContainerProperty` as the event sink.
-- **Why mirror the SDK list cursor in JS?** `listEvent` carries `currentSelectItemIndex`, but the host emits double-tap as a `sysEvent` without that field. The runtime tracks `lastPickerIndex` / `lastMenuIndex` whenever a `listEvent` updates it, so any subsequent `sysEvent` tap knows which item to act on.
+- **Why mirror the SDK list cursor in JS?** `listEvent` carries `currentSelectItemIndex`, but the host emits double-tap as a `sysEvent` without that field. The runtime tracks `lastPickerIndex` / `lastMenuIndex` / `lastHistoryIndex` whenever a `listEvent` updates it, so any subsequent `sysEvent` tap knows which item to act on.
 - **Why does the Auto lens make two API calls?** The first call is a fast classification step (~300–500 ms) using a configurable lighter model (default: `gemini-2.0-flash-lite`) to determine which analysis lens fits the audio. The second call runs the full analysis with the chosen lens and the main model. Separating the two lets the classifier stay cheap and fast while the analysis step uses the best available model.
+- **Why transcribe first for OpenAI / Groq?** Neither host accepts inline audio in the same chat call the way Gemini does. The provider adapter calls Whisper first (`audio/transcriptions`), then feeds the transcript into the analysis prompt. Latency adds ~500 ms over the Gemini path; total round-trip typically stays under 3 s on Groq.
 
 ---
 

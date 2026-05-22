@@ -17,7 +17,7 @@ npm run test:watch # vitest watch
 npx vitest run tests/hud.test.ts                       # single test file
 npx vitest run tests/personas.test.ts -t "fact"        # single test by name pattern
 npm run build      # tsc --noEmit + vite production build → dist/
-npm run pack       # evenhub pack app.json ./dist -o veritaslens.ehpk --check
+npm run pack       # evenhub pack app.json ./dist -o veritaslens.ehpk
 npx evenhub qr     # generate QR code for the Even App to scan the dev URL
 ```
 
@@ -89,10 +89,8 @@ Settings and history go through `bridge.setLocalStorage` / `bridge.getLocalStora
 
 ```bash
 npm run build
-npx evenhub pack app.json dist -o veritaslens.ehpk --check
+npx evenhub pack app.json dist -o veritaslens.ehpk
 ```
-
-`--check` validates the `package_id` against the Even Hub store before producing the archive.
 
 ## Testing notes
 
