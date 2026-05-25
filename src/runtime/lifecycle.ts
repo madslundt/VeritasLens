@@ -1,7 +1,7 @@
 // src/runtime/lifecycle.ts
 import { getBridge } from './bridge';
-import { PcmRingBuffer, encodePcmToWav } from './audioBuffer';
-import { analyzeBufferForVoice, resetVADAvailability, warmupVAD } from './vad';
+import { PcmRingBuffer, encodePcmToWav, trimPcmToSegments } from './audioBuffer';
+import { analyzeBufferForVoice, extractSpeechSegments, resetVADAvailability, warmupVAD } from './vad';
 import { getSileroVAD } from './vad/silero';
 import {
   ACTIVE_HINT_ANALYZING,
@@ -137,6 +137,15 @@ let sessionStartTime = 0;
  * each successful API call from runAnalysis.
  */
 let lastAnalysisByteOffset = 0;
+/**
+ * Within the current Auto-driven session, the lens id the classifier picked
+ * on the previous tap. Used to fire a *speculative* lens call in parallel
+ * with the classifier on subsequent taps — on hit we save a full RTT. Reset
+ * on session enter/leave so a new conversation never inherits the previous
+ * session's topic. `null` when no Auto tap has yet resolved (first-tap path
+ * skips the speculative call to avoid spending tokens on a cold guess).
+ */
+let lastAutoWinnerInSession: string | null = null;
 
 export function isHudRunning(): boolean { return running; }
 
@@ -173,6 +182,9 @@ export async function startHudRuntime(): Promise<void> {
     // pays no cold-start latency. Fire-and-forget — failures fall back to
     // the FFT heuristic inside `analyzeBufferForVoice`.
     void warmupVAD();
+    // Pre-open the TLS+HTTP/2 connection to the Gemini host so the first
+    // real callLens doesn't pay the handshake (~100–300ms on cellular).
+    void prewarmGeminiConnection();
     setAppPhase('idle');
     unsubscribeEvents = getBridge().onEvenHubEvent(handleEvent);
     startSettingsWatcher();
@@ -481,6 +493,7 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   sessionStartTime = Date.now();
   intermediateSummaries = [];
   lastAnalysisByteOffset = 0;
+  lastAutoWinnerInSession = null;
   lastMenuIndex = 0;
   setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
   await showActivePage(persona);
@@ -582,9 +595,29 @@ function stopSpinner(): void {
   void setStatus('listening');
 }
 
+/**
+ * Format the already-answered claims block. Filtered to the *current* session
+ * only — previous sessions are unrelated context and would just inflate the
+ * prompt. Includes the verbatim quote when present so the LLM can anchor
+ * against the exact spoken utterance, not just the topic label.
+ */
+function buildAlreadyAnsweredLines(): string[] {
+  const entries = sessionHistory()
+    .filter((e) => e.sessionId === currentSessionId)
+    .slice(-5);
+  return entries.map((e, i) => {
+    const q = (e.question ?? '').trim() || '(no question)';
+    const quote = (e.quote ?? '').trim();
+    return quote ? `${i + 1}. "${quote}" → ${q}` : `${i + 1}. ${q}`;
+  });
+}
+
+const ALREADY_ANSWERED_DIRECTIVE =
+  'ALREADY ANSWERED in this conversation — do NOT re-extract, re-answer, or include these claims even if they appear again in the audio. If the audio contains ONLY these (nothing new), set noSpeech=true. If the audio contains both these and something new, analyze ONLY the new content and skip the rest:';
+
 function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   const base = persona.buildPrompt(lang);
-  const recent = sessionHistory().slice(-3).map((e, i) => `${i + 1}. ${e.question}`);
+  const recent = buildAlreadyAnsweredLines();
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
@@ -592,11 +625,7 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
     base,
   ];
   if (recent.length > 0) {
-    parts.push(
-      '',
-      'RECENT: These have already been analyzed this session — if the audio contains the same content, focus on anything new instead:',
-      ...recent,
-    );
+    parts.push('', ALREADY_ANSWERED_DIRECTIVE, ...recent);
   }
   return parts.join('\n');
 }
@@ -613,7 +642,7 @@ function buildMeetingPromptWithContext(
   sections: MeetingPrepSection[],
 ): string {
   const base = buildMeetingPrepPrompt(lang, sections);
-  const recent = sessionHistory().slice(-3).map((e, i) => `${i + 1}. ${e.question}`);
+  const recent = buildAlreadyAnsweredLines();
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
@@ -621,11 +650,7 @@ function buildMeetingPromptWithContext(
     base,
   ];
   if (recent.length > 0) {
-    parts.push(
-      '',
-      'RECENT: These have already been analyzed this session — if the audio contains the same content, focus on anything new instead:',
-      ...recent,
-    );
+    parts.push('', ALREADY_ANSWERED_DIRECTIVE, ...recent);
   }
   return parts.join('\n');
 }
@@ -739,13 +764,15 @@ async function runAnalysis(): Promise<void> {
   // the gate. The LLM's own noSpeech flag remains the safety net for
   // ambiguous audio that DOES contain at least one voice frame.
   //
-  // Bypassed entirely when the user has disabled `voiceGateEnabled` (Settings
-  // → Voice detection) — useful as a bail-out if Silero misclassifies their
-  // language or environment.
-  if (settings().voiceGateEnabled) {
+  // Bypassed when the user sets `voiceGateRmsFloor` to 0 (Settings → Voice
+  // detection → Off). Higher floor values make the gate stricter (only louder
+  // input passes); lower values are more permissive — useful when the G2's
+  // low-amplitude mic capture is being misclassified as silence.
+  const rmsFloor = settings().voiceGateRmsFloor;
+  if (rmsFloor > 0) {
     const sincePcm = buffer.linearPcmSince(lastAnalysisByteOffset);
     const gatePcm = tailPcm(sincePcm, buffer.sampleRate, VAD_GATE_WINDOW_SEC);
-    const va = await analyzeBufferForVoice(gatePcm, buffer.sampleRate);
+    const va = await analyzeBufferForVoice(gatePcm, buffer.sampleRate, rmsFloor);
     if (va.voiceFrames === 0) {
       const noisy = va.noiseFrames > va.silenceFrames;
       await showNoVoiceFeedback(noisy ? 'Too noisy to pick up voice' : 'No speech captured');
@@ -756,7 +783,14 @@ async function runAnalysis(): Promise<void> {
   // Snapshot the buffer + byte position only after the gate passes. Allocating
   // the linear PCM copy (~10 MB at the default buffer, ~190 MB at 5 min) and
   // bumping the byte offset are wasted work when the gate rejects.
-  const linearPcm = buffer.toLinearPcm();
+  //
+  // Use `linearPcmSince(lastAnalysisByteOffset)` rather than `toLinearPcm()`
+  // so the LLM only sees audio captured *since the previous successful
+  // analysis*. The first tap of a session has offset 0 → it sees the whole
+  // buffer. Each subsequent tap sees only what was said since the last one,
+  // which (a) prevents Gemini from re-answering the same claim across
+  // consecutive taps and (b) shrinks the upload on rapid-tap workflows.
+  const linearPcm = buffer.linearPcmSince(lastAnalysisByteOffset);
   lastAnalysisByteOffset = buffer.bytesProduced;
 
   // Clear the store signal for sibling components (settings WebView). The HUD
@@ -772,12 +806,44 @@ async function runAnalysis(): Promise<void> {
   inflight = controller;
   analyzing = true;
   setAppPhase('thinking');
-  await setStatus('thinking');
+  // The spinner writes its first frame synchronously; an intermediate
+  // setStatus('thinking') here would flash '...' before the spinner takes
+  // over, so we skip it and let the spinner own the status slot.
   await setActiveHint(ACTIVE_HINT_ANALYZING);
   startSpinner();
 
   try {
-    const wav = encodePcmToWav(linearPcm, {
+    // VAD-trim the upload to just the detected speech regions when enabled
+    // (default) and Silero is available. The gate above already confirmed at
+    // least one voice frame in the recent tail; here we re-run Silero against
+    // the full buffer to enumerate every region, then crop. Falls back to the
+    // full PCM silently when Silero is unavailable (FFT fallback returns
+    // `null` segments) or when trimming would not shrink the payload.
+    let pcmForUpload = linearPcm;
+    if (settings().voiceTrimEnabled) {
+      // Reuse the same RMS floor as the gate so trim and gate agree on what
+      // counts as silence — passing the historical 200 here while the gate
+      // used a lenient value would let the trim drop speech the gate
+      // accepted. When the gate is off (`rmsFloor === 0`), fall back to the
+      // historical default so trim still has a meaningful floor; trim is
+      // controlled by its own `voiceTrimEnabled` toggle anyway.
+      const trimFloor = rmsFloor > 0 ? rmsFloor : 200;
+      const segments = await extractSpeechSegments(linearPcm, buffer.sampleRate, trimFloor);
+      if (segments && segments.length > 0) {
+        const trimmed = trimPcmToSegments(linearPcm, segments, {
+          sampleRate: buffer.sampleRate,
+          bytesPerSample: buffer.bitsPerSample / 8,
+        });
+        if (trimmed.length < linearPcm.length) {
+          pushDebugEvent({
+            label: 'vad-trim',
+            detail: `${Math.round(linearPcm.length / 1024)}KB → ${Math.round(trimmed.length / 1024)}KB (${segments.length} seg)`,
+          });
+          pcmForUpload = trimmed;
+        }
+      }
+    }
+    const wav = encodePcmToWav(pcmForUpload, {
       sampleRate: buffer.sampleRate,
       bitsPerSample: buffer.bitsPerSample,
       channels: buffer.channels,
@@ -836,6 +902,13 @@ async function runAnalysis(): Promise<void> {
 
     let analysisPersona: Persona = persona;
     let autoSelected = false;
+    /**
+     * Set to the speculative call's raw text when the classifier confirms its
+     * pick matched our guess — that result is reused directly instead of
+     * issuing a second, sequential lens call. `null` means "no usable
+     * speculative result; run the main lens call below."
+     */
+    let speculativeRawText: string | null = null;
 
     if (persona.id === 'auto') {
       const classifierPrompt = buildPromptWithContext(persona, lang);
@@ -849,7 +922,7 @@ async function runAnalysis(): Promise<void> {
         settings().provider === 'gemini'
           ? (settings().geminiAutoModel ?? undefined)
           : undefined;
-      const classifierRaw = await callLens({
+      const classifierCall = callLens({
         wav,
         prompt: `${classifierContext}\n\n${classifierPrompt}`,
         schema: AUTO_CLASSIFIER_SCHEMA,
@@ -857,9 +930,49 @@ async function runAnalysis(): Promise<void> {
         signal: controller.signal,
         onRetry,
       });
-      const { chosenLensId } = parseAutoClassifierResponse(classifierRaw);
+
+      // Fire a speculative lens call in parallel against the previous Auto
+      // winner in this session. First tap of a session has no signal yet —
+      // we skip the speculative call entirely so a cold guess can't waste
+      // tokens. On hit we save one full sequential lens RTT.
+      const speculativeId = lastAutoWinnerInSession;
+      const speculativeLens =
+        speculativeId && speculativeId !== persona.id ? getPersona(speculativeId) : null;
+      const speculativeCtrl = new AbortController();
+      // Forward outer aborts (user cancel via double-tap, settings change,
+      // teardown) onto the speculative controller so its fetch releases too.
+      const forwardAbort = (): void => speculativeCtrl.abort();
+      controller.signal.addEventListener('abort', forwardAbort, { once: true });
+      let speculativeCall: Promise<string> | null = null;
+      if (speculativeLens) {
+        const specPrompt = buildPromptWithContext(speculativeLens, lang);
+        const specContext = buildContextBlock(speculativeLens.name);
+        speculativeCall = callLens({
+          wav,
+          prompt: `${specContext}\n\n${specPrompt}`,
+          schema: speculativeLens.schema,
+          signal: speculativeCtrl.signal,
+          // Deliberately no onRetry: only the foreground call's retries
+          // should flash R1/2/3 on the HUD spinner.
+        });
+        // Attach a no-op catch so an aborted-on-miss speculative doesn't
+        // surface as an unhandled rejection while the classifier finishes.
+        void speculativeCall.catch(() => undefined);
+      }
+
+      let chosenLensId: string;
+      try {
+        chosenLensId = parseAutoClassifierResponse(await classifierCall).chosenLensId;
+      } catch (err) {
+        speculativeCtrl.abort();
+        controller.signal.removeEventListener('abort', forwardAbort);
+        throw err;
+      }
+
       const chosen = getPersona(chosenLensId);
       if (!chosen) {
+        speculativeCtrl.abort();
+        controller.signal.removeEventListener('abort', forwardAbort);
         stopSpinner();
         setErrorMessage(`Auto classifier returned unknown lens: ${chosenLensId}`);
         await setStatus('error');
@@ -868,17 +981,41 @@ async function runAnalysis(): Promise<void> {
       }
       analysisPersona = chosen;
       autoSelected = true;
+      lastAutoWinnerInSession = chosenLensId;
+
+      if (speculativeCall && chosenLensId === speculativeId) {
+        // Speculative was correct — wait for it. If it errored for any
+        // non-cancel reason we fall through to a fresh main call.
+        try {
+          speculativeRawText = await speculativeCall;
+        } catch (err) {
+          if ((err as Error).name === 'AbortError') throw err;
+          pushDebugEvent({
+            label: 'auto-spec-fail',
+            detail: err instanceof Error ? err.message : String(err),
+          });
+          speculativeRawText = null;
+        }
+      } else {
+        speculativeCtrl.abort();
+      }
+      controller.signal.removeEventListener('abort', forwardAbort);
     }
 
-    const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
-    const analysisContext = buildContextBlock(analysisPersona.name);
-    const rawText = await callLens({
-      wav,
-      prompt: `${analysisContext}\n\n${analysisPrompt}`,
-      schema: analysisPersona.schema,
-      signal: controller.signal,
-      onRetry,
-    });
+    let rawText: string;
+    if (speculativeRawText !== null) {
+      rawText = speculativeRawText;
+    } else {
+      const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
+      const analysisContext = buildContextBlock(analysisPersona.name);
+      rawText = await callLens({
+        wav,
+        prompt: `${analysisContext}\n\n${analysisPrompt}`,
+        schema: analysisPersona.schema,
+        signal: controller.signal,
+        onRetry,
+      });
+    }
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
     stopSpinner();
@@ -951,6 +1088,22 @@ async function runAnalysis(): Promise<void> {
 
 /** Fixed cadence for the in-session auto-summary tick. Hardcoded — no user knob. */
 const AUTO_SUMMARY_INTERVAL_MS = 5 * 60_000;
+
+/**
+ * Best-effort HEAD against the Gemini host to open the TLS+HTTP/2 connection
+ * before the user's first tap. Silent on every failure path — this is a
+ * micro-optimisation, not a health check. Only fires for the Gemini
+ * provider; the openai-compatible host warms naturally on its own paths.
+ */
+async function prewarmGeminiConnection(): Promise<void> {
+  if (settings().provider !== 'gemini') return;
+  try {
+    await fetch('https://generativelanguage.googleapis.com/$discovery/rest', {
+      method: 'HEAD',
+      keepalive: true,
+    });
+  } catch { /* best-effort */ }
+}
 
 /**
  * Return at most the most-recent `maxSeconds` of audio from a 16-bit LE PCM
@@ -1043,8 +1196,9 @@ async function runAutoSummary(): Promise<void> {
   // this because there is nothing to summarise in a silent/noisy window, and
   // skipping the API call here is pure upside.
   const linearPcm = buffer.toLinearPcm();
-  if (settings().voiceGateEnabled) {
-    const va = await analyzeBufferForVoice(linearPcm, buffer.sampleRate);
+  const summaryFloor = settings().voiceGateRmsFloor;
+  if (summaryFloor > 0) {
+    const va = await analyzeBufferForVoice(linearPcm, buffer.sampleRate, summaryFloor);
     if (va.totalFrames > 0 && va.voiceFrames === 0) return;
   }
   // Per-tick abort handle so leaveActiveSession / stopHudRuntime can cancel
@@ -1170,8 +1324,9 @@ async function runStopTimeSummaries(inputs: StopTimeInputs): Promise<void> {
   let lastTick: IntermediateSummary | null = null;
 
   if (inputs.linearPcm) {
-    const hasVoice = settings().voiceGateEnabled
-      ? (await analyzeBufferForVoice(inputs.linearPcm, inputs.sampleRate)).voiceFrames > 0
+    const stopFloor = settings().voiceGateRmsFloor;
+    const hasVoice = stopFloor > 0
+      ? (await analyzeBufferForVoice(inputs.linearPcm, inputs.sampleRate, stopFloor)).voiceFrames > 0
       : true;
     if (hasVoice) {
       await setSummaryBadgeState('generating');

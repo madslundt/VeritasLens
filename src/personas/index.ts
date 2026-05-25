@@ -34,7 +34,7 @@ const BUILTINS: Persona[] = [
     id: 'auto',
     name: 'Auto',
     description:
-      'Listens to your question and automatically picks the best lens (fact-check, trivia, logical fallacy, stats, bias, or ELI5). Adds a brief classification step (~300–500 ms) before analysis.',
+      'Picks the best lens for what you asked, then runs it. Covers every lens except Meeting Prep. Makes an extra request to choose the lens, so it takes a bit longer.',
     hint: 'Tap and let VeritasLens choose',
     buildPrompt: buildAutoPrompt,
     schema: AUTO_CLASSIFIER_SCHEMA,

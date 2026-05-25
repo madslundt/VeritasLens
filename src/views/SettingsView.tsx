@@ -12,7 +12,9 @@ import {
   modelsLoading,
   newSectionId,
   saveAutoSummaryEnabled,
-  saveVoiceGateEnabled,
+  saveVoiceGateRmsFloor,
+  VOICE_GATE_RMS_STEP,
+  VOICE_GATE_RMS_MAX,
   saveBufferDuration,
   saveDiscreet,
   saveGeminiKey,
@@ -22,6 +24,7 @@ import {
   saveOpenaiBaseUrl,
   saveOpenaiKeys,
   saveOpenaiModel,
+  saveOpenaiTranscribeModels,
   saveProvider,
   saveResponseLanguage,
   sessionHistory,
@@ -34,6 +37,8 @@ import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecyc
 import {
   LANGUAGES,
   OPENAI_BASE_URLS,
+  OPENAI_INLINE_AUDIO_HOSTS,
+  OPENAI_TRANSCRIBE_MODELS,
   openaiHostLabel,
   type BufferDuration,
   type GeminiModel,
@@ -243,6 +248,19 @@ export const SettingsView: Component = () => {
     setDraftOpenaiKeys((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: key }));
   };
   const [draftOpenaiModel, setDraftOpenaiModel] = createSignal<string>(settings().openaiModel);
+  // Per-host draft of transcribe model overrides. Empty string for a host
+  // means "use the static default from OPENAI_TRANSCRIBE_MODELS"; the helpers
+  // below read/write only the slot for the currently-selected base URL.
+  const [draftOpenaiTranscribeModels, setDraftOpenaiTranscribeModels] = createSignal<Record<OpenAiBaseUrl, string>>(
+    { ...settings().openaiTranscribeModels },
+  );
+  const draftOpenaiTranscribeModel = (): string =>
+    draftOpenaiTranscribeModels()[draftOpenaiBaseUrl()] ?? '';
+  const setDraftOpenaiTranscribeModel = (model: string): void => {
+    setDraftOpenaiTranscribeModels((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: model }));
+  };
+  const isInlineAudioHost = (baseUrl: OpenAiBaseUrl): boolean =>
+    OPENAI_INLINE_AUDIO_HOSTS.has(baseUrl);
   const [openaiModels, setOpenaiModels] = createSignal<string[]>([]);
   const [openaiModelsLoading, setOpenaiModelsLoading] = createSignal(false);
   // Outcome of the most recent /models probe per provider. Used to gate
@@ -259,7 +277,7 @@ export const SettingsView: Component = () => {
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
-  const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateEnabled);
+  const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
   // Local draft of meeting-prep sections. Mirrors the persisted store value but
   // always carries at least one row so the editor never collapses to nothing.
   // Autosaves on debounce; cap violations surface inline in `prepError`.
@@ -606,11 +624,14 @@ export const SettingsView: Component = () => {
         ) as Record<OpenAiBaseUrl, string>),
         saveOpenaiBaseUrl(setLs, draftOpenaiBaseUrl()),
         saveOpenaiModel(setLs, draftOpenaiModel()),
+        saveOpenaiTranscribeModels(setLs, Object.fromEntries(
+          (Object.entries(draftOpenaiTranscribeModels()) as Array<[OpenAiBaseUrl, string]>).map(([u, v]) => [u, v.trim()]),
+        ) as Record<OpenAiBaseUrl, string>),
         saveResponseLanguage(setLs, draftLanguage()),
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
         saveDiscreet(setLs, draftDiscreet()),
-        saveVoiceGateEnabled(setLs, draftVoiceGate()),
+        saveVoiceGateRmsFloor(setLs, draftVoiceGate()),
       ]);
       if (results.every(Boolean)) {
         setSaveState('saved');
@@ -660,10 +681,17 @@ export const SettingsView: Component = () => {
     setMainTest({ state: 'running', message: '' });
     setAutoTest(autoModel ? { state: 'running', message: '' } : IDLE_TEST);
 
+    // For transcribe-then-chat hosts (OpenAI, Groq) carry the draft transcribe
+    // model into the probe so the Test button reflects what Save would do.
+    // Empty draft falls back to the static default inside runSelfTest. Inline-
+    // audio hosts (OpenRouter) skip transcription entirely — pass undefined.
+    const draftTranscribe = isOpenAi && !isInlineAudioHost(baseUrl)
+      ? (draftOpenaiTranscribeModel().trim() || undefined)
+      : undefined;
     const { runSelfTest } = await import('@/llm');
     const probe = async (model: string): Promise<ModelTestStatus> => {
       try {
-        const r = await runSelfTest(apiKey, model, { provider, baseUrl });
+        const r = await runSelfTest(apiKey, model, { provider, baseUrl, transcribeModel: draftTranscribe });
         return { state: 'ok', message: `Works · ${r.latencyMs} ms` };
       } catch (err) {
         return { state: 'fail', message: err instanceof Error ? err.message : String(err) };
@@ -1291,6 +1319,27 @@ export const SettingsView: Component = () => {
                   </Show>
                 </div>
               </label>
+
+              <Show when={!isInlineAudioHost(draftOpenaiBaseUrl())}>
+                <label class="field">
+                  <span class="field-label">Transcription model</span>
+                  <input
+                    type="text"
+                    autocomplete="off"
+                    spellcheck={false}
+                    placeholder={OPENAI_TRANSCRIBE_MODELS[draftOpenaiBaseUrl()] ?? ''}
+                    value={draftOpenaiTranscribeModel()}
+                    onInput={(e) => { setDraftOpenaiTranscribeModel(e.currentTarget.value); clearStatuses(); }}
+                  />
+                  <span class="field-hint">
+                    Posted to <code>/audio/transcriptions</code> before chat
+                    completions. Leave blank to use the {openaiHostLabel(draftOpenaiBaseUrl())} default
+                    (<code>{OPENAI_TRANSCRIBE_MODELS[draftOpenaiBaseUrl()] ?? ''}</code>); override
+                    with e.g. <code>gpt-4o-mini-transcribe</code> or <code>whisper-large-v3-turbo</code>
+                    if the default has been deprecated or you want a different price/quality point.
+                  </span>
+                </label>
+              </Show>
             </Show>
 
             <div class="config-section-divider" role="separator">
@@ -1318,22 +1367,29 @@ export const SettingsView: Component = () => {
                 <For each={BUFFER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
               </select>
               <span class="field-hint">
-                Longer buffers give Gemini more context but use more tokens per request.
+                Longer buffers capture more conversation but cost more per request.
               </span>
             </label>
 
             <div class="field">
-              <span class="field-label">Voice detection</span>
-              <label class="toggle-row">
+              <span class="field-label">Voice detection sensitivity</span>
+              <div class="slider-row">
                 <input
-                  type="checkbox"
-                  checked={draftVoiceGate()}
-                  onChange={(e) => setDraftVoiceGate(e.currentTarget.checked)}
+                  type="range"
+                  min="0"
+                  max={VOICE_GATE_RMS_MAX}
+                  step={VOICE_GATE_RMS_STEP}
+                  value={draftVoiceGate()}
+                  onInput={(e) => setDraftVoiceGate(Number(e.currentTarget.value))}
                 />
-                <span>Skip silence and non-voice noise</span>
-              </label>
+                <span class="slider-value">
+                  {draftVoiceGate() === 0 ? 'Off' : `RMS ${draftVoiceGate()}`}
+                </span>
+              </div>
               <span class="field-hint">
-                Skips the LLM call when no speech is detected.
+                RMS floor below which a frame counts as silence. <strong>0</strong> turns the gate off
+                (every tap is sent to the LLM); <strong>200</strong> is the historical default. Lower
+                if quiet speech is being misclassified, higher if background noise is leaking through.
                 <br />
                 <strong>○</strong> no voice / silence
                 <br />
@@ -1349,7 +1405,7 @@ export const SettingsView: Component = () => {
                   checked={draftDiscreet()}
                   onChange={(e) => setDraftDiscreet(e.currentTarget.checked)}
                 />
-                <span>Hide REC indicator and hint while listening</span>
+                <span>Hide the hint row while listening</span>
               </label>
               <span class="field-hint">
                 Shows only a small recording dot; double-tap reveals the answer until hidden via the menu.
@@ -1368,7 +1424,7 @@ export const SettingsView: Component = () => {
               </label>
               <Show when={draftAutoEnabled()}>
                 <span class="field-hint warning">
-                  ⚠ Sends a Gemini request every 5 minutes during a session, plus a
+                  ⚠ Sends a provider request every 5 minutes during a session, plus a
                   last-tick and a final-synthesis request when you exit the session
                   (or change provider/model/key/buffer-duration settings). Both
                   appear in History; ticks with no voice are skipped automatically.
@@ -1391,7 +1447,7 @@ export const SettingsView: Component = () => {
 
           <footer class="privacy">
             Audio is held in a rolling in-memory buffer, never written to disk. Your API key is sent
-            only as part of the Gemini request you trigger. Session log is cleared when the app closes.
+            only as part of the provider request you trigger. Session log is cleared when the app closes.
           </footer>
         </>
       </Show>

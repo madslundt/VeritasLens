@@ -163,13 +163,13 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
     if (response.status === 503 || response.status === 429) {
       const errText = await response.text();
       nextDelayMs = parseRetryAfterMs(response.headers.get('retry-after')) ?? (response.status === 429 ? 5000 : 1000);
-      lastError = new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 200)}`);
+      lastError = new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
       continue;
     }
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 200)}`);
+      throw new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
     }
 
     const payload = (await response.json()) as ChatCompletionsResponse;
@@ -241,7 +241,7 @@ async function transcribeAudio(opts: TranscribeOptions): Promise<string> {
   if (!response.ok) {
     const errText = await response.text();
     throw new Error(
-      `${openaiHostLabel(opts.baseUrl)} transcription HTTP ${response.status} (model "${opts.model}"): ${truncate(errText, 200)}`,
+      `${openaiHostLabel(opts.baseUrl)} transcription HTTP ${response.status} (model "${opts.model}"): ${truncate(errText, 2000)}`,
     );
   }
   const payload = (await response.json()) as TranscriptionResponse;
@@ -303,6 +303,10 @@ export async function runSelfTest(
   apiKey: string,
   baseUrl: OpenAiBaseUrl,
   model: string,
+  /** Per-host transcription model id. Falls back to OPENAI_TRANSCRIBE_MODELS
+   *  when omitted, which keeps inline-audio hosts (OpenRouter) on the
+   *  inline-audio branch (the lookup returns undefined). */
+  transcribeModel?: string,
 ): Promise<{ latencyMs: number }> {
   const silentPcm = new Uint8Array(16_000 * 2);
   const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
@@ -317,9 +321,7 @@ export async function runSelfTest(
     apiKey,
     baseUrl,
     model,
-    // Undefined on inline-audio hosts (OpenRouter); callOpenAiLens branches on
-    // OPENAI_INLINE_AUDIO_HOSTS to decide whether the transcribe step runs.
-    transcribeModel: OPENAI_TRANSCRIBE_MODELS[baseUrl],
+    transcribeModel: transcribeModel || OPENAI_TRANSCRIBE_MODELS[baseUrl],
     wav,
     prompt,
     schema,

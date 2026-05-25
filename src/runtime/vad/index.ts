@@ -69,16 +69,17 @@ function describeError(err: unknown): string {
 export async function analyzeBufferForVoice(
   pcm: Uint8Array,
   sampleRate: number,
+  rmsFloor: number = 200,
 ): Promise<VoiceBufferAnalysis> {
   // Skip Silero entirely if we already know it isn't available — avoids
   // paying the rejected-promise round-trip on every tap.
   if (sileroAvailable === false) {
-    const r = analyzeBufferForVoiceFFT(pcm, sampleRate);
+    const r = analyzeBufferForVoiceFFT(pcm, sampleRate, rmsFloor);
     logVad('fft', r, pcm.length);
     return r;
   }
   try {
-    const result = await getSileroVAD().predict(pcm, sampleRate);
+    const result = await getSileroVAD().predict(pcm, sampleRate, rmsFloor);
     sileroAvailable = true;
     logVad('silero', result, pcm.length);
     return result;
@@ -86,7 +87,7 @@ export async function analyzeBufferForVoice(
     sileroAvailable = false;
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     pushDebugEvent({ label: 'vad-error', detail: `Silero predict failed, FFT fallback — ${msg}` });
-    const r = analyzeBufferForVoiceFFT(pcm, sampleRate);
+    const r = analyzeBufferForVoiceFFT(pcm, sampleRate, rmsFloor);
     logVad('fft', r, pcm.length);
     return r;
   }
@@ -97,6 +98,32 @@ function logVad(path: 'silero' | 'fft', r: VoiceBufferAnalysis, byteLength: numb
   const detail = `${path} | ${seconds.toFixed(1)}s | voice=${r.voiceFrames} silence=${r.silenceFrames} noise=${r.noiseFrames}`;
   pushDebugEvent({ label: 'vad-decision', detail });
   if (import.meta.env.DEV) console.log('[vad]', detail);
+}
+
+/**
+ * Extract every speech segment in the PCM buffer (Silero only — the FFT
+ * fallback has no segment-level output, so we report "not available" and
+ * callers ship the full WAV instead of a trimmed one). Returns `null` to
+ * signal "trim not possible, use full PCM" — distinct from `[]` ("ran, found
+ * nothing"), which also defeats trimming but tells the caller the buffer
+ * really did not contain speech regions.
+ */
+export async function extractSpeechSegments(
+  pcm: Uint8Array,
+  sampleRate: number,
+  rmsFloor: number = 200,
+): Promise<Array<{ start: number; end: number }> | null> {
+  if (sileroAvailable === false) return null;
+  try {
+    const segments = await getSileroVAD().extractSpeechSegments(pcm, sampleRate, rmsFloor);
+    sileroAvailable = true;
+    return segments;
+  } catch (err) {
+    sileroAvailable = false;
+    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+    pushDebugEvent({ label: 'vad-error', detail: `Silero segment extract failed — ${msg}` });
+    return null;
+  }
 }
 
 /**

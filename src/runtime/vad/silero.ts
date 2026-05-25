@@ -18,12 +18,12 @@ import type { VoiceBufferAnalysis } from '@/runtime/audioBuffer';
 const MODEL_URL = './silero_vad_legacy.onnx';
 
 /**
- * RMS floor (int16 units) below which a 250 ms frame is considered silence
- * rather than noise. Mirrors the threshold used by the FFT fallback so the
- * `silence-vs-noise` distinction surfaced to the HUD glyph (`○` vs `~`) is
- * consistent regardless of which path produced the verdict.
+ * Default RMS floor used when callers don't pass one through. Production
+ * code reads the user-configured floor from `settings()` and forwards it
+ * to `predict()` / `extractSpeechSegments()`; this default exists so unit
+ * tests and ad-hoc callers don't have to thread the parameter.
  */
-const SILENCE_RMS_FLOOR = 200;
+const DEFAULT_RMS_FLOOR = 200;
 const ENERGY_FRAME_SAMPLES = 4000; // 250 ms at 16 kHz
 
 interface NonRealTimeVAD {
@@ -46,6 +46,10 @@ interface NonRealTimeVADStatic {
   new: (options: {
     modelURL: string;
     modelFetcher: (path: string) => Promise<ArrayBuffer>;
+    /** Silero NN output above this is treated as speech. Default ~0.5. */
+    positiveSpeechThreshold?: number;
+    /** Output below this ends a speech segment (hysteresis). Default ~0.35. */
+    negativeSpeechThreshold?: number;
   }) => Promise<NonRealTimeVAD>;
 }
 
@@ -103,6 +107,12 @@ export class SileroVADSession {
       // does this already but we name the function explicitly so a future
       // contributor sees where the model loads from.
       modelFetcher: (path: string) => fetch(path).then((r) => r.arrayBuffer()),
+      // Library defaults (~0.5 / ~0.35) are tuned for studio-quality mics
+      // and reject the G2's low-amplitude capture as non-speech. Loosen
+      // them so real speech survives the gate; the LLM's own noSpeech flag
+      // is the safety net for ambiguous audio that does slip through.
+      positiveSpeechThreshold: 0.3,
+      negativeSpeechThreshold: 0.2,
     });
   }
 
@@ -123,7 +133,11 @@ export class SileroVADSession {
    * Init must have resolved before this is called; the public `predict()`
    * waits on `init()` so callers don't need to sequence themselves.
    */
-  async predict(pcm: Uint8Array, sampleRate: number): Promise<VoiceBufferAnalysis> {
+  async predict(
+    pcm: Uint8Array,
+    sampleRate: number,
+    rmsFloor: number = DEFAULT_RMS_FLOOR,
+  ): Promise<VoiceBufferAnalysis> {
     await this.init();
     if (!this.vad) throw new Error('SileroVAD: not initialized');
 
@@ -132,7 +146,7 @@ export class SileroVADSession {
       return { voiceFrames: 0, silenceFrames: 0, noiseFrames: 0, totalFrames: 0 };
     }
 
-    const energy = countEnergyFrames(pcm);
+    const energy = countEnergyFrames(pcm, rmsFloor);
     if (energy.energeticFrames === 0) {
       return {
         voiceFrames: 0,
@@ -160,6 +174,46 @@ export class SileroVADSession {
       noiseFrames: energy.energeticFrames,
       totalFrames: energy.totalFrames,
     };
+  }
+
+  /**
+   * Drain the Silero generator over the full buffer and return every detected
+   * speech segment as `{ start, end }` **sample offsets** (inclusive start,
+   * exclusive end). Unlike `predict()` — which early-exits on the first
+   * segment — this awaits the full run so trimming downstream sees every
+   * region. Returns `[]` when no speech is found, an empty buffer, or when
+   * `init()` already failed (caller falls back to the full PCM).
+   *
+   * Note: `@ricky0123/vad-web`'s `NonRealTimeVAD.run` yields `start` / `end`
+   * in **milliseconds** (see its impl: `(frameIndex * frameSamples) / 16`).
+   * We convert to samples at the boundary so downstream consumers (e.g.
+   * `trimPcmToSegments`) can operate in their natural unit.
+   */
+  async extractSpeechSegments(
+    pcm: Uint8Array,
+    sampleRate: number,
+    rmsFloor: number = DEFAULT_RMS_FLOOR,
+  ): Promise<Array<{ start: number; end: number }>> {
+    await this.init();
+    if (!this.vad) return [];
+
+    const totalSamples = pcm.length >> 1;
+    if (totalSamples === 0) return [];
+
+    const energy = countEnergyFrames(pcm, rmsFloor);
+    if (energy.energeticFrames === 0) return [];
+
+    const float32 = int16ToFloat32(pcm);
+    const segments: Array<{ start: number; end: number }> = [];
+    for await (const segment of this.vad.run(float32, sampleRate)) {
+      // ms → samples; clamp end to the buffer so a rounding overshoot at the
+      // tail (the library extrapolates from the last frame's end) can't push
+      // past `totalSamples`.
+      const startSamples = Math.max(0, Math.floor((segment.start / 1000) * sampleRate));
+      const endSamples = Math.min(totalSamples, Math.floor((segment.end / 1000) * sampleRate));
+      if (endSamples > startSamples) segments.push({ start: startSamples, end: endSamples });
+    }
+    return segments;
   }
 
   /**
@@ -193,12 +247,15 @@ export function __resetSileroVADForTests(): void {
 }
 
 /**
- * Quick energy pass over a 16-bit LE PCM buffer. Frames below
- * `SILENCE_RMS_FLOOR` count as silence; the rest count as energetic.
- * Used to short-circuit Silero on fully-silent buffers and to populate the
- * silence/noise distinction expected by the HUD.
+ * Quick energy pass over a 16-bit LE PCM buffer. Frames below `rmsFloor`
+ * count as silence; the rest count as energetic. Used to short-circuit
+ * Silero on fully-silent buffers and to populate the silence/noise
+ * distinction expected by the HUD. `rmsFloor` comes from the user-tunable
+ * voice-gate sensitivity setting; production callers always pass it
+ * through explicitly so test/default behaviour and live behaviour cannot
+ * silently diverge.
  */
-function countEnergyFrames(pcm: Uint8Array): {
+function countEnergyFrames(pcm: Uint8Array, rmsFloor: number): {
   silenceFrames: number;
   energeticFrames: number;
   totalFrames: number;
@@ -220,7 +277,7 @@ function countEnergyFrames(pcm: Uint8Array): {
       sumSq += s * s;
     }
     const rms = Math.sqrt(sumSq / frameSamples);
-    if (rms < SILENCE_RMS_FLOOR) silenceFrames++;
+    if (rms < rmsFloor) silenceFrames++;
     else energeticFrames++;
   }
   return { silenceFrames, energeticFrames, totalFrames: frameCount };

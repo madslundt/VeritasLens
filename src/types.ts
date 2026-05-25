@@ -86,19 +86,29 @@ export interface HistoryEntry {
   tags?: string[];
 }
 
-/** Gemini models known to accept inline audio input. */
+/** Curated Gemini models we know accept inline audio input. Used as the
+ *  first-run default and as a fallback when the dynamic `/v1beta/models`
+ *  listing isn't available yet. The runtime accepts any model name matching
+ *  `GEMINI_MODEL_PATTERN`, so a newer family (gemini-3.x, …) returned by the
+ *  Google listModels endpoint is usable without a code change. */
 export const GEMINI_MODELS = [
   'gemini-2.5-flash',
   'gemini-2.5-pro',
 ] as const;
 
-export type GeminiModel = (typeof GEMINI_MODELS)[number];
+/** URL-safe validator for any `gemini-*` model id. Limits the path segment to
+ *  lowercase letters, digits, dashes, and dots so a corrupted local-storage
+ *  value can't slip an unsafe character into the endpoint URL. */
+export const GEMINI_MODEL_PATTERN = /^gemini-[a-z0-9.-]+$/;
+
+export type GeminiModel = `gemini-${string}`;
 export const DEFAULT_GEMINI_MODEL: GeminiModel = 'gemini-2.5-flash';
 /**
- * Optional override model for the Auto lens classifier. `null` means the Auto
- * lens reuses the main model for the classifier call — no separate model is
- * invoked. Users can set a different Gemini model from the settings UI to
- * spend fewer tokens / dodge per-model rate limits on the classify step.
+ * Optional override model for the Auto lens classifier. `null` (the default)
+ * means the Auto lens reuses the main model for the classifier call — no
+ * separate model is invoked. Users can pick a lighter/cheaper Gemini model
+ * from the settings UI to spend fewer tokens or dodge per-model rate limits
+ * on the classify step.
  */
 export const DEFAULT_GEMINI_AUTO_MODEL: GeminiModel | null = null;
 
@@ -221,6 +231,14 @@ export interface Settings {
   openaiBaseUrl: OpenAiBaseUrl;
   /** Chat-completions model. Populated via fetchAvailableModels after key entry. */
   openaiModel: string;
+  /**
+   * Per-host override for the `/audio/transcriptions` model. Empty string for
+   * a host means "use the static default from `OPENAI_TRANSCRIBE_MODELS`".
+   * Stored per host (like `openaiApiKeys`) so swapping between OpenAI and Groq
+   * preserves each side's customization. Ignored for inline-audio hosts where
+   * `OPENAI_TRANSCRIBE_MODELS[host]` is undefined.
+   */
+  openaiTranscribeModels: Record<OpenAiBaseUrl, string>;
 
   responseLanguage: LanguageCode;
   bufferDuration: BufferDuration;
@@ -233,13 +251,24 @@ export interface Settings {
    */
   discreet: boolean;
   /**
-   * When true (default), the in-browser VAD (Silero, with an FFT fallback)
-   * short-circuits taps on silence / non-voice noise — the HUD shows `○`
-   * (no voice) or `~` (too noisy) instead of calling the LLM. Disable as a
-   * bail-out if the gate misclassifies the user's language or environment;
-   * with the gate off, every tap is sent to Gemini regardless of content.
+   * Sensitivity of the in-browser VAD gate, expressed as an int16 RMS floor.
+   * A 250 ms frame whose RMS sits below this value counts as silence, and a
+   * buffer with no energetic frames short-circuits the tap before the LLM
+   * call (HUD shows `○` no voice / `~` too noisy). `0` disables the gate
+   * entirely so every tap reaches the LLM regardless of content. Steps of
+   * 50 in the Settings UI; `200` is the historical default (≈ −44 dBFS) and
+   * lower values are more permissive — useful when a quiet mic capture is
+   * being misclassified as silence.
    */
-  voiceGateEnabled: boolean;
+  voiceGateRmsFloor: number;
+  /**
+   * When true (default), the WAV uploaded to the LLM is trimmed to just the
+   * Silero-detected speech segments (with small padding and brief join
+   * silences). Cuts upload + base64 + server ingestion time on long buffers
+   * with sparse speech. Silently no-ops when only the FFT fallback is
+   * available, since FFT does not produce segment boundaries.
+   */
+  voiceTrimEnabled: boolean;
 }
 
 /** Runtime app state. */

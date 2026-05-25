@@ -9,7 +9,7 @@ import {
   DEFAULT_LLM_PROVIDER,
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
-  GEMINI_MODELS,
+  GEMINI_MODEL_PATTERN,
   LANGUAGES,
   OPENAI_BASE_URLS,
   type AppMode,
@@ -41,13 +41,43 @@ const SETTINGS_KEY_OPENAI_KEY_LEGACY = 'veritaslens.openaiKey';
 const SETTINGS_KEY_OPENAI_KEY_PREFIX = 'veritaslens.openaiKey.';
 const openaiKeyStorageKey = (baseUrl: OpenAiBaseUrl): string =>
   `${SETTINGS_KEY_OPENAI_KEY_PREFIX}${baseUrl}`;
+/** Per-host override for the `/audio/transcriptions` model. Empty value means
+ *  "use the default in OPENAI_TRANSCRIBE_MODELS." */
+const SETTINGS_KEY_OPENAI_TRANSCRIBE_PREFIX = 'veritaslens.openaiTranscribeModel.';
+const openaiTranscribeStorageKey = (baseUrl: OpenAiBaseUrl): string =>
+  `${SETTINGS_KEY_OPENAI_TRANSCRIBE_PREFIX}${baseUrl}`;
 const SETTINGS_KEY_OPENAI_BASE_URL = 'veritaslens.openaiBaseUrl';
 const SETTINGS_KEY_OPENAI_MODEL = 'veritaslens.openaiModel';
 const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
-const SETTINGS_KEY_VOICE_GATE = 'veritaslens.voiceGateEnabled';
+const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
+/** Legacy boolean key read only for one-time migration of pre-slider installs. */
+const SETTINGS_KEY_VOICE_GATE_LEGACY = 'veritaslens.voiceGateEnabled';
+const SETTINGS_KEY_VOICE_TRIM = 'veritaslens.voiceTrimEnabled';
+/** Default RMS floor when neither the new nor legacy key is set. */
+const DEFAULT_VOICE_GATE_RMS_FLOOR = 200;
+/** Slider granularity exposed in the Settings UI. */
+export const VOICE_GATE_RMS_STEP = 50;
+/** UI clamp for the slider's upper end; above this is shouting territory. */
+export const VOICE_GATE_RMS_MAX = 1000;
+
+function coerceVoiceGateRmsFloor(raw: string, legacy: string): number {
+  // New key wins when present and parseable.
+  if (raw !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0) {
+      // Snap to step + clamp so a hand-edited storage value can't poison the UI.
+      const snapped = Math.round(n / VOICE_GATE_RMS_STEP) * VOICE_GATE_RMS_STEP;
+      return Math.min(VOICE_GATE_RMS_MAX, Math.max(0, snapped));
+    }
+  }
+  // Migrate from the legacy boolean: explicit `false` → off (0); anything
+  // else (true, missing) → historical default 200.
+  if (legacy === 'false') return 0;
+  return DEFAULT_VOICE_GATE_RMS_FLOOR;
+}
 
 const HISTORY_KEY = 'veritaslens.history';
 const HISTORY_BYTE_BUDGET = 400 * 1024;
@@ -78,13 +108,19 @@ const [settings, setSettings] = createSignal<Settings>({
   openaiApiKeys: emptyOpenaiKeys(),
   openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
   openaiModel: DEFAULT_OPENAI_MODEL,
+  openaiTranscribeModels: emptyOpenaiKeys(),
   responseLanguage: DEFAULT_LANGUAGE,
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
   discreet: false,
-  // VAD gate defaults ON — that's the whole point of the local Silero model.
-  // Users can opt out via the Settings toggle if the gate misclassifies them.
-  voiceGateEnabled: true,
+  // VAD gate defaults to the historical RMS floor (200 int16 units). 0
+  // disables the gate entirely; lower values are more permissive. Exposed
+  // as a step-50 slider in Settings so users with quiet/noisy environments
+  // can self-tune without code changes.
+  voiceGateRmsFloor: DEFAULT_VOICE_GATE_RMS_FLOOR,
+  // VAD-based payload trimming defaults ON: shrinks the WAV to just the
+  // detected speech, cutting upload + ingest time on sparse buffers.
+  voiceTrimEnabled: true,
 });
 export { settings };
 
@@ -97,6 +133,29 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
   const perHostKeyReads = OPENAI_BASE_URLS.map((u) =>
     safeGet(openaiKeyStorageKey(u)).then((v) => [u, v] as const),
   );
+  const perHostTranscribeReads = OPENAI_BASE_URLS.map((u) =>
+    safeGet(openaiTranscribeStorageKey(u)).then((v) => [u, v] as const),
+  );
+  const [fixedReads, perHostKeys, perHostTranscribe] = await Promise.all([
+    Promise.all([
+      safeGet(SETTINGS_KEY_PROVIDER),
+      safeGet(SETTINGS_KEY_GEMINI),
+      safeGet(SETTINGS_KEY_MODEL),
+      safeGet(SETTINGS_KEY_AUTO_MODEL),
+      safeGet(SETTINGS_KEY_OPENAI_KEY_LEGACY),
+      safeGet(SETTINGS_KEY_OPENAI_BASE_URL),
+      safeGet(SETTINGS_KEY_OPENAI_MODEL),
+      safeGet(SETTINGS_KEY_LANGUAGE),
+      safeGet(SETTINGS_KEY_BUFFER_DURATION),
+      safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
+      safeGet(SETTINGS_KEY_DISCREET),
+      safeGet(SETTINGS_KEY_VOICE_GATE_RMS),
+      safeGet(SETTINGS_KEY_VOICE_GATE_LEGACY),
+      safeGet(SETTINGS_KEY_VOICE_TRIM),
+    ]),
+    Promise.all(perHostKeyReads),
+    Promise.all(perHostTranscribeReads),
+  ]);
   const [
     rawProvider,
     key,
@@ -109,23 +168,10 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawBuffer,
     rawAutoEnabled,
     rawDiscreet,
-    rawVoiceGate,
-    ...perHostKeys
-  ] = await Promise.all([
-    safeGet(SETTINGS_KEY_PROVIDER),
-    safeGet(SETTINGS_KEY_GEMINI),
-    safeGet(SETTINGS_KEY_MODEL),
-    safeGet(SETTINGS_KEY_AUTO_MODEL),
-    safeGet(SETTINGS_KEY_OPENAI_KEY_LEGACY),
-    safeGet(SETTINGS_KEY_OPENAI_BASE_URL),
-    safeGet(SETTINGS_KEY_OPENAI_MODEL),
-    safeGet(SETTINGS_KEY_LANGUAGE),
-    safeGet(SETTINGS_KEY_BUFFER_DURATION),
-    safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
-    safeGet(SETTINGS_KEY_DISCREET),
-    safeGet(SETTINGS_KEY_VOICE_GATE),
-    ...perHostKeyReads,
-  ]);
+    rawVoiceGateRms,
+    rawVoiceGateLegacy,
+    rawVoiceTrim,
+  ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
   // upgrade from a pre-per-host build don't lose their saved credential.
@@ -138,6 +184,11 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
   if (!openaiApiKeys[coercedBaseUrl] && rawLegacyOpenaiKey) {
     openaiApiKeys[coercedBaseUrl] = rawLegacyOpenaiKey;
   }
+  const openaiTranscribeModels = emptyOpenaiKeys();
+  for (const entry of perHostTranscribe) {
+    const [url, value] = entry as readonly [OpenAiBaseUrl, string];
+    if (value) openaiTranscribeModels[url] = value;
+  }
   setSettings({
     provider: coerceProvider(rawProvider),
     geminiApiKey: key,
@@ -146,12 +197,13 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     openaiApiKeys,
     openaiBaseUrl: coercedBaseUrl,
     openaiModel: rawOpenaiModel || DEFAULT_OPENAI_MODEL,
+    openaiTranscribeModels,
     responseLanguage: coerceLanguage(rawLang),
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
     discreet: rawDiscreet === 'true',
-    // Default-on: missing/blank value (first run, never saved) ⇒ true.
-    voiceGateEnabled: rawVoiceGate === '' ? true : rawVoiceGate !== 'false',
+    voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
+    voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
   });
 }
 
@@ -211,6 +263,23 @@ export const saveOpenaiBaseUrl = (setLs: SetLs, url: OpenAiBaseUrl): Promise<boo
 export const saveOpenaiModel = (setLs: SetLs, model: string): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_OPENAI_MODEL, 'openaiModel', model);
 
+/**
+ * Persist all per-host transcription model overrides at once. Empty values
+ * are written through (the runtime treats `''` as "use the default in
+ * `OPENAI_TRANSCRIBE_MODELS`"), so clearing a custom value sticks.
+ */
+export async function saveOpenaiTranscribeModels(
+  setLs: SetLs,
+  models: Record<OpenAiBaseUrl, string>,
+): Promise<boolean> {
+  const writes = await Promise.all(
+    OPENAI_BASE_URLS.map((u) => setLs(openaiTranscribeStorageKey(u), models[u] ?? '')),
+  );
+  const ok = writes.every(Boolean);
+  if (ok) setSettings({ ...settings(), openaiTranscribeModels: { ...models } });
+  return ok;
+}
+
 export const saveResponseLanguage = (setLs: SetLs, language: LanguageCode): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_LANGUAGE, 'responseLanguage', language);
 
@@ -220,8 +289,17 @@ export const saveBufferDuration = (setLs: SetLs, duration: BufferDuration): Prom
 export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_SUMMARY_ENABLED, 'autoSummaryEnabled', enabled);
 
-export const saveVoiceGateEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_VOICE_GATE, 'voiceGateEnabled', enabled);
+export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promise<boolean> {
+  // Snap + clamp before persisting so we never write a value the UI couldn't
+  // render. `String(floor)` would otherwise round-trip e.g. `175` and the
+  // slider would land between stops on the next load.
+  const snapped = Math.round(floor / VOICE_GATE_RMS_STEP) * VOICE_GATE_RMS_STEP;
+  const clamped = Math.min(VOICE_GATE_RMS_MAX, Math.max(0, snapped));
+  return saveSetting(setLs, SETTINGS_KEY_VOICE_GATE_RMS, 'voiceGateRmsFloor', clamped);
+}
+
+export const saveVoiceTrimEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_VOICE_TRIM, 'voiceTrimEnabled', enabled);
 
 export const saveDiscreet = (setLs: SetLs, discreet: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_DISCREET, 'discreet', discreet);
@@ -434,12 +512,12 @@ export async function deleteHistorySession(
 }
 
 function coerceModel(raw: string | null | undefined): GeminiModel {
-  if (raw && (GEMINI_MODELS as readonly string[]).includes(raw)) return raw as GeminiModel;
+  if (raw && GEMINI_MODEL_PATTERN.test(raw)) return raw as GeminiModel;
   return DEFAULT_GEMINI_MODEL;
 }
 
 function coerceAutoModel(raw: string | null | undefined): GeminiModel | null {
-  if (raw && (GEMINI_MODELS as readonly string[]).includes(raw)) return raw as GeminiModel;
+  if (raw && GEMINI_MODEL_PATTERN.test(raw)) return raw as GeminiModel;
   return DEFAULT_GEMINI_AUTO_MODEL;
 }
 

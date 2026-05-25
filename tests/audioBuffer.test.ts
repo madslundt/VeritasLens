@@ -3,6 +3,7 @@ import {
   PcmRingBuffer,
   analyzeBufferForVoiceFFT,
   encodePcmToWav,
+  trimPcmToSegments,
   uint8ToBase64,
 } from '../src/runtime/audioBuffer';
 import {
@@ -303,5 +304,131 @@ describe('analyzeBufferForVoice (Silero-first wrapper)', () => {
     const a = await analyzeBufferForVoice(new Uint8Array(0), 16_000);
     expect(a.totalFrames).toBe(0);
     expect(a.voiceFrames).toBe(0);
+  });
+});
+
+describe('trimPcmToSegments', () => {
+  /** Tiny rate so 100ms = 100 samples — keeps the assertions readable. */
+  const RATE = 1000;
+  const noPadParams = {
+    sampleRate: RATE,
+    bytesPerSample: 2,
+    padMs: 0,
+    mergeGapMs: 0,
+    joinSilenceMs: 0,
+  };
+
+  it('returns the original buffer when no segments are given', () => {
+    const buf = pcm([1, 2, 3, 4]);
+    const out = trimPcmToSegments(buf, [], noPadParams);
+    expect(out).toBe(buf);
+  });
+
+  it('extracts a single segment with no padding', () => {
+    // 10 samples; segment covers samples [3, 6) → 3 samples → 6 bytes.
+    const buf = pcm([10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+    const out = trimPcmToSegments(buf, [{ start: 3, end: 6 }], noPadParams);
+    const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    expect(out.length).toBe(6);
+    expect(view.getInt16(0, true)).toBe(13);
+    expect(view.getInt16(2, true)).toBe(14);
+    expect(view.getInt16(4, true)).toBe(15);
+  });
+
+  it('merges segments within mergeGapMs and clamps padding to bounds', () => {
+    // Buffer of 1000 samples (1 sec @ 1 kHz). Two segments separated by 100
+    // samples — with mergeGapMs:200 the gap (100ms) is within the threshold,
+    // so they merge. padMs:50 expands each side by 50 samples.
+    const buf = new Uint8Array(2000);
+    const view = new DataView(buf.buffer);
+    for (let i = 0; i < 1000; i++) view.setInt16(i * 2, i + 1, true);
+
+    const segments = [
+      { start: 200, end: 300 },
+      { start: 400, end: 500 },
+    ];
+    const out = trimPcmToSegments(buf, segments, {
+      sampleRate: RATE,
+      bytesPerSample: 2,
+      mergeGapMs: 200,
+      padMs: 50,
+      joinSilenceMs: 0,
+    });
+    // Merged span: [200,500), padded by 50 → [150,550) → 400 samples → 800 bytes.
+    expect(out.length).toBe(800);
+    const outView = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    expect(outView.getInt16(0, true)).toBe(151);     // sample index 150 → value 151
+    expect(outView.getInt16(798, true)).toBe(550);   // last → sample index 549 → 550
+  });
+
+  it('inserts join-silence between non-mergeable segments', () => {
+    // Two non-touching segments, large gap, mergeGapMs=0 prevents merging,
+    // joinSilenceMs adds 10 samples (20 bytes) of zeros between them.
+    const buf = new Uint8Array(2000);
+    const view = new DataView(buf.buffer);
+    for (let i = 0; i < 1000; i++) view.setInt16(i * 2, 0x7fff, true);
+
+    const segments = [
+      { start: 100, end: 110 },
+      { start: 500, end: 520 },
+    ];
+    const out = trimPcmToSegments(buf, segments, {
+      sampleRate: RATE,
+      bytesPerSample: 2,
+      mergeGapMs: 0,
+      padMs: 0,
+      joinSilenceMs: 10,
+    });
+    // 10 samples + 10 silence + 20 samples = 40 samples = 80 bytes.
+    expect(out.length).toBe(80);
+    const outView = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    // First segment carries the 0x7fff marker.
+    expect(outView.getInt16(0, true)).toBe(0x7fff);
+    // The 10-sample join window is zero.
+    for (let i = 10; i < 20; i++) {
+      expect(outView.getInt16(i * 2, true)).toBe(0);
+    }
+    // Second segment resumes with 0x7fff.
+    expect(outView.getInt16(20 * 2, true)).toBe(0x7fff);
+  });
+
+  it('returns the original when trimming would not shrink the buffer', () => {
+    const buf = pcm([1, 2, 3, 4]);
+    // A segment that already covers the entire buffer plus padding ⇒ no win.
+    const out = trimPcmToSegments(buf, [{ start: 0, end: 4 }], {
+      sampleRate: RATE,
+      bytesPerSample: 2,
+      padMs: 100,        // 100 samples each side — well past the bounds.
+      mergeGapMs: 0,
+      joinSilenceMs: 0,
+    });
+    expect(out).toBe(buf);
+  });
+
+  it('drops invalid / inverted / out-of-range segments', () => {
+    const buf = pcm([1, 2, 3, 4, 5, 6, 7, 8]);
+    const out = trimPcmToSegments(
+      buf,
+      [
+        { start: 5, end: 5 },   // empty
+        { start: 6, end: 3 },   // inverted
+        { start: 100, end: 200 }, // out of range
+        { start: 2, end: 4 },   // valid → samples 3,4 → 4 bytes
+      ],
+      noPadParams,
+    );
+    expect(out.length).toBe(4);
+    const view = new DataView(out.buffer, out.byteOffset, out.byteLength);
+    expect(view.getInt16(0, true)).toBe(3);
+    expect(view.getInt16(2, true)).toBe(4);
+  });
+
+  it('returns an empty buffer when every segment is invalid', () => {
+    // Inverted-only input → no valid regions, output would be 0 bytes,
+    // which is < pcm.length, so we return the freshly allocated empty buffer.
+    const buf = pcm([1, 2, 3, 4]);
+    const out = trimPcmToSegments(buf, [{ start: 4, end: 2 }], noPadParams);
+    // All invalid filtered → falls through to early-return original.
+    expect(out).toBe(buf);
   });
 });

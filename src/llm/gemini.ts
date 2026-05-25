@@ -2,19 +2,20 @@
 import { uint8ToBase64, encodePcmToWav } from '@/runtime/audioBuffer';
 import {
   DEFAULT_GEMINI_MODEL,
-  GEMINI_MODELS,
+  GEMINI_MODEL_PATTERN,
   type GeminiModel,
 } from '@/types';
 
 /**
- * Restrict the model name we interpolate into the endpoint URL to the
- * statically-known list. Defense-in-depth: today `opts.model` comes from our
- * own settings store, but a future code path that forwards a user-supplied
- * string would otherwise inject directly into the URL. Falls back silently to
- * the default; the caller is expected to log the fallback if it cares.
+ * Validate the model name we interpolate into the endpoint URL. Defense in
+ * depth: today `opts.model` comes from our own settings store (populated by
+ * the Google listModels endpoint), but any unexpected character would inject
+ * directly into the URL. Pattern-based rather than allow-list-based so a new
+ * family (gemini-3.x flash-lite, …) works without a code change. Falls back
+ * silently to the default if the name is missing or malformed.
  */
 function resolveModel(raw: string | undefined): GeminiModel {
-  if (raw && (GEMINI_MODELS as readonly string[]).includes(raw)) {
+  if (raw && GEMINI_MODEL_PATTERN.test(raw)) {
     return raw as GeminiModel;
   }
   return DEFAULT_GEMINI_MODEL;
@@ -113,13 +114,13 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
         parseRetryAfterMs(response.headers.get('retry-after')) ??
         parseGoogleRetryDelayMs(errText);
       nextDelayMs = hinted ?? (response.status === 429 ? 5000 : 1000);
-      lastError = new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 200)}`);
+      lastError = new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 2000)}`);
       continue;
     }
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 200)}`);
+      throw new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 2000)}`);
     }
 
     const payload = (await response.json()) as GenerateContentResponse;

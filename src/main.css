@@ -67,15 +67,26 @@ a {
   font-size: 0.9rem;
   cursor: pointer;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 0.75rem;
+  /* Gemini error bodies often contain a long unbreakable URL — without
+     overflow-wrap they overflow horizontally and the tail gets clipped by the
+     WebView. Cap height so very long messages stay scrollable instead of
+     pushing the entire form below the fold. */
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  max-height: 40dvh;
+  overflow-y: auto;
 }
 
 .error-dismiss {
   flex-shrink: 0;
   opacity: 0.6;
   font-size: 0.8rem;
+  /* Stay visible at the top of the banner even when the message scrolls. */
+  position: sticky;
+  top: 0;
 }
 
 /* ---------- Settings layout ---------- */
@@ -915,6 +926,24 @@ button:disabled {
   align-items: center;
   gap: 0.6rem;
   cursor: pointer;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.slider-row input[type='range'] {
+  flex: 1;
+  min-width: 0;
+}
+
+.slider-value {
+  min-width: 4.5rem;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-muted, inherit);
 }
 
 /* ---------- History / Session log ---------- */

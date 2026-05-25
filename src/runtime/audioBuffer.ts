@@ -205,6 +205,7 @@ export interface VoiceBufferAnalysis {
 export function analyzeBufferForVoiceFFT(
   pcm: Uint8Array,
   sampleRate: number,
+  rmsFloor: number = 200,
 ): VoiceBufferAnalysis {
   const totalSamples = pcm.length >> 1;
   if (totalSamples === 0) {
@@ -212,9 +213,12 @@ export function analyzeBufferForVoiceFFT(
   }
   const FRAME_SAMPLES = 4000; // ~250 ms at 16 kHz
   const FFT_SIZE = 1024;
-  // Conservative thresholds — calibrated for default G2 mic gain so quiet
-  // voices still classify as voice. Adjust on hardware if needed.
-  const SILENCE_RMS_FLOOR = 200;        // int16 units; ~0.6% full-scale
+  // `rmsFloor` is supplied by the caller (live: the user-tunable voice-gate
+  // setting; tests/default: 200, the historical value). Tracks the same
+  // semantics as the Silero path so the FFT fallback and the primary path
+  // agree on what counts as silence — speech vs noise discrimination
+  // happens downstream (band ratio here, neural model there).
+  const SILENCE_RMS_FLOOR = rmsFloor;   // int16 units
   const VOICE_BAND_LO_HZ = 85;
   const VOICE_BAND_HI_HZ = 3000;
   const VOICE_BAND_RATIO_THRESHOLD = 0.55;
@@ -323,6 +327,100 @@ function fftInPlace(re: Float64Array, im: Float64Array, n: number): void {
       }
     }
   }
+}
+
+/**
+ * Concatenate the speech segments of a PCM buffer into a single shorter PCM
+ * buffer, dropping the non-speech runs between them. Segments are first sorted
+ * + merged when their gap is below `mergeGapMs`, then padded on both sides by
+ * `padMs` (clamped to the PCM bounds). Adjacent merged regions are joined with
+ * a short `joinSilenceMs` gap of zeros so the LLM's audio decoder sees brief
+ * pauses instead of hard jump cuts.
+ *
+ * Returns the original `pcm` if `segments` is empty or merging would not
+ * shrink the buffer — the caller can use the result unconditionally without a
+ * size-comparison branch.
+ *
+ * Pure / synchronous / no allocation beyond the returned buffer.
+ */
+export function trimPcmToSegments(
+  pcm: Uint8Array,
+  segments: ReadonlyArray<{ start: number; end: number }>,
+  params: {
+    sampleRate: number;
+    /** Bytes per sample. Defaults to 2 (16-bit). */
+    bytesPerSample?: number;
+    /** Merge segments whose gap is ≤ this many ms. Default 500. */
+    mergeGapMs?: number;
+    /** Pad each merged segment by this many ms on both sides. Default 200. */
+    padMs?: number;
+    /** Silence inserted between non-adjacent merged regions. Default 50. */
+    joinSilenceMs?: number;
+  },
+): Uint8Array {
+  if (segments.length === 0) return pcm;
+  const bytesPerSample = params.bytesPerSample ?? 2;
+  const totalSamples = Math.floor(pcm.length / bytesPerSample);
+  if (totalSamples === 0) return pcm;
+
+  const msToSamples = (ms: number): number => Math.floor((ms / 1000) * params.sampleRate);
+  const mergeGap = msToSamples(params.mergeGapMs ?? 500);
+  const pad = msToSamples(params.padMs ?? 200);
+  const joinSilenceSamples = msToSamples(params.joinSilenceMs ?? 50);
+
+  // Sort, clamp, drop empty/invalid, then merge close neighbours.
+  const sorted = segments
+    .map((s) => ({
+      start: Math.max(0, Math.min(totalSamples, s.start)),
+      end: Math.max(0, Math.min(totalSamples, s.end)),
+    }))
+    .filter((s) => s.end > s.start)
+    .sort((a, b) => a.start - b.start);
+  if (sorted.length === 0) return pcm;
+
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const seg of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && seg.start - last.end <= mergeGap) {
+      last.end = Math.max(last.end, seg.end);
+    } else {
+      merged.push({ start: seg.start, end: seg.end });
+    }
+  }
+
+  // Pad and clamp each merged region.
+  const padded = merged.map((s) => ({
+    start: Math.max(0, s.start - pad),
+    end: Math.min(totalSamples, s.end + pad),
+  }));
+
+  // Compute output size: sum of region lengths in bytes, plus join-silence
+  // gaps between consecutive non-overlapping regions.
+  let outSamples = 0;
+  for (let i = 0; i < padded.length; i++) {
+    outSamples += padded[i]!.end - padded[i]!.start;
+    if (i < padded.length - 1) outSamples += joinSilenceSamples;
+  }
+  const outBytes = outSamples * bytesPerSample;
+
+  // No shrink: fall back to the original so callers don't pay a copy.
+  if (outBytes >= pcm.length) return pcm;
+
+  const out = new Uint8Array(outBytes);
+  let writeOffset = 0;
+  for (let i = 0; i < padded.length; i++) {
+    const seg = padded[i]!;
+    const segBytes = (seg.end - seg.start) * bytesPerSample;
+    const srcStart = seg.start * bytesPerSample;
+    out.set(pcm.subarray(srcStart, srcStart + segBytes), writeOffset);
+    writeOffset += segBytes;
+    if (i < padded.length - 1) {
+      // Join silence: zeros are already in the freshly allocated buffer; just
+      // advance the write head.
+      writeOffset += joinSilenceSamples * bytesPerSample;
+    }
+  }
+  return out;
 }
 
 /** Base64 encoder usable in both browser and Node. Avoids dependency on `Buffer`. */
