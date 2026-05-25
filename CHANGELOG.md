@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1 — 2026-05-25
+- **Drop deprecated Gemini models.** Google retired the `gemini-2.0-*` and `gemini-1.5-*` lines; calls to them now return "model is no longer supported." `GEMINI_MODELS` is trimmed to `gemini-2.5-flash` and `gemini-2.5-pro`, and `DEFAULT_GEMINI_MODEL` moves to `gemini-2.5-flash`.
+- **Auto-migrate persisted models on load.** `coerceModel` / `coerceAutoModel` now validate against `GEMINI_MODELS` rather than the bare `gemini-` prefix, so installs upgraded from 0.6.x/0.7.x silently re-land on a supported model instead of forwarding a deprecated id to the API.
+
 ## 0.8.0 — 2026-05-23
 - **OpenRouter** added as a third provider. Picks an audio-capable multimodal model from OpenRouter's catalog (e.g. `openai/gpt-4o-audio-preview`, `google/gemini-2.5-flash`) and sends the WAV inline as an `input_audio` content part — no separate transcription step, since OpenRouter has no Whisper endpoint. The model picker auto-filters to entries whose `architecture.input_modalities` includes `audio`, so non-audio chat models don't surface.
 - API key storage is per host — switching between OpenAI, Groq, and OpenRouter in Settings keeps each credential intact.

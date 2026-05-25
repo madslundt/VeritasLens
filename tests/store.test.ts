@@ -220,7 +220,7 @@ describe('loadSettings', () => {
     const ls = fakeLocalStorage();
     await saveGeminiKey(ls.set, 'AIza-test-key-12345');
     await saveGeminiModel(ls.set, 'gemini-2.5-pro');
-    await saveGeminiAutoModel(ls.set, 'gemini-2.0-flash-lite');
+    await saveGeminiAutoModel(ls.set, 'gemini-2.5-flash');
     await saveResponseLanguage(ls.set, 'da');
     await saveBufferDuration(ls.set, 120);
     await saveAutoSummaryEnabled(ls.set, true);
@@ -229,7 +229,7 @@ describe('loadSettings', () => {
     const s = settings();
     expect(s.geminiApiKey).toBe('AIza-test-key-12345');
     expect(s.geminiModel).toBe('gemini-2.5-pro');
-    expect(s.geminiAutoModel).toBe('gemini-2.0-flash-lite');
+    expect(s.geminiAutoModel).toBe('gemini-2.5-flash');
     expect(s.responseLanguage).toBe('da');
     expect(s.bufferDuration).toBe(120);
     expect(s.autoSummaryEnabled).toBe(true);

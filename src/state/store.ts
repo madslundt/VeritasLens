@@ -9,6 +9,7 @@ import {
   DEFAULT_LLM_PROVIDER,
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
+  GEMINI_MODELS,
   LANGUAGES,
   OPENAI_BASE_URLS,
   type AppMode,
@@ -433,12 +434,12 @@ export async function deleteHistorySession(
 }
 
 function coerceModel(raw: string | null | undefined): GeminiModel {
-  if (raw && raw.startsWith('gemini-')) return raw as GeminiModel;
+  if (raw && (GEMINI_MODELS as readonly string[]).includes(raw)) return raw as GeminiModel;
   return DEFAULT_GEMINI_MODEL;
 }
 
 function coerceAutoModel(raw: string | null | undefined): GeminiModel | null {
-  if (raw && raw.startsWith('gemini-')) return raw as GeminiModel;
+  if (raw && (GEMINI_MODELS as readonly string[]).includes(raw)) return raw as GeminiModel;
   return DEFAULT_GEMINI_AUTO_MODEL;
 }
 

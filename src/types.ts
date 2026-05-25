@@ -90,19 +90,15 @@ export interface HistoryEntry {
 export const GEMINI_MODELS = [
   'gemini-2.5-flash',
   'gemini-2.5-pro',
-  'gemini-2.0-flash',
-  'gemini-2.0-flash-lite',
-  'gemini-1.5-flash',
-  'gemini-1.5-pro',
 ] as const;
 
 export type GeminiModel = (typeof GEMINI_MODELS)[number];
-export const DEFAULT_GEMINI_MODEL: GeminiModel = 'gemini-2.0-flash';
+export const DEFAULT_GEMINI_MODEL: GeminiModel = 'gemini-2.5-flash';
 /**
- * Optional override model for the Auto lens classifier. `null` (the default)
- * means the Auto lens reuses the main model for the classifier call — no
- * separate model is invoked. Set to a lighter/cheaper Gemini model to spend
- * fewer tokens / dodge per-model rate limits on the classify step.
+ * Optional override model for the Auto lens classifier. `null` means the Auto
+ * lens reuses the main model for the classifier call — no separate model is
+ * invoked. Users can set a different Gemini model from the settings UI to
+ * spend fewer tokens / dodge per-model rate limits on the classify step.
  */
 export const DEFAULT_GEMINI_AUTO_MODEL: GeminiModel | null = null;
 
