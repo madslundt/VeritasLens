@@ -677,6 +677,8 @@ function buildContextBlock(personaName: string): string {
     `Time: ${time} (local)`,
     `Audio: ${audioSecs}s buffered`,
     `Session: ${mins}m active, ${count} ${count === 1 ? 'analysis' : 'analyses'}, ${personaName} lens`,
+    '',
+    'When the audio uses relative time references ("today", "tomorrow", "yesterday", "in N days", "until X", "how long until Y", "how long ago was Z"), resolve them against the Date and Time fields above as ground truth. If the audio asks a question whose answer requires calendar or clock arithmetic from "now", compute it and give a direct answer rather than skipping the question.',
   ].join('\n');
 }
 
