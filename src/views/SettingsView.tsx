@@ -13,6 +13,7 @@ import {
   newSectionId,
   saveAutoSummaryEnabled,
   saveVoiceGateRmsFloor,
+  saveVoiceTrimEnabled,
   VOICE_GATE_RMS_STEP,
   VOICE_GATE_RMS_MAX,
   saveBufferDuration,
@@ -278,6 +279,7 @@ export const SettingsView: Component = () => {
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
+  const [draftVoiceTrim, setDraftVoiceTrim] = createSignal(settings().voiceTrimEnabled);
   // Local draft of meeting-prep sections. Mirrors the persisted store value but
   // always carries at least one row so the editor never collapses to nothing.
   // Autosaves on debounce; cap violations surface inline in `prepError`.
@@ -632,6 +634,7 @@ export const SettingsView: Component = () => {
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
         saveDiscreet(setLs, draftDiscreet()),
         saveVoiceGateRmsFloor(setLs, draftVoiceGate()),
+        saveVoiceTrimEnabled(setLs, draftVoiceTrim()),
       ]);
       if (results.every(Boolean)) {
         setSaveState('saved');
@@ -1394,6 +1397,23 @@ export const SettingsView: Component = () => {
                 <strong>○</strong> no voice / silence
                 <br />
                 <strong>~</strong> too noisy to pick up voice
+              </span>
+            </div>
+
+            <div class="field">
+              <span class="field-label">Trim non-speech audio</span>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftVoiceTrim()}
+                  onChange={(e) => setDraftVoiceTrim(e.currentTarget.checked)}
+                />
+                <span>Strip silence before sending to the LLM</span>
+              </label>
+              <span class="field-hint">
+                Crops the upload to detected speech segments — smaller payload, less noise for the
+                model. Turn off if you want the model to hear ambient sound (music, scene, room tone).
+                Has no effect when Silero VAD is unavailable.
               </span>
             </div>
 

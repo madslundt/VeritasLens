@@ -232,6 +232,10 @@ export async function stopHudRuntime(): Promise<void> {
   inflight?.abort();
   inflight = null;
   analyzing = false;
+  if (noVoiceStatusTimer) {
+    clearTimeout(noVoiceStatusTimer);
+    noVoiceStatusTimer = null;
+  }
   buffer?.clear();
   buffer = null;
   // Drop the Silero session reference (calls release/destroy if exposed by the
@@ -525,6 +529,10 @@ async function leaveActiveSession(): Promise<void> {
     inflight?.abort();
     inflight = null;
     analyzing = false;
+    if (noVoiceStatusTimer) {
+      clearTimeout(noVoiceStatusTimer);
+      noVoiceStatusTimer = null;
+    }
     stopSpinner();
     // Abort any auto-summary tick already in flight, then stop the periodic
     // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
@@ -692,12 +700,21 @@ function buildContextBlock(personaName: string): string {
  * is the only on-glasses signal; the full message is logged to the debug
  * panel (`no-voice-gate` entries) for after-the-fact verification.
  */
+let noVoiceStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
 async function showNoVoiceFeedback(message: string): Promise<void> {
   pushDebugEvent({ label: 'no-voice-gate', detail: message });
   await flashActiveHint(message);
   const noisy = message.toLowerCase().includes('noisy');
   await setStatus(noisy ? '~' : '○');
-  setTimeout(() => { void setStatus('listening'); }, 2500);
+  // Track the revert timer so leaveActiveSession / stopHudRuntime can cancel
+  // it. Without this, a user exiting the session within 2.5 s of a no-voice
+  // tap would have setStatus('listening') write to a torn-down HUD page.
+  if (noVoiceStatusTimer) clearTimeout(noVoiceStatusTimer);
+  noVoiceStatusTimer = setTimeout(() => {
+    noVoiceStatusTimer = null;
+    void setStatus('listening');
+  }, 2500);
 }
 
 async function runAnalysis(): Promise<void> {
@@ -1090,16 +1107,24 @@ async function runAnalysis(): Promise<void> {
 const AUTO_SUMMARY_INTERVAL_MS = 5 * 60_000;
 
 /**
- * Best-effort HEAD against the Gemini host to open the TLS+HTTP/2 connection
+ * Best-effort GET against the Gemini host to open the TLS+HTTP/2 connection
  * before the user's first tap. Silent on every failure path — this is a
  * micro-optimisation, not a health check. Only fires for the Gemini
  * provider; the openai-compatible host warms naturally on its own paths.
+ *
+ * Targets `/v1beta/models` (the same endpoint `fetchAvailableModels` uses)
+ * so the request resolves to a real HTTP response: 403 JSON without a key,
+ * 200 with one. Both shapes satisfy the Even App store reviewer's network
+ * monitor, which only flags requests that fail at the network layer
+ * (DNS / timeout / CORS / mixed content). HEAD on the same path produces a
+ * 404 text/html from Google's edge — well-formed but the unusual shape
+ * could trip future review heuristics, so we use GET and discard the body.
  */
 async function prewarmGeminiConnection(): Promise<void> {
   if (settings().provider !== 'gemini') return;
   try {
-    await fetch('https://generativelanguage.googleapis.com/$discovery/rest', {
-      method: 'HEAD',
+    await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
+      method: 'GET',
       keepalive: true,
     });
   } catch { /* best-effort */ }

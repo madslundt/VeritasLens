@@ -41,7 +41,13 @@ async function bootstrap(): Promise<void> {
 
     const disposeDeviceStatus = bridge.onDeviceStatusChanged((status) => setDeviceStatus(status));
 
+    // Abortable so a WebView reload / navigation doesn't strand the bootstrap
+    // model-list fetch (which would otherwise mutate setAvailableModels on a
+    // possibly-dead reactive root after the page is gone).
+    const bootstrapAbort = new AbortController();
+
     window.addEventListener('beforeunload', () => {
+      bootstrapAbort.abort();
       try { disposeLaunchSource(); } catch { /* SDK may already be torn down */ }
       try { disposeDeviceStatus(); } catch { /* SDK may already be torn down */ }
     }, { once: true });
@@ -56,11 +62,13 @@ async function bootstrap(): Promise<void> {
     if (apiKey.trim().length >= 10) {
       setModelsLoading(true);
       void import('./llm/gemini').then(({ fetchAvailableModels }) =>
-        fetchAvailableModels(apiKey)
+        fetchAvailableModels(apiKey, bootstrapAbort.signal)
           .then((models) => { if (models.length > 0) setAvailableModels(models); })
           .catch((err) => {
             // Keep the static fallback in the picker, but surface why the live
             // model list is missing so a wedged API key / network is debuggable.
+            // Aborts are silent — they're an expected outcome on page unload.
+            if (err instanceof DOMException && err.name === 'AbortError') return;
             pushDebugEvent({
               label: 'model-fetch-fail',
               detail: err instanceof Error ? err.message : String(err),

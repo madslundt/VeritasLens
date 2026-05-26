@@ -1528,11 +1528,22 @@ export function resetHudSessionState(): void {
   pendingMenuSpinnerFrame = '';
   pendingStatusFrame = '';
   recordingDotEligible = true;
-  // Cancel any pending picker-hint flash so its 2.5s callback can't fire after
-  // the session has been torn down and attempt to upgradeText on a stale page.
+  // Cancel any pending hint / badge flashes so their 2.5s callbacks can't
+  // fire after the session has been torn down and attempt to upgradeText on
+  // a stale page. The flash callbacks short-circuit on `currentPage` /
+  // `activeLayout` mismatches, but during the brief window before the next
+  // page is pushed those guards can race with a torn-down page id.
   if (pickerHintFlashTimer) {
     clearTimeout(pickerHintFlashTimer);
     pickerHintFlashTimer = null;
+  }
+  if (activeHintFlashTimer) {
+    clearTimeout(activeHintFlashTimer);
+    activeHintFlashTimer = null;
+  }
+  if (summaryBadgeReadyTimer) {
+    clearTimeout(summaryBadgeReadyTimer);
+    summaryBadgeReadyTimer = null;
   }
 }
 
