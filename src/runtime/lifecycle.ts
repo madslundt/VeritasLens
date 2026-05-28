@@ -11,6 +11,7 @@ import {
   flashActiveHint,
   flashPickerHint,
   getActiveLayout,
+  getMidSummaryPageCount,
   hasPendingActiveResult,
   markActiveHidden,
   menuOptionAtIndex,
@@ -20,6 +21,7 @@ import {
   restoreHistoryListPage,
   scrollActiveReason,
   scrollHistoryDetail,
+  scrollMidSummaryPage,
   setActiveHint,
   setActiveLayout,
   setLensResult,
@@ -31,12 +33,20 @@ import {
   showHistoryListPage,
   getHistoryListEntries,
   showMenuPage,
+  showMidSummaryPage,
   showPickerPage,
   showUnconfiguredPage,
+  type MenuItem,
 } from './hud';
 import { callLens, MAX_RETRIES } from '@/llm';
+import { formatRelativeTime } from '@/personas/_utils';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
-import { AUTO_CLASSIFIER_SCHEMA, parseAutoClassifierResponse } from '@/personas/auto';
+import {
+  AUTO_LENS_CANDIDATES,
+  buildAutoClassifierSchema,
+  buildAutoPrompt,
+  parseAutoClassifierResponse,
+} from '@/personas/auto';
 import {
   SESSION_SUMMARY_ID,
   SESSION_SUMMARY_NAME,
@@ -69,7 +79,18 @@ import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { createEffect, createRoot, on } from 'solid-js';
 import { openaiHostLabel } from '@/types';
-import type { LanguageCode, LensResult, MeetingPrepSection } from '@/types';
+import type { GeminiModel, LanguageCode, LensResult, MeetingPrepSection, Settings } from '@/types';
+
+/**
+ * Pick the Gemini Auto-classifier model from the current settings, or
+ * `undefined` to reuse the main model. Only Gemini exposes a dedicated
+ * lighter classifier knob; OpenAI-compatible hosts always reuse the main
+ * chat model.
+ */
+export function chooseClassifierModel(s: Settings): GeminiModel | undefined {
+  if (s.provider !== 'gemini') return undefined;
+  return s.geminiAutoModel ?? undefined;
+}
 
 /**
  * Maximum amount of recent audio the no-voice gate inspects on each
@@ -122,6 +143,12 @@ let intermediateSummaries: Array<{
   keyPoints?: string[];
   quote?: string;
 }> = [];
+
+type MidSummaryResult = Extract<LensResult, { type: 'session-summary' }>;
+let midSummaryResult: { result: MidSummaryResult; generatedAt: number } | null = null;
+let midSummaryLoading = false;
+let midSummaryPageIndex = 0;
+let midSummaryController: AbortController | null = null;
 
 let lastPickerIndex = 0;
 let lastMenuIndex = 0;
@@ -182,9 +209,6 @@ export async function startHudRuntime(): Promise<void> {
     // pays no cold-start latency. Fire-and-forget — failures fall back to
     // the FFT heuristic inside `analyzeBufferForVoice`.
     void warmupVAD();
-    // Pre-open the TLS+HTTP/2 connection to the Gemini host so the first
-    // real callLens doesn't pay the handshake (~100–300ms on cellular).
-    void prewarmGeminiConnection();
     setAppPhase('idle');
     unsubscribeEvents = getBridge().onEvenHubEvent(handleEvent);
     startSettingsWatcher();
@@ -227,6 +251,11 @@ export async function stopHudRuntime(): Promise<void> {
   // (no reliable way to complete the fetch + localStorage write), so the
   // final summary only runs from the user-initiated leaveActiveSession path.
   intermediateSummaries = [];
+  midSummaryController?.abort();
+  midSummaryController = null;
+  midSummaryResult = null;
+  midSummaryLoading = false;
+  midSummaryPageIndex = 0;
   unsubscribeEvents?.();
   unsubscribeEvents = null;
   inflight?.abort();
@@ -332,6 +361,12 @@ function handleEvent(event: EvenHubEvent): void {
       } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
         handleActiveScroll(1).catch((err) => logDispatchError('scroll-active-fail', err));
       }
+    } else if (currentHudPage() === 'mid-summary') {
+      if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
+        scrollMidSummary(-1).catch((err) => logDispatchError('scroll-mid-summary-fail', err));
+      } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+        scrollMidSummary(1).catch((err) => logDispatchError('scroll-mid-summary-fail', err));
+      }
     }
     return;
   }
@@ -371,6 +406,7 @@ function handleEvent(event: EvenHubEvent): void {
   else if (page === 'menu') handleMenuGesture(gesture).catch((err) => logDispatchError('menu-fail', err));
   else if (page === 'history-list') handleHistoryListGesture(gesture).catch((err) => logDispatchError('history-list-fail', err));
   else if (page === 'history-detail') handleHistoryDetailGesture(gesture).catch((err) => logDispatchError('history-detail-fail', err));
+  else if (page === 'mid-summary') handleMidSummaryGesture(gesture).catch((err) => logDispatchError('mid-summary-fail', err));
 }
 
 async function handlePickerEvent(g: Gesture): Promise<void> {
@@ -398,7 +434,10 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
   // now). scrollActiveReason swaps claims when multi-claim, otherwise
   // paginates a long reason.
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    await showMenuPage({ exitGeneratesSummary: canGenerateFinalSummary() });
+    await showMenuPage({
+      exitGeneratesSummary: canGenerateFinalSummary(),
+      dynamicItems: buildMidSummaryMenuItems(),
+    });
     return;
   }
   if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -428,6 +467,12 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const option = menuOptionAtIndex(lastMenuIndex);
     switch (option) {
+      case 'mid-summary': await runMidSummary(); break;
+      case 'mid-summary-view':
+        await showMidSummaryPage(midSummaryLoading, midSummaryResult?.result ?? null, midSummaryPageIndex);
+        break;
+      case 'mid-summary-refresh': await runMidSummary(); break;
+      case 'mid-summary-loading': break; // disabled item — no-op
       case 'back': await handleBackMenuOption(); break;
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
       case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
@@ -482,6 +527,24 @@ async function handleHistoryDetailGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     await restoreHistoryListPage();
   }
+}
+
+async function handleMidSummaryGesture(g: Gesture): Promise<void> {
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    await showMenuPage({
+      exitGeneratesSummary: canGenerateFinalSummary(),
+      dynamicItems: buildMidSummaryMenuItems(),
+    });
+  }
+}
+
+async function scrollMidSummary(dir: 1 | -1): Promise<void> {
+  if (currentHudPage() !== 'mid-summary') return;
+  const total = getMidSummaryPageCount();
+  const next = midSummaryPageIndex + dir;
+  if (next < 0 || next >= total) return;
+  midSummaryPageIndex = next;
+  await scrollMidSummaryPage(midSummaryPageIndex);
 }
 
 async function enterActiveSession(personaId: PersonaId): Promise<void> {
@@ -543,6 +606,11 @@ async function leaveActiveSession(): Promise<void> {
     autoSummaryInflight?.abort();
     autoSummaryInflight = null;
     stopAutoSummaryTimer();
+    midSummaryController?.abort();
+    midSummaryController = null;
+    midSummaryResult = null;
+    midSummaryLoading = false;
+    midSummaryPageIndex = 0;
     try { await getBridge().audioControl(false); } catch { /* ignore */ }
     // Snapshot the inputs for the stop-time summaries (last-tick + final
     // synthesis) while the buffer and session id are still live. Both calls
@@ -721,7 +789,7 @@ async function showNoVoiceFeedback(message: string): Promise<void> {
 
 async function runAnalysis(): Promise<void> {
   const page = currentHudPage();
-  if (page === 'history-list' || page === 'history-detail') await restoreActivePage();
+  if (page === 'history-list' || page === 'history-detail' || page === 'mid-summary') await restoreActivePage();
   if (currentHudPage() !== 'active') return;
 
   if (!buffer || buffer.bytesBuffered === 0) {
@@ -930,21 +998,24 @@ async function runAnalysis(): Promise<void> {
     let speculativeRawText: string | null = null;
 
     if (persona.id === 'auto') {
-      const classifierPrompt = buildPromptWithContext(persona, lang);
+      const enabled = (AUTO_LENS_CANDIDATES as readonly string[]).filter(
+        (id) => !settings().autoDisabledLenses.includes(id),
+      );
+      if (enabled.length === 0) {
+        stopSpinner();
+        await setStatus('No Auto lenses enabled — configure in settings');
+        return;
+      }
+      const classifierPrompt = buildPromptWithContext(
+        { ...persona, buildPrompt: (l: LanguageCode) => buildAutoPrompt(l, enabled) },
+        lang,
+      );
       const classifierContext = buildContextBlock(persona.name);
-      // Only Gemini exposes a dedicated lighter classifier model — and it's
-      // optional: `geminiAutoModel === null` means "reuse the main model for
-      // the classifier call", so we pass `undefined` and callLens defaults to
-      // the main model. The OpenAI-compatible path has no separate "auto"
-      // knob, so it always reuses the main chat model.
-      const classifierModel =
-        settings().provider === 'gemini'
-          ? (settings().geminiAutoModel ?? undefined)
-          : undefined;
+      const classifierModel = chooseClassifierModel(settings());
       const classifierCall = callLens({
         wav,
         prompt: `${classifierContext}\n\n${classifierPrompt}`,
-        schema: AUTO_CLASSIFIER_SCHEMA,
+        schema: buildAutoClassifierSchema(enabled),
         model: classifierModel,
         signal: controller.signal,
         onRetry,
@@ -1045,12 +1116,12 @@ async function runAnalysis(): Promise<void> {
     // so the HUD's session-wide swipe scroll knows which entries belong to
     // this just-finished analysis (drives the "1/N within-analysis" indicator).
     const freshIds = await pushHistoryEntries(
-      splitResultByClaim(result).map((single) => ({
+      splitResultByClaim(result).map((single, idx) => ({
         sessionId: currentSessionId,
         lensId: analysisPersona.id,
         lensName: analysisPersona.name,
         question: extractQuestion(single),
-        badge: extractBadge(single),
+        badge: single.type === 'key-questions' ? `Q${idx + 1}` : extractBadge(single),
         quote: extractQuote(single),
         result: single,
         tags: extractTags(single),
@@ -1107,30 +1178,6 @@ async function runAnalysis(): Promise<void> {
 
 /** Fixed cadence for the in-session auto-summary tick. Hardcoded — no user knob. */
 const AUTO_SUMMARY_INTERVAL_MS = 5 * 60_000;
-
-/**
- * Best-effort GET against the Gemini host to open the TLS+HTTP/2 connection
- * before the user's first tap. Silent on every failure path — this is a
- * micro-optimisation, not a health check. Only fires for the Gemini
- * provider; the openai-compatible host warms naturally on its own paths.
- *
- * Targets `/v1beta/models` (the same endpoint `fetchAvailableModels` uses)
- * so the request resolves to a real HTTP response: 403 JSON without a key,
- * 200 with one. Both shapes satisfy the Even App store reviewer's network
- * monitor, which only flags requests that fail at the network layer
- * (DNS / timeout / CORS / mixed content). HEAD on the same path produces a
- * 404 text/html from Google's edge — well-formed but the unusual shape
- * could trip future review heuristics, so we use GET and discard the body.
- */
-async function prewarmGeminiConnection(): Promise<void> {
-  if (settings().provider !== 'gemini') return;
-  try {
-    await fetch('https://generativelanguage.googleapis.com/v1beta/models', {
-      method: 'GET',
-      keepalive: true,
-    });
-  } catch { /* best-effort */ }
-}
 
 /**
  * Return at most the most-recent `maxSeconds` of audio from a 16-bit LE PCM
@@ -1213,6 +1260,25 @@ function canGenerateFinalSummary(): boolean {
   return settings().autoSummaryEnabled && intermediateSummaries.length > 0;
 }
 
+function buildMidSummaryMenuItems(): MenuItem[] {
+  const items: MenuItem[] = [];
+  if (midSummaryResult) {
+    const relTime = formatRelativeTime(midSummaryResult.generatedAt);
+    items.push({ id: 'mid-summary-view', label: `Summary — ${relTime}` });
+    if (midSummaryLoading) {
+      items.push({ id: 'mid-summary-loading', label: 'Generating summary...', disabled: true });
+    } else {
+      items.push({ id: 'mid-summary-refresh', label: 'Refresh summary' });
+    }
+  } else {
+    if (midSummaryLoading) {
+      items.push({ id: 'mid-summary-loading', label: 'Generating summary...', disabled: true });
+    } else {
+      items.push({ id: 'mid-summary', label: 'Mid-session summary' });
+    }
+  }
+  return items;
+}
 
 async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;
@@ -1276,6 +1342,61 @@ async function runAutoSummary(): Promise<void> {
     });
   } finally {
     if (autoSummaryInflight === controller) autoSummaryInflight = null;
+  }
+}
+
+async function runMidSummary(): Promise<void> {
+  const hasHistory = sessionHistory().some((e) => e.sessionId === currentSessionId);
+  const hasAudio = buffer !== null && buffer.bytesBuffered > 0;
+  if (!hasHistory && !hasAudio) {
+    midSummaryLoading = false;
+    midSummaryPageIndex = 0;
+    await showMidSummaryPage(false, null, 0);
+    return;
+  }
+
+  midSummaryController?.abort();
+  const controller = new AbortController();
+  midSummaryController = controller;
+  midSummaryLoading = true;
+
+  await showMidSummaryPage(true, midSummaryResult?.result ?? null, midSummaryPageIndex);
+
+  let wav: Uint8Array | null = buffer
+    ? encodePcmToWav(buffer.toLinearPcm(), {
+        sampleRate: buffer.sampleRate,
+        bitsPerSample: buffer.bitsPerSample,
+        channels: buffer.channels,
+      })
+    : null;
+  try {
+    const rawText = await callLens({
+      wav: wav ?? new Uint8Array(0),
+      prompt: buildSessionSummaryPrompt(settings().responseLanguage),
+      schema: SESSION_SUMMARY_SCHEMA,
+      signal: controller.signal,
+    });
+    wav = null;
+    if (controller.signal.aborted) return;
+    const result = parseSessionSummaryResponse(rawText);
+    if (midSummaryController !== controller) return;
+    if (result.type === 'session-summary') {
+      midSummaryResult = { result, generatedAt: Date.now() };
+      midSummaryPageIndex = 0;
+    }
+  } catch (err) {
+    wav = null;
+    if ((err as Error)?.name === 'AbortError') return;
+    pushDebugEvent({ label: 'mid-summary-fail', detail: err instanceof Error ? err.message : String(err) });
+  } finally {
+    if (midSummaryController === controller) {
+      midSummaryLoading = false;
+      midSummaryController = null;
+    }
+  }
+
+  if (currentHudPage() === 'mid-summary') {
+    await showMidSummaryPage(false, midSummaryResult?.result ?? null, midSummaryPageIndex);
   }
 }
 
@@ -1626,6 +1747,22 @@ export function extractTags(result: LensResult): string[] {
         for (const t of keywordize(c.text, 3)) raw.push(t);
       }
       break;
+    case 'devils-advocate':
+      for (const c of result.claims) {
+        for (const t of keywordize(c.counterpoint, 3)) raw.push(t);
+      }
+      break;
+    case 'key-questions':
+      for (const c of result.claims) {
+        for (const t of keywordize(c.question, 3)) raw.push(t);
+      }
+      break;
+    case 'sentiment':
+      for (const c of result.claims) {
+        raw.push(c.tone);
+        for (const t of keywordize(c.explanation, 3)) raw.push(t);
+      }
+      break;
   }
   return normalizeTags(raw);
 }
@@ -1643,6 +1780,9 @@ function extractQuestion(result: LensResult): string {
     case 'eli5': return (result.claims[0]?.explanation ?? '').slice(0, 80);
     case 'session-summary': return (result.title || result.summary).slice(0, 80);
     case 'meeting-prep': return result.claims[0]?.text ?? '';
+    case 'devils-advocate': return (result.claims[0]?.counterpoint ?? '').slice(0, 60);
+    case 'key-questions': return (result.claims[0]?.question ?? '').slice(0, 60);
+    case 'sentiment': return (result.claims[0]?.explanation ?? '').slice(0, 60);
   }
 }
 
@@ -1662,6 +1802,9 @@ function extractBadge(result: LensResult): string {
       // renders empty for this lens.
       return src ? src.toUpperCase().slice(0, 12) : 'PREP';
     }
+    case 'devils-advocate': return 'COUNTER';
+    case 'key-questions': return 'Q1';
+    case 'sentiment': return result.claims[0]?.tone ?? 'NEUTRAL';
   }
 }
 
@@ -1706,6 +1849,18 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
       // Follow-ups are suggestions, not standalone facts — keep the primary
       // answer + follow-ups together as one history entry.
       return [result];
+    case 'key-questions': {
+      if (result.claims.length <= 1) return [result];
+      return result.claims.map((c) => ({
+        type: 'key-questions' as const,
+        claims: [c],
+        autoSelected: result.autoSelected,
+      }));
+    }
+    case 'devils-advocate':
+      return [result];
+    case 'sentiment':
+      return [result];
   }
 }
 
@@ -1734,6 +1889,12 @@ export function extractQuote(result: LensResult): string {
       if (evidence?.text) return evidence.text;
       return result.claims[0]?.detail ?? '';
     }
+    case 'devils-advocate':
+      return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
+    case 'key-questions':
+      return '';
+    case 'sentiment':
+      return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
   }
 }
 

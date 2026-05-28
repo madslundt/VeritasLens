@@ -56,6 +56,7 @@ import {
   _resetHudBootstrapForTesting,
   bootstrapHud,
   currentHudPage,
+  getMidSummaryPageCount,
   hasPendingActiveResult,
   isActiveHidden,
   markActiveHidden,
@@ -65,6 +66,7 @@ import {
   resetHudSessionState,
   scrollActiveReason,
   scrollHistoryDetail,
+  scrollMidSummaryPage,
   setActiveLayout,
   setLensResult,
   setMenuSpinner,
@@ -73,6 +75,7 @@ import {
   showHistoryDetailPage,
   showHistoryListPage,
   showMenuPage,
+  showMidSummaryPage,
   showPickerPage,
   showUnconfiguredPage,
 } from '../src/runtime/hud';
@@ -1823,5 +1826,175 @@ describe('unified-body regression guards', () => {
     );
     expect(resultContainers).toHaveLength(1);
     expect(resultContainers[0]!.payload.containerName).toBe('vl-reason');
+  });
+});
+
+describe('dynamic menu', () => {
+  it('menuOptionAtIndex still maps to static items when no dynamic items given', async () => {
+    await bootstrapHud('picker');
+    const persona = getPersona('fact-checker')!;
+    await showActivePage(persona);
+    await showMenuPage();
+    // Static items are at their normal positions (no dynamic items injected)
+    expect(menuOptionAtIndex(0)).toBe('back');
+    expect(menuOptionAtIndex(1)).toBe('fact-check');
+    expect(menuOptionAtIndex(2)).toBe('history');
+    expect(menuOptionAtIndex(3)).toBe('exit');
+  });
+
+  it('dynamic items are inserted between fact-check and history', async () => {
+    await bootstrapHud('picker');
+    const persona = getPersona('fact-checker')!;
+    await showActivePage(persona);
+    await showMenuPage({ dynamicItems: [{ id: 'mid-summary', label: 'Mid-session summary' }] });
+    expect(menuOptionAtIndex(0)).toBe('back');
+    expect(menuOptionAtIndex(1)).toBe('fact-check');
+    expect(menuOptionAtIndex(2)).toBe('mid-summary');
+    expect(menuOptionAtIndex(3)).toBe('history');
+    expect(menuOptionAtIndex(4)).toBe('exit');
+  });
+
+  it('two dynamic items sit between fact-check and history', async () => {
+    await bootstrapHud('picker');
+    const persona = getPersona('fact-checker')!;
+    await showActivePage(persona);
+    await showMenuPage({
+      dynamicItems: [
+        { id: 'mid-summary-view', label: 'Summary — 2 min ago' },
+        { id: 'mid-summary-refresh', label: 'Refresh summary' },
+      ],
+    });
+    expect(menuOptionAtIndex(0)).toBe('back');
+    expect(menuOptionAtIndex(1)).toBe('fact-check');
+    expect(menuOptionAtIndex(2)).toBe('mid-summary-view');
+    expect(menuOptionAtIndex(3)).toBe('mid-summary-refresh');
+    expect(menuOptionAtIndex(4)).toBe('history');
+    expect(menuOptionAtIndex(5)).toBe('exit');
+  });
+
+  it('list container itemCount matches total dynamic + static items', async () => {
+    await bootstrapHud('picker');
+    const persona = getPersona('fact-checker')!;
+    await showActivePage(persona);
+    bridge.rebuildPageContainer.mockClear();
+    await showMenuPage({
+      dynamicItems: [{ id: 'mid-summary', label: 'Mid-session summary' }],
+    });
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { listObject: Array<{ payload: { itemContainer: { payload: { itemCount: number } } } }> } }]>;
+    const listContainer = calls[0][0].payload.listObject[0]!;
+    // 1 dynamic + 4 static = 5
+    expect(listContainer.payload.itemContainer.payload.itemCount).toBe(5);
+  });
+});
+
+describe('showMidSummaryPage', () => {
+  type RebuildBag = { payload: { textObject: Array<{ payload: { containerName: string; content: string } }> } };
+
+  function getBodyContent(calls: Array<[RebuildBag]>): string | undefined {
+    const last = calls[calls.length - 1]?.[0];
+    return last?.payload.textObject.find((c) => c.payload.containerName === 'vl-reason')?.payload.content;
+  }
+
+  it('transitions to mid-summary page', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await showMidSummaryPage(true, null, 0);
+    expect(currentHudPage()).toBe('mid-summary');
+  });
+
+  it('shows "Generating summary..." when loading with no result', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    bridge.rebuildPageContainer.mockClear();
+    await showMidSummaryPage(true, null, 0);
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    expect(getBodyContent(calls)).toBe('Generating summary...');
+  });
+
+  it('shows "Nothing to summarize yet" when not loading and no result', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    bridge.rebuildPageContainer.mockClear();
+    await showMidSummaryPage(false, null, 0);
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    expect(getBodyContent(calls)).toBe('Nothing to summarize yet');
+  });
+
+  it('shows result title and summary when loaded', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    bridge.rebuildPageContainer.mockClear();
+    const result: Extract<LensResult, { type: 'session-summary' }> = {
+      type: 'session-summary',
+      title: 'Meeting Recap',
+      summary: 'We discussed budget.',
+      topics: ['budget', 'timeline'],
+      keyPoints: ['Q3 over budget', 'Deadline extended'],
+    };
+    await showMidSummaryPage(false, result, 0);
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    const body = getBodyContent(calls)!;
+    expect(body).toContain('Meeting Recap');
+    expect(body).toContain('We discussed budget.');
+    expect(currentHudPage()).toBe('mid-summary');
+  });
+
+  it('includes "Refreshing…" in body text when loading with prior result', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    bridge.rebuildPageContainer.mockClear();
+    const result: Extract<LensResult, { type: 'session-summary' }> = {
+      type: 'session-summary',
+      title: 'Old Summary',
+      summary: 'Prior content.',
+      topics: [],
+      keyPoints: [],
+    };
+    await showMidSummaryPage(true, result, 0);
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    const body = getBodyContent(calls)!;
+    expect(body).toContain('Refreshing…');
+    expect(body).toContain('Old Summary');
+  });
+
+  it('getMidSummaryPageCount returns 1 for short content', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    const result: Extract<LensResult, { type: 'session-summary' }> = {
+      type: 'session-summary', title: 'T', summary: 'short', topics: [], keyPoints: [],
+    };
+    await showMidSummaryPage(false, result, 0);
+    expect(getMidSummaryPageCount()).toBe(1);
+  });
+
+  it('getMidSummaryPageCount returns >1 for long content', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    const result: Extract<LensResult, { type: 'session-summary' }> = {
+      type: 'session-summary',
+      title: 'Long',
+      summary: 'word '.repeat(300),
+      topics: [],
+      keyPoints: [],
+    };
+    await showMidSummaryPage(false, result, 0);
+    expect(getMidSummaryPageCount()).toBeGreaterThan(1);
+  });
+
+  it('scrollMidSummaryPage issues a textContainerUpgrade for vl-reason', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    const result: Extract<LensResult, { type: 'session-summary' }> = {
+      type: 'session-summary',
+      title: 'L',
+      summary: 'word '.repeat(300),
+      topics: [],
+      keyPoints: [],
+    };
+    await showMidSummaryPage(false, result, 0);
+    bridge.textContainerUpgrade.mockClear();
+    await scrollMidSummaryPage(1);
+    const upgrades = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string } }]>;
+    expect(upgrades.some((c) => c[0].payload.containerName === 'vl-reason')).toBe(true);
   });
 });

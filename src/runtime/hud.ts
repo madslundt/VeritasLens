@@ -99,7 +99,7 @@ const STATUS_LABEL: Record<string, string> = {
   error: 'ERR',
 };
 
-export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'none';
+export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'mid-summary' | 'none';
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
@@ -111,6 +111,16 @@ export const MENU_OPTIONS = [
   { id: 'exit', label: 'Exit' },
 ] as const;
 export type MenuOptionId = (typeof MENU_OPTIONS)[number]['id'];
+
+// `disabled` is a code-side no-op guard — the SDK ListItemContainerProperty has no
+// item-level disable; lifecycle's handleMenuGesture skips action via a break case.
+export type MenuItem = { id: string; label: string; disabled?: boolean };
+
+// Built at showMenuPage() time — concatenation of dynamic items (from lifecycle)
+// and the static MENU_OPTIONS. Initialized to the static defaults so
+// menuOptionAtIndex works even if called before a showMenuPage call (tests,
+// first-run edge cases).
+let builtMenuItems: MenuItem[] = MENU_OPTIONS.map((o) => ({ id: o.id, label: o.label }));
 
 export const EXIT_LABEL_WITH_SUMMARY = 'Exit - generate summary';
 // Captured at showMenuPage() time; consumed by buildMenuPage() so the Exit row
@@ -171,6 +181,7 @@ let activeHidden = false;
 let latestAnalysisRange: { firstEntry: number; lastEntry: number } | null = null;
 let detailPages: PageRef[] = [];
 let detailPageIndex = 0;
+let midSummaryPageRefs: PageRef[] = [];
 /** Index into cachedHistoryEntries of the entry currently shown on history-detail. */
 let historyDetailIndex = -1;
 // Stash for results that arrive while the user is off the active page (e.g.
@@ -243,9 +254,9 @@ export function personaAtIndex(idx: number | undefined | null): Persona | null {
 }
 
 /** Map list index → menu option id. */
-export function menuOptionAtIndex(idx: number | undefined | null): MenuOptionId {
+export function menuOptionAtIndex(idx: number | undefined | null): string {
   const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
-  return MENU_OPTIONS[safe]?.id ?? 'back';
+  return builtMenuItems[safe]?.id ?? 'back';
 }
 
 export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'picker'): Promise<void> {
@@ -296,9 +307,22 @@ export async function showActivePage(persona: Persona): Promise<void> {
   }
 }
 
-export async function showMenuPage(opts: { exitGeneratesSummary?: boolean } = {}): Promise<void> {
+export async function showMenuPage(opts: { exitGeneratesSummary?: boolean; dynamicItems?: MenuItem[] } = {}): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showMenuPage().');
   exitGeneratesSummary = opts.exitGeneratesSummary === true;
+  const staticItems = MENU_OPTIONS.map((o): MenuItem => ({
+    id: o.id,
+    label: o.id === 'exit' && exitGeneratesSummary ? EXIT_LABEL_WITH_SUMMARY : o.label,
+  }));
+  // Dynamic items (mid-summary view/refresh/loading) sit between fact-check
+  // and history so they read as session actions alongside their peers.
+  const historyIdx = staticItems.findIndex((i) => i.id === 'history');
+  const dyn = opts.dynamicItems ?? [];
+  builtMenuItems = [
+    ...staticItems.slice(0, historyIdx),
+    ...dyn,
+    ...staticItems.slice(historyIdx),
+  ];
   const ok = await getBridge().rebuildPageContainer(buildMenuPage());
   if (!ok) throw new Error('rebuildPageContainer (menu) failed.');
   currentPage = 'menu';
@@ -376,6 +400,15 @@ export async function restoreHistoryListPage(): Promise<void> {
   await showHistoryListPage(cachedHistoryEntries);
 }
 
+export function getMidSummaryPageCount(): number { return midSummaryPageRefs.length; }
+
+export async function scrollMidSummaryPage(pageIndex: number): Promise<void> {
+  if (currentPage !== 'mid-summary') return;
+  const page = midSummaryPageRefs[pageIndex];
+  if (!page) return;
+  await upgradeText(CONTAINER.reason, NAME.reason, page.text);
+}
+
 /** Resume the previously-active persona page after the menu. */
 export async function restoreActivePage(): Promise<void> {
   if (!menuPersona) return;
@@ -448,6 +481,14 @@ function splitForSynthesis(result: LensResult): LensResult[] {
         : result.claims.map((c) => ({ type: 'eli5', claims: [c], autoSelected: result.autoSelected }));
     case 'session-summary':
     case 'meeting-prep':
+      return [result];
+    case 'key-questions':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'key-questions' as const, claims: [c], autoSelected: result.autoSelected }));
+    case 'devils-advocate':
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'devils-advocate' as const, claims: [c], autoSelected: result.autoSelected }));
+    case 'sentiment':
       return [result];
   }
 }
@@ -750,6 +791,9 @@ function claimCount(result: LensResult): number {
     case 'trivia':
     case 'eli5':
     case 'meeting-prep':
+    case 'devils-advocate':
+    case 'key-questions':
+    case 'sentiment':
       return Math.max(1, result.claims.length);
     default:
       return 1;
@@ -843,6 +887,22 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
         case 'followup':
           return { top: clip(`→ ${c.text}`, 140), middle: '', bottom: '' };
       }
+    }
+    case 'devils-advocate': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
+      return { top: clip(c.counterpoint, 140), middle: '', bottom: c.rationale };
+    }
+    case 'key-questions': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
+      return { top: clip(c.question, 140), middle: '', bottom: c.context };
+    }
+    case 'sentiment': {
+      const c = result.claims[claimIdx] ?? result.claims[0]!;
+      const toneLabel = c.tone === 'POSITIVE' ? '+ POSITIVE'
+        : c.tone === 'NEGATIVE' ? '- NEGATIVE'
+        : c.tone === 'MIXED' ? '~ MIXED'
+        : '= NEUTRAL';
+      return { top: clip(c.quote, 140), middle: toneLabel, bottom: c.explanation };
     }
   }
 }
@@ -1206,6 +1266,10 @@ async function renderHistoryDetailPage(): Promise<void> {
   await upgradeText(CONTAINER.reason, NAME.reason, page.text);
 }
 
+// ------- mid-summary page helpers -----------------------------------------
+
+type MidSummaryResult = Extract<LensResult, { type: 'session-summary' }>;
+
 // ------- page builders ----------------------------------------------------
 
 /** Sum container counts so a future build-time list change can't drift away
@@ -1308,8 +1372,8 @@ function buildMenuPage(): RebuildPageContainer {
     containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
     width: SCREEN_W - 32, height: SCREEN_H - 48, borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
-      itemCount: MENU_OPTIONS.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
-      itemName: MENU_OPTIONS.map((o) => (o.id === 'exit' && exitGeneratesSummary ? EXIT_LABEL_WITH_SUMMARY : o.label)),
+      itemCount: builtMenuItems.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: builtMenuItems.map((o) => o.label),
     }),
     isEventCapture: 1,
   });
@@ -1490,6 +1554,69 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
   return new RebuildPageContainer({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
+function buildMidSummaryContentBody(result: MidSummaryResult, loading: boolean): string {
+  const parts: string[] = [];
+  if (loading) parts.push('Refreshing…');
+  if (result.title.trim()) parts.push(result.title.trim());
+  if (result.summary.trim()) parts.push(result.summary.trim());
+  const kp = result.keyPoints.map((k) => k.trim()).filter(Boolean);
+  if (kp.length > 0) parts.push(kp.join('\n'));
+  return parts.join('\n\n');
+}
+
+function buildMidSummaryPage(pageText: string): RebuildPageContainer {
+  const body = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: HISTORY_DETAIL_PAGE_LINES * LINE_PX + 8,
+    borderWidth: 0, paddingLength: 4, content: pageText, isEventCapture: 1,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList,
+    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4, content: 'Tap: menu · Double-tap: analyze', isEventCapture: 0,
+  });
+  const textObject = [body, hint];
+  return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
+}
+
+export async function showMidSummaryPage(
+  loading: boolean,
+  result: MidSummaryResult | null,
+  pageIndex: number,
+): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showMidSummaryPage().');
+
+  if (!result) {
+    midSummaryPageRefs = [];
+    const pageText = loading ? 'Generating summary...' : 'Nothing to summarize yet';
+    const ok = await getBridge().rebuildPageContainer(buildMidSummaryPage(pageText));
+    if (!ok) throw new Error('rebuildPageContainer (mid-summary) failed.');
+    currentPage = 'mid-summary';
+    return;
+  }
+
+  const body = buildMidSummaryContentBody(result, loading);
+  const firstPass = paginateText(body, BODY_INNER_W, HISTORY_DETAIL_PAGE_LINES, HISTORY_DETAIL_PAGE_LINES);
+
+  if (firstPass.length <= 1) {
+    midSummaryPageRefs = [{ claimIdx: 0, pageWithinClaim: 0, text: firstPass[0] ?? '' }];
+  } else {
+    const budget = HISTORY_DETAIL_PAGE_LINES - 2;
+    const final = paginateText(body, BODY_INNER_W, budget, budget);
+    midSummaryPageRefs = final.map((chunk, p) => ({
+      claimIdx: 0,
+      pageWithinClaim: p,
+      text: `${chunk}\n\n${bulletRow(p, final.length)}`,
+    }));
+  }
+
+  const clamped = Math.max(0, Math.min(pageIndex, midSummaryPageRefs.length - 1));
+  const page = midSummaryPageRefs[clamped] ?? midSummaryPageRefs[0];
+  const ok = await getBridge().rebuildPageContainer(buildMidSummaryPage(page?.text ?? ''));
+  if (!ok) throw new Error('rebuildPageContainer (mid-summary) failed.');
+  currentPage = 'mid-summary';
+}
+
 /**
  * History-detail unified layout — a single body container with the bottom
  * hint row at y=260. Body holds 9 lines of paginated heading + verdict +
@@ -1518,6 +1645,7 @@ export function resetHudSessionState(): void {
   detailPages = [];
   detailPageIndex = 0;
   historyDetailIndex = -1;
+  midSummaryPageRefs = [];
   sessionEntries = [];
   sessionPages = [];
   sessionPageIndex = 0;
@@ -1545,6 +1673,7 @@ export function resetHudSessionState(): void {
     clearTimeout(summaryBadgeReadyTimer);
     summaryBadgeReadyTimer = null;
   }
+  builtMenuItems = MENU_OPTIONS.map((o) => ({ id: o.id, label: o.label }));
 }
 
 export function _resetHudBootstrapForTesting(): void {

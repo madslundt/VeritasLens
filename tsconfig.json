@@ -19,7 +19,7 @@
     "allowSyntheticDefaultImports": true,
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
-    "types": ["vite/client", "vitest/globals"],
+    "types": ["vite/client", "vitest/globals", "node"],
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]

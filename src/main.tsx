@@ -2,18 +2,17 @@
 import { render } from 'solid-js/web';
 import { App } from './App';
 import { initBridge } from './runtime/bridge';
+import { attachBootstrapTeardown } from './runtime/bootstrap';
 import { startHudRuntime } from './runtime/lifecycle';
 import {
   loadHistory,
   loadMeetingPrepSections,
   loadSettings,
-  pushDebugEvent,
   setAppMode,
   setAppPhase,
   setAvailableModels,
   setDeviceStatus,
   setErrorMessage,
-  setModelsLoading,
   settings,
 } from './state/store';
 
@@ -41,42 +40,27 @@ async function bootstrap(): Promise<void> {
 
     const disposeDeviceStatus = bridge.onDeviceStatusChanged((status) => setDeviceStatus(status));
 
-    // Abortable so a WebView reload / navigation doesn't strand the bootstrap
-    // model-list fetch (which would otherwise mutate setAvailableModels on a
-    // possibly-dead reactive root after the page is gone).
+    // Kept for the teardown helper to abort any future bootstrap-scoped fetch
+    // a follow-up may introduce; currently the only thing the teardown does is
+    // dispose the SDK subscriptions below.
     const bootstrapAbort = new AbortController();
 
-    window.addEventListener('beforeunload', () => {
-      bootstrapAbort.abort();
-      try { disposeLaunchSource(); } catch { /* SDK may already be torn down */ }
-      try { disposeDeviceStatus(); } catch { /* SDK may already be torn down */ }
-    }, { once: true });
+    window.addEventListener(
+      'beforeunload',
+      attachBootstrapTeardown(bootstrapAbort, disposeLaunchSource, disposeDeviceStatus),
+      { once: true },
+    );
 
     await loadSettings((k) => bridge.getLocalStorage(k));
     await loadHistory((k) => bridge.getLocalStorage(k));
     await loadMeetingPrepSections((k) => bridge.getLocalStorage(k));
 
+    // Picker starts with just the persisted model. Live model-list fetches
+    // are user-initiated only (Settings → Refresh models) so the store-review
+    // network monitor never sees an unsolicited call to Google's API on boot
+    // — past submissions were rejected for unsolicited 4xx responses from a
+    // stale persisted key.
     setAvailableModels([settings().geminiModel]);
-
-    const apiKey = settings().geminiApiKey;
-    if (apiKey.trim().length >= 10) {
-      setModelsLoading(true);
-      void import('./llm/gemini').then(({ fetchAvailableModels }) =>
-        fetchAvailableModels(apiKey, bootstrapAbort.signal)
-          .then((models) => { if (models.length > 0) setAvailableModels(models); })
-          .catch((err) => {
-            // Keep the static fallback in the picker, but surface why the live
-            // model list is missing so a wedged API key / network is debuggable.
-            // Aborts are silent — they're an expected outcome on page unload.
-            if (err instanceof DOMException && err.name === 'AbortError') return;
-            pushDebugEvent({
-              label: 'model-fetch-fail',
-              detail: err instanceof Error ? err.message : String(err),
-            });
-          })
-          .finally(() => setModelsLoading(false)),
-      );
-    }
 
     setAppPhase('idle');
 

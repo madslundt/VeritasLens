@@ -508,6 +508,9 @@ describe('session-summary', () => {
   });
 });
 
+import { parseDevilsAdvocateResponse } from '../src/personas/devilsAdvocate';
+import { parseKeyQuestionsResponse } from '../src/personas/keyQuestions';
+
 import {
   parseAutoClassifierResponse,
   buildAutoPrompt,
@@ -552,6 +555,43 @@ describe('auto-classifier', () => {
   it('throws NoSpeechError when the classifier reports no speech', () => {
     expect(() => parseAutoClassifierResponse(JSON.stringify({ noSpeech: true })))
       .toThrow(/no clear human speech/i);
+  });
+});
+
+describe("devil's advocate", () => {
+  it('parses a typical response', () => {
+    const result = parseDevilsAdvocateResponse(JSON.stringify({
+      claims: [{
+        quote: 'taxes are always bad',
+        counterpoint: 'Taxes fund public goods that markets under-provide.',
+        rationale: 'Roads, courts, and basic research all rely on tax revenue. Without them, the economy itself degrades.',
+      }],
+    }));
+    expect(result.type).toBe('devils-advocate');
+    if (result.type === 'devils-advocate') {
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.quote).toBe('taxes are always bad');
+      expect(result.claims[0]!.counterpoint).toContain('public goods');
+      expect(result.claims[0]!.rationale).toContain('Roads');
+    }
+  });
+
+  it('synthesizes an empty claim when claims array is missing', () => {
+    const result = parseDevilsAdvocateResponse(JSON.stringify({}));
+    if (result.type === 'devils-advocate') {
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.counterpoint).toBe('');
+    }
+  });
+
+  it('truncates over-long quotes', () => {
+    const huge = 'x'.repeat(500);
+    const result = parseDevilsAdvocateResponse(JSON.stringify({
+      claims: [{ quote: huge, counterpoint: 'c', rationale: 'r' }],
+    }));
+    if (result.type === 'devils-advocate') {
+      expect(result.claims[0]!.quote.length).toBeLessThanOrEqual(MAX_QUOTE_CHARS);
+    }
   });
 });
 
@@ -840,5 +880,77 @@ describe('meeting-prep / parseMeetingPrepResponse', () => {
     expect(() =>
       parseMeetingPrepResponse(JSON.stringify({ noSpeech: true }), GENERAL_PLUS_TWO),
     ).toThrow(/no clear human speech/i);
+  });
+});
+
+import { parseSentimentResponse } from '../src/personas/sentiment';
+
+describe('sentiment', () => {
+  it('parses a NEGATIVE tone response', () => {
+    const result = parseSentimentResponse(JSON.stringify({
+      claims: [{
+        quote: 'this is an absolute disaster',
+        tone: 'NEGATIVE',
+        explanation: 'Strong catastrophising language signals frustration or alarm. The absolute qualifier amplifies the negative framing.',
+      }],
+    }));
+    expect(result.type).toBe('sentiment');
+    if (result.type === 'sentiment') {
+      expect(result.claims[0]!.tone).toBe('NEGATIVE');
+      expect(result.claims[0]!.quote).toBe('this is an absolute disaster');
+    }
+  });
+
+  it('falls back to NEUTRAL for unknown tone', () => {
+    const result = parseSentimentResponse(JSON.stringify({
+      claims: [{ quote: 'q', tone: 'ANGRY', explanation: 'e' }],
+    }));
+    if (result.type === 'sentiment') {
+      expect(result.claims[0]!.tone).toBe('NEUTRAL');
+    }
+  });
+
+  it('synthesizes an empty claim when claims array is missing', () => {
+    const result = parseSentimentResponse(JSON.stringify({}));
+    if (result.type === 'sentiment') {
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.tone).toBe('NEUTRAL');
+    }
+  });
+});
+
+describe('key-questions', () => {
+  it('parses a two-question response', () => {
+    const result = parseKeyQuestionsResponse(JSON.stringify({
+      claims: [
+        { question: 'What is the total cost of the project?', context: 'Budget was mentioned but no figure given.' },
+        { question: 'Who approves the final decision?', context: 'Decision authority was left ambiguous.' },
+      ],
+    }));
+    expect(result.type).toBe('key-questions');
+    if (result.type === 'key-questions') {
+      expect(result.claims).toHaveLength(2);
+      expect(result.claims[0]!.question).toContain('total cost');
+      expect(result.claims[1]!.context).toContain('ambiguous');
+    }
+  });
+
+  it('synthesizes an empty claim when claims array is missing', () => {
+    const result = parseKeyQuestionsResponse(JSON.stringify({}));
+    if (result.type === 'key-questions') {
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.question).toBe('');
+    }
+  });
+
+  it('caps at 4 claims even if more are returned', () => {
+    const claims = Array.from({ length: 6 }, (_, i) => ({
+      question: `Q${i + 1}?`,
+      context: `context ${i + 1}`,
+    }));
+    const result = parseKeyQuestionsResponse(JSON.stringify({ claims }));
+    if (result.type === 'key-questions') {
+      expect(result.claims).toHaveLength(4);
+    }
   });
 });

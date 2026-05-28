@@ -7,6 +7,9 @@ import { LOGICAL_FALLACY_SCHEMA, buildLogicalFallacyPrompt, parseLogicalFallacyR
 import { STATS_CHECK_SCHEMA, buildStatsCheckPrompt, parseStatsCheckResponse } from './statsCheck';
 import { BIAS_DETECTOR_SCHEMA, buildBiasDetectorPrompt, parseBiasDetectorResponse } from './biasDetector';
 import { ELI5_SCHEMA, buildEli5Prompt, parseEli5Response } from './eli5';
+import { DEVILS_ADVOCATE_SCHEMA, buildDevilsAdvocatePrompt, parseDevilsAdvocateResponse } from './devilsAdvocate';
+import { KEY_QUESTIONS_SCHEMA, buildKeyQuestionsPrompt, parseKeyQuestionsResponse } from './keyQuestions';
+import { SENTIMENT_SCHEMA, buildSentimentPrompt, parseSentimentResponse } from './sentiment';
 import { AUTO_CLASSIFIER_SCHEMA, buildAutoPrompt, parseAutoResponse } from './auto';
 import {
   MEETING_PREP_ID,
@@ -99,6 +102,36 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildEli5Prompt,
     schema: ELI5_SCHEMA,
     parse: parseEli5Response,
+    builtin: true,
+  },
+  {
+    id: 'devils-advocate',
+    name: "Devil's Advocate",
+    description: 'Surfaces the strongest counterargument to the main position being argued.',
+    hint: 'Tap to find the counter',
+    buildPrompt: buildDevilsAdvocatePrompt,
+    schema: DEVILS_ADVOCATE_SCHEMA,
+    parse: parseDevilsAdvocateResponse,
+    builtin: true,
+  },
+  {
+    id: 'key-questions',
+    name: 'Key Questions',
+    description: 'Identifies the most important open or unanswered questions raised by the conversation.',
+    hint: 'Tap for key questions',
+    buildPrompt: buildKeyQuestionsPrompt,
+    schema: KEY_QUESTIONS_SCHEMA,
+    parse: parseKeyQuestionsResponse,
+    builtin: true,
+  },
+  {
+    id: 'sentiment',
+    name: 'Tone Check',
+    description: 'Reads the emotional tone and intent behind what was said.',
+    hint: 'Tap to read the tone',
+    buildPrompt: buildSentimentPrompt,
+    schema: SENTIMENT_SCHEMA,
+    parse: parseSentimentResponse,
     builtin: true,
   },
   {

@@ -31,6 +31,15 @@ export class NoSpeechError extends Error {
   constructor() { super('No clear human speech detected.'); this.name = 'NoSpeechError'; }
 }
 
+/** Convert a past Unix timestamp to a human-readable relative time string. */
+export function formatRelativeTime(ts: number): string {
+  const diffSec = Math.floor((Date.now() - ts) / 1000);
+  if (diffSec < 60) return 'just now';
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} min ago`;
+  return `${Math.floor(diffMin / 60)} hr ago`;
+}
+
 /**
  * Parse a JSON object from a Gemini text response.
  * Falls back to fenced-JSON extraction if the response has extra prose.

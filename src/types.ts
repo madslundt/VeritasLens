@@ -12,6 +12,23 @@ export interface BiasClaim { quote: string; verdict: 'NEUTRAL' | 'BIASED'; direc
 export interface TriviaClaim { quote: string; question: string; answer: string; description: string; }
 export interface Eli5Claim { quote: string; explanation: string; }
 
+export interface DevilsAdvocateClaim {
+  quote: string;
+  counterpoint: string;
+  rationale: string;
+}
+
+export interface KeyQuestionClaim {
+  question: string;
+  context: string;
+}
+
+export interface SentimentClaim {
+  quote: string;
+  tone: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'MIXED';
+  explanation: string;
+}
+
 /**
  * Per-entry shape for the Meeting Prep lens. `claims[0]` is always the primary
  * answer; an optional `evidence` claim follows when the answer is grounded in
@@ -45,6 +62,9 @@ export type LensResult = (
   | { type: 'eli5'; claims: Eli5Claim[] }
   | { type: 'session-summary'; title: string; summary: string; topics: string[]; keyPoints: string[]; quote?: string }
   | { type: 'meeting-prep'; claims: MeetingPrepClaim[] }
+  | { type: 'devils-advocate'; claims: DevilsAdvocateClaim[] }
+  | { type: 'key-questions'; claims: KeyQuestionClaim[] }
+  | { type: 'sentiment'; claims: SentimentClaim[] }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
   autoSelected?: boolean;
@@ -269,6 +289,12 @@ export interface Settings {
    * available, since FFT does not produce segment boundaries.
    */
   voiceTrimEnabled: boolean;
+  /**
+   * Lens IDs excluded from the Auto dispatcher. Default `[]` means all
+   * Auto candidates are enabled. Stored as a JSON-serialised string array
+   * under `veritaslens.autoDisabledLenses`.
+   */
+  autoDisabledLenses: string[];
 }
 
 /** Runtime app state. */

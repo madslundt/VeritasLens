@@ -1,5 +1,5 @@
 // src/views/SettingsView.tsx
-import { createEffect, createMemo, createSignal, For, Index, on, onCleanup, Show, untrack, type Component } from 'solid-js';
+import { createEffect, createMemo, createSignal, For, Index, Match, on, onCleanup, Show, Switch, untrack, type Component } from 'solid-js';
 import {
   MEETING_PREP_BYTE_BUDGET,
   MEETING_PREP_LABEL_MAX,
@@ -26,6 +26,7 @@ import {
   saveOpenaiKeys,
   saveOpenaiModel,
   saveOpenaiTranscribeModels,
+  saveAutoDisabledLenses,
   saveProvider,
   saveResponseLanguage,
   sessionHistory,
@@ -52,6 +53,7 @@ import {
 } from '@/types';
 import { personas } from '@/personas';
 import { MEETING_PREP_ID } from '@/personas/meetingPrep';
+import { AUTO_LENS_CANDIDATES } from '@/personas/auto';
 
 type ModelTestStatus = { state: 'idle' | 'running' | 'ok' | 'fail'; message: string };
 const IDLE_TEST: ModelTestStatus = { state: 'idle', message: '' };
@@ -214,6 +216,19 @@ function formatResultText(result: LensResult): string {
       }
       return blocks.join('\n\n');
     }
+    case 'devils-advocate': {
+      const c = result.claims[0];
+      if (!c) return '';
+      return `Counter: ${c.counterpoint}\n\n${c.rationale}`;
+    }
+    case 'key-questions': {
+      return result.claims.map((c, i) => `Q${i + 1}: ${c.question}\n${c.context}`).join('\n\n');
+    }
+    case 'sentiment': {
+      const c = result.claims[0];
+      if (!c) return '';
+      return `${c.tone}\n\n${c.explanation}`;
+    }
   }
 }
 
@@ -291,6 +306,23 @@ export const SettingsView: Component = () => {
   const [prepStatus, setPrepStatus] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [prepError, setPrepError] = createSignal('');
   const [prepExpanded, setPrepExpanded] = createSignal(false);
+  const [autoConfigExpanded, setAutoConfigExpanded] = createSignal(false);
+  const autoEnabledCount = createMemo(() =>
+    AUTO_LENS_CANDIDATES.filter((id) => !settings().autoDisabledLenses.includes(id)).length,
+  );
+  const autoLensItems = createMemo(() =>
+    AUTO_LENS_CANDIDATES.map((id) => {
+      const p = personas().find((x) => x.id === id);
+      return { id, name: p?.name ?? id };
+    }),
+  );
+  const toggleAutoLens = async (id: string): Promise<void> => {
+    const current = settings().autoDisabledLenses;
+    const next = current.includes(id)
+      ? current.filter((x) => x !== id)
+      : [...current, id];
+    await saveAutoDisabledLenses(getSetLs(), next);
+  };
   const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
   // Per-model test status. The Auto-classifier slot is only meaningful when
   // it's distinct from the main model (otherwise we'd double-probe the same
@@ -313,6 +345,10 @@ export const SettingsView: Component = () => {
     setAutoTest(IDLE_TEST);
     setKeyError(null);
     setSaveState('idle');
+    // Drop any "ok" / "fail" badge from a prior Refresh — it no longer
+    // describes the current key/host once the user has edited either.
+    setGeminiFetchState('idle');
+    setOpenaiFetchState('idle');
   };
   const anyTestRunning = (): boolean =>
     mainTest().state === 'running' || autoTest().state === 'running';
@@ -371,94 +407,69 @@ export const SettingsView: Component = () => {
     } else {
       setOpenaiModels([]);
     }
+    // Reset both fetch states so the next dropdown focus re-arms refresh on
+    // the new provider/host — a stale "ok" badge from the previous host
+    // would otherwise gate the lazy refetch on the new one.
+    setGeminiFetchState('idle');
+    setOpenaiFetchState('idle');
     // A key-shape error from a previous host doesn't apply to the new one —
     // clear it so the user isn't looking at a red field after switching.
     setKeyError(null);
   }, { defer: true }));
 
-  createEffect(() => {
-    const provider = draftProvider();
-    const key = draftKey();
-    if (provider !== 'gemini') {
-      setModelsLoading(false);
-      setGeminiFetchState('idle');
-      return;
-    }
-    if (key.trim().length < 10) {
-      setModelsLoading(false);
-      setGeminiFetchState('idle');
-      return;
-    }
-    // Flip loading on immediately so the model dropdown stays disabled across
-    // the debounce window (otherwise it briefly re-enables between key-entry
-    // and the actual fetch start).
+  // Model-list fetches are user-initiated and lazy: the dropdown's onFocus
+  // wires into these refresh functions, but each one is guarded so it only
+  // hits the network when the cached list is empty (length ≤ 1 for Gemini,
+  // == 0 for OpenAI). The provider/host-change effect above resets the lists
+  // so a host switch naturally re-arms the next focus. Pre-0.9.0 a debounced
+  // effect fired the /models endpoint on every keystroke; the store-review
+  // network monitor flagged the resulting 403s from typo'd or stale keys.
+
+  function refreshGeminiModels(): void {
+    if (modelsLoading() || draftKey().trim().length < 10) return;
+    // Already populated — `availableModels` carries the saved model alone
+    // before a fetch, and length > 1 means a fetched list is cached.
+    if (availableModels().length > 1) return;
+    const ac = new AbortController();
     setModelsLoading(true);
     setGeminiFetchState('loading');
-    const ac = new AbortController();
-    const debounce = setTimeout(() => {
-      void import('@/llm/gemini').then(({ fetchAvailableModels }) =>
-        fetchAvailableModels(key, ac.signal)
-          .then((models) => {
-            if (ac.signal.aborted) return;
-            if (models.length > 0) {
-              setAvailableModels(models);
-              setGeminiFetchState('ok');
-            } else {
-              setGeminiFetchState('fail');
-            }
-          })
-          .catch(() => { if (!ac.signal.aborted) setGeminiFetchState('fail'); })
-          .finally(() => { if (!ac.signal.aborted) setModelsLoading(false); }),
-      );
-    }, 300);
-    onCleanup(() => {
-      clearTimeout(debounce);
-      ac.abort();
-    });
-  });
+    void import('@/llm/gemini').then(({ fetchAvailableModels }) =>
+      fetchAvailableModels(draftKey(), ac.signal)
+        .then((models) => {
+          if (ac.signal.aborted) return;
+          if (models.length > 0) {
+            setAvailableModels(models);
+            setGeminiFetchState('ok');
+          } else {
+            setGeminiFetchState('fail');
+          }
+        })
+        .catch(() => { if (!ac.signal.aborted) setGeminiFetchState('fail'); })
+        .finally(() => { if (!ac.signal.aborted) setModelsLoading(false); }),
+    );
+  }
 
-  // Mirror of the Gemini models effect, but for the OpenAI-compatible provider.
-  // Refetches whenever the key OR the base URL changes — different hosts under
-  // the same OpenAI API expose different model catalogs, so a URL switch must
-  // invalidate the cached list.
-  createEffect(() => {
-    const provider = draftProvider();
-    const key = draftOpenaiKey();
-    const baseUrl = draftOpenaiBaseUrl();
-    if (provider !== 'openai-compatible') {
-      setOpenaiModelsLoading(false);
-      setOpenaiFetchState('idle');
-      return;
-    }
-    if (key.trim().length < 10) {
-      setOpenaiModelsLoading(false);
-      setOpenaiFetchState('idle');
-      return;
-    }
+  function refreshOpenAiModels(): void {
+    if (openaiModelsLoading() || draftOpenaiKey().trim().length < 10) return;
+    if (openaiModels().length > 0) return;
+    const ac = new AbortController();
     setOpenaiModelsLoading(true);
     setOpenaiFetchState('loading');
-    const ac = new AbortController();
-    const debounce = setTimeout(() => {
-      void import('@/llm/openai').then(({ fetchOpenAiModels }) =>
-        fetchOpenAiModels(key, baseUrl, ac.signal)
-          .then((models) => {
-            if (ac.signal.aborted) return;
-            if (models.length > 0) {
-              setOpenaiModels(models);
-              setOpenaiFetchState('ok');
-            } else {
-              setOpenaiFetchState('fail');
-            }
-          })
-          .catch(() => { if (!ac.signal.aborted) setOpenaiFetchState('fail'); })
-          .finally(() => { if (!ac.signal.aborted) setOpenaiModelsLoading(false); }),
-      );
-    }, 300);
-    onCleanup(() => {
-      clearTimeout(debounce);
-      ac.abort();
-    });
-  });
+    void import('@/llm/openai').then(({ fetchOpenAiModels }) =>
+      fetchOpenAiModels(draftOpenaiKey(), draftOpenaiBaseUrl(), ac.signal)
+        .then((models) => {
+          if (ac.signal.aborted) return;
+          if (models.length > 0) {
+            setOpenaiModels(models);
+            setOpenaiFetchState('ok');
+          } else {
+            setOpenaiFetchState('fail');
+          }
+        })
+        .catch(() => { if (!ac.signal.aborted) setOpenaiFetchState('fail'); })
+        .finally(() => { if (!ac.signal.aborted) setOpenaiModelsLoading(false); }),
+    );
+  }
 
   /**
    * Gate Save on a verifiable configuration:
@@ -949,169 +960,229 @@ export const SettingsView: Component = () => {
             <ul class="lens-list">
               <For each={personas()}>
                 {(p) => (
-                  <Show
-                    when={p.id === MEETING_PREP_ID}
-                    fallback={(
+                  <Switch
+                    fallback={
                       <li class="lens-row">
                         <div class="lens-info">
                           <strong>{p.name}</strong>
                           <span class="lens-desc">{p.description}</span>
                         </div>
                       </li>
-                    )}
+                    }
                   >
-                    <li
-                      class="lens-row lens-row--expandable"
-                      classList={{ 'lens-row--open': prepExpanded() }}
-                    >
-                      <div class="lens-row-head">
-                        {/* Row 1 — title left, badge right. Full row width so
-                            the badge actually reaches the row's right edge. */}
-                        <div class="lens-row-title">
-                          <strong>{p.name}</strong>
-                          <span
-                            class="lens-tag"
-                            classList={{
-                              'lens-tag--empty': !prepConfigured(),
-                              'lens-tag--ok': prepConfigured(),
-                            }}
-                          >
-                            {prepBadgeText()}
-                          </span>
-                        </div>
-                        {/* Row 2 — description left, toggle right. */}
-                        <div class="lens-row-sub">
-                          <span class="lens-desc">{p.description}</span>
-                          <button
-                            type="button"
-                            class="meeting-prep-trigger"
-                            classList={{ open: prepExpanded() }}
-                            aria-expanded={prepExpanded()}
-                            onClick={() => setPrepExpanded((v) => !v)}
-                          >
-                            <span>{prepExpanded() ? 'Done' : 'Configure'}</span>
-                            <svg
-                              class="meeting-prep-chevron"
-                              viewBox="0 0 10 6"
-                              width="10"
-                              height="6"
-                              aria-hidden="true"
+                    <Match when={p.id === 'auto'}>
+                      <li
+                        class="lens-row lens-row--expandable"
+                        classList={{ 'lens-row--open': autoConfigExpanded() }}
+                      >
+                        <div class="lens-row-head">
+                          <div class="lens-row-title">
+                            <strong>{p.name}</strong>
+                            <span class="lens-tag lens-tag--ok">
+                              {autoEnabledCount()} / {AUTO_LENS_CANDIDATES.length}
+                            </span>
+                          </div>
+                          <div class="lens-row-sub">
+                            <span class="lens-desc">{p.description}</span>
+                            <button
+                              type="button"
+                              class="meeting-prep-trigger"
+                              classList={{ open: autoConfigExpanded() }}
+                              aria-expanded={autoConfigExpanded()}
+                              onClick={() => setAutoConfigExpanded((v) => !v)}
                             >
-                              <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-                            </svg>
-                          </button>
-                        </div>
-                      </div>
-                      <Show when={prepExpanded()}>
-                        <div class="meeting-prep-inline">
-                          <p class="field-hint">
-                            Lead with your <strong class="meeting-prep-hint-strong">goal</strong> in one sentence,
-                            then the background that matters — who you are, who you're meeting, key numbers.
-                            <strong class="meeting-prep-hint-strong">Attachments</strong> are labeled chunks
-                            (contracts, prepared questions, source documents) the assistant can cite.
-                          </p>
-                          <ul class="meeting-prep-list">
-                            {/* General context — fixed first slot, no label,
-                                cannot be removed (only cleared). */}
-                            <li class="meeting-prep-row meeting-prep-row--general">
-                              <div class="meeting-prep-row-head">
-                                <span class="meeting-prep-row-tag">General context</span>
-                                <button
-                                  type="button"
-                                  class="meeting-prep-remove"
-                                  onClick={clearGeneral}
-                                  disabled={!prepGeneralSet()}
-                                  aria-label="Clear general context"
-                                  title="Clear"
-                                >
-                                  <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-                                    <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-                                  </svg>
-                                </button>
-                              </div>
-                              <textarea
-                                class="meeting-prep-body"
-                                placeholder={`e.g.\nNegotiate my mortgage rate below 4.2%.\n\nI'm the borrower; meeting with my bank's relationship manager. Current rate 4.8% fixed, 25y term started 2023. No prepayment penalty in original contract.`}
-                                rows={6}
-                                value={prepDraft()[0]?.body ?? ''}
-                                onInput={(e) => updateGeneralBody(e.currentTarget.value)}
-                              />
-                            </li>
-                            {/* Attachments — Index keys by position so the
-                                input/textarea DOM nodes stay mounted while
-                                typing (avoids the focus-loss caused by
-                                rebuilding the row on every keystroke). */}
-                            <Index each={prepAttachments()}>
-                              {(attachment) => (
-                                <li class="meeting-prep-row meeting-prep-row--attachment">
-                                  <div class="meeting-prep-row-head">
-                                    <input
-                                      type="text"
-                                      class="meeting-prep-label"
-                                      placeholder="Attachment label (e.g. Bank contract)"
-                                      maxLength={MEETING_PREP_LABEL_MAX}
-                                      value={attachment().label}
-                                      onInput={(e) => updateAttachment(attachment().id, { label: e.currentTarget.value })}
-                                    />
-                                    <button
-                                      type="button"
-                                      class="meeting-prep-remove"
-                                      onClick={() => removeAttachment(attachment().id)}
-                                      aria-label="Remove attachment"
-                                      title="Remove attachment"
-                                    >
-                                      <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
-                                        <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-                                      </svg>
-                                    </button>
-                                  </div>
-                                  <textarea
-                                    class="meeting-prep-body"
-                                    placeholder="Paste contract text, quote, clause, document excerpt…"
-                                    rows={5}
-                                    value={attachment().body}
-                                    onInput={(e) => updateAttachment(attachment().id, { body: e.currentTarget.value })}
-                                  />
-                                </li>
-                              )}
-                            </Index>
-                          </ul>
-                          <div class="meeting-prep-actions">
-                            <button type="button" class="meeting-prep-add" onClick={addAttachment}>
-                              <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
-                                <path d="M6 1.5v9M1.5 6h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                              <span>{autoConfigExpanded() ? 'Done' : 'Configure'}</span>
+                              <svg
+                                class="meeting-prep-chevron"
+                                viewBox="0 0 10 6"
+                                width="10"
+                                height="6"
+                                aria-hidden="true"
+                              >
+                                <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
                               </svg>
-                              <span>Add attachment</span>
                             </button>
-                            <div
-                              class="meeting-prep-meter"
-                              classList={{
-                                'meeting-prep-meter--warn': prepUsedBytes() / MEETING_PREP_BYTE_BUDGET >= 0.8 && prepUsedBytes() < MEETING_PREP_BYTE_BUDGET,
-                                'meeting-prep-meter--over': prepUsedBytes() >= MEETING_PREP_BYTE_BUDGET,
-                              }}
-                            >
-                              <div
-                                class="meeting-prep-meter-bar"
-                                style={{ '--fill': `${Math.min(100, Math.round((prepUsedBytes() / MEETING_PREP_BYTE_BUDGET) * 100))}%` }}
-                              />
-                              <span class="meeting-prep-meter-label">
-                                {Math.round(prepUsedBytes() / 1024)} / {Math.round(MEETING_PREP_BYTE_BUDGET / 1024)} KB
-                              </span>
-                            </div>
-                            <Show when={prepStatus() === 'saving'}>
-                              <span class="status">Saving…</span>
-                            </Show>
-                            <Show when={prepStatus() === 'saved'}>
-                              <span class="status ok">Saved</span>
-                            </Show>
-                            <Show when={prepStatus() === 'error'}>
-                              <span class="status err">{prepError() || 'Could not save'}</span>
-                            </Show>
                           </div>
                         </div>
-                      </Show>
-                    </li>
-                  </Show>
+                        <Show when={autoConfigExpanded()}>
+                          <div class="meeting-prep-inline">
+                            <p class="field-hint">
+                              Toggle which lenses Auto mode can choose from.
+                            </p>
+                            <ul class="meeting-prep-list">
+                              <For each={autoLensItems()}>
+                                {(item) => (
+                                  <li class="lens-row" style="padding: 6px 0;">
+                                    <label class="toggle-row">
+                                      <input
+                                        type="checkbox"
+                                        checked={!settings().autoDisabledLenses.includes(item.id)}
+                                        onChange={() => void toggleAutoLens(item.id)}
+                                      />
+                                      <span>{item.name}</span>
+                                    </label>
+                                  </li>
+                                )}
+                              </For>
+                            </ul>
+                          </div>
+                        </Show>
+                      </li>
+                    </Match>
+                    <Match when={p.id === MEETING_PREP_ID}>
+                      <li
+                        class="lens-row lens-row--expandable"
+                        classList={{ 'lens-row--open': prepExpanded() }}
+                      >
+                        <div class="lens-row-head">
+                          {/* Row 1 — title left, badge right. Full row width so
+                              the badge actually reaches the row's right edge. */}
+                          <div class="lens-row-title">
+                            <strong>{p.name}</strong>
+                            <span
+                              class="lens-tag"
+                              classList={{
+                                'lens-tag--empty': !prepConfigured(),
+                                'lens-tag--ok': prepConfigured(),
+                              }}
+                            >
+                              {prepBadgeText()}
+                            </span>
+                          </div>
+                          {/* Row 2 — description left, toggle right. */}
+                          <div class="lens-row-sub">
+                            <span class="lens-desc">{p.description}</span>
+                            <button
+                              type="button"
+                              class="meeting-prep-trigger"
+                              classList={{ open: prepExpanded() }}
+                              aria-expanded={prepExpanded()}
+                              onClick={() => setPrepExpanded((v) => !v)}
+                            >
+                              <span>{prepExpanded() ? 'Done' : 'Configure'}</span>
+                              <svg
+                                class="meeting-prep-chevron"
+                                viewBox="0 0 10 6"
+                                width="10"
+                                height="6"
+                                aria-hidden="true"
+                              >
+                                <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                        <Show when={prepExpanded()}>
+                          <div class="meeting-prep-inline">
+                            <p class="field-hint">
+                              Lead with your <strong class="meeting-prep-hint-strong">goal</strong> in one sentence,
+                              then the background that matters — who you are, who you're meeting, key numbers.
+                              <strong class="meeting-prep-hint-strong">Attachments</strong> are labeled chunks
+                              (contracts, prepared questions, source documents) the assistant can cite.
+                            </p>
+                            <ul class="meeting-prep-list">
+                              {/* General context — fixed first slot, no label,
+                                  cannot be removed (only cleared). */}
+                              <li class="meeting-prep-row meeting-prep-row--general">
+                                <div class="meeting-prep-row-head">
+                                  <span class="meeting-prep-row-tag">General context</span>
+                                  <button
+                                    type="button"
+                                    class="meeting-prep-remove"
+                                    onClick={clearGeneral}
+                                    disabled={!prepGeneralSet()}
+                                    aria-label="Clear general context"
+                                    title="Clear"
+                                  >
+                                    <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                      <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                    </svg>
+                                  </button>
+                                </div>
+                                <textarea
+                                  class="meeting-prep-body"
+                                  placeholder={`e.g.\nNegotiate my mortgage rate below 4.2%.\n\nI'm the borrower; meeting with my bank's relationship manager. Current rate 4.8% fixed, 25y term started 2023. No prepayment penalty in original contract.`}
+                                  rows={6}
+                                  value={prepDraft()[0]?.body ?? ''}
+                                  onInput={(e) => updateGeneralBody(e.currentTarget.value)}
+                                />
+                              </li>
+                              {/* Attachments — Index keys by position so the
+                                  input/textarea DOM nodes stay mounted while
+                                  typing (avoids the focus-loss caused by
+                                  rebuilding the row on every keystroke). */}
+                              <Index each={prepAttachments()}>
+                                {(attachment) => (
+                                  <li class="meeting-prep-row meeting-prep-row--attachment">
+                                    <div class="meeting-prep-row-head">
+                                      <input
+                                        type="text"
+                                        class="meeting-prep-label"
+                                        placeholder="Attachment label (e.g. Bank contract)"
+                                        maxLength={MEETING_PREP_LABEL_MAX}
+                                        value={attachment().label}
+                                        onInput={(e) => updateAttachment(attachment().id, { label: e.currentTarget.value })}
+                                      />
+                                      <button
+                                        type="button"
+                                        class="meeting-prep-remove"
+                                        onClick={() => removeAttachment(attachment().id)}
+                                        aria-label="Remove attachment"
+                                        title="Remove attachment"
+                                      >
+                                        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                                          <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                        </svg>
+                                      </button>
+                                    </div>
+                                    <textarea
+                                      class="meeting-prep-body"
+                                      placeholder="Paste contract text, quote, clause, document excerpt…"
+                                      rows={5}
+                                      value={attachment().body}
+                                      onInput={(e) => updateAttachment(attachment().id, { body: e.currentTarget.value })}
+                                    />
+                                  </li>
+                                )}
+                              </Index>
+                            </ul>
+                            <div class="meeting-prep-actions">
+                              <button type="button" class="meeting-prep-add" onClick={addAttachment}>
+                                <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+                                  <path d="M6 1.5v9M1.5 6h9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
+                                </svg>
+                                <span>Add attachment</span>
+                              </button>
+                              <div
+                                class="meeting-prep-meter"
+                                classList={{
+                                  'meeting-prep-meter--warn': prepUsedBytes() / MEETING_PREP_BYTE_BUDGET >= 0.8 && prepUsedBytes() < MEETING_PREP_BYTE_BUDGET,
+                                  'meeting-prep-meter--over': prepUsedBytes() >= MEETING_PREP_BYTE_BUDGET,
+                                }}
+                              >
+                                <div
+                                  class="meeting-prep-meter-bar"
+                                  style={{ '--fill': `${Math.min(100, Math.round((prepUsedBytes() / MEETING_PREP_BYTE_BUDGET) * 100))}%` }}
+                                />
+                                <span class="meeting-prep-meter-label">
+                                  {Math.round(prepUsedBytes() / 1024)} / {Math.round(MEETING_PREP_BYTE_BUDGET / 1024)} KB
+                                </span>
+                              </div>
+                              <Show when={prepStatus() === 'saving'}>
+                                <span class="status">Saving…</span>
+                              </Show>
+                              <Show when={prepStatus() === 'saved'}>
+                                <span class="status ok">Saved</span>
+                              </Show>
+                              <Show when={prepStatus() === 'error'}>
+                                <span class="status err">{prepError() || 'Could not save'}</span>
+                              </Show>
+                            </div>
+                          </div>
+                        </Show>
+                      </li>
+                    </Match>
+                  </Switch>
                 )}
               </For>
             </ul>
@@ -1180,7 +1251,8 @@ export const SettingsView: Component = () => {
                 </span>
                 <select
                   value={draftModel()}
-                  disabled={draftKey().trim().length < 10 || modelsLoading()}
+                  disabled={draftKey().trim().length < 10}
+                  onFocus={refreshGeminiModels}
                   onChange={(e) => { setDraftModel(e.currentTarget.value as GeminiModel); clearStatuses(); }}
                 >
                   <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
@@ -1276,7 +1348,8 @@ export const SettingsView: Component = () => {
                 </span>
                 <select
                   value={draftOpenaiModel()}
-                  disabled={draftOpenaiKey().trim().length < 10 || openaiModelsLoading() || openaiModels().length === 0}
+                  disabled={draftOpenaiKey().trim().length < 10}
+                  onFocus={refreshOpenAiModels}
                   onChange={(e) => { setDraftOpenaiModel(e.currentTarget.value); clearStatuses(); }}
                 >
                   {/*
@@ -1284,7 +1357,10 @@ export const SettingsView: Component = () => {
                     option is whatever's persisted; once the live list arrives
                     we union it with the saved model so a model that's no longer
                     served (or one we couldn't fetch yet) is still selectable
-                    until the user picks a fresh one.
+                    until the user picks a fresh one. Picker is NOT disabled
+                    while loading — that would close the just-opened native
+                    picker on the focus-triggered refetch. User reopens after
+                    fetch lands to see the live list.
                   */}
                   <For each={openaiModelOptions(draftOpenaiModel(), openaiModels())}>
                     {(m) => <option value={m}>{m}</option>}

@@ -138,17 +138,20 @@ export default defineConfig(({ command }) => ({
   build: {
     target: 'es2022',
     sourcemap: false,
-    minify: 'esbuild',
     cssCodeSplit: false,
-  },
-  esbuild: {
-    // Drop console / debugger only in production builds. Scoping by
-    // `command` keeps the dev-server transform leaving `console.*` intact,
-    // which is critical for the `import.meta.env.DEV`-gated diagnostic
-    // logs (the gating already dead-code-eliminates them in prod, but the
-    // `drop` is kept as defense in depth).
-    drop: command === 'build' ? ['console', 'debugger'] : [],
-    legalComments: 'none',
+    // Drop console/debugger in production via OXC minifier (Vite 8 default).
+    // rolldownOptions.output only applies during `vite build`, not the dev
+    // server, so no command guard is needed.
+    rolldownOptions: {
+      output: {
+        minify: {
+          compress: {
+            dropConsole: true,
+            dropDebugger: true,
+          },
+        },
+      },
+    },
   },
   // vad-web is a CommonJS-only package (no `module`/`exports` map), so it
   // MUST be pre-bundled by Vite to get CJS→ESM interop. ORT-web, on the

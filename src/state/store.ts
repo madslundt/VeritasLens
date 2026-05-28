@@ -56,6 +56,7 @@ const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
 const SETTINGS_KEY_VOICE_GATE_LEGACY = 'veritaslens.voiceGateEnabled';
 const SETTINGS_KEY_VOICE_TRIM = 'veritaslens.voiceTrimEnabled';
+const SETTINGS_KEY_AUTO_DISABLED_LENSES = 'veritaslens.autoDisabledLenses';
 /** Default RMS floor when neither the new nor legacy key is set. */
 const DEFAULT_VOICE_GATE_RMS_FLOOR = 200;
 /** Slider granularity exposed in the Settings UI. */
@@ -121,6 +122,7 @@ const [settings, setSettings] = createSignal<Settings>({
   // VAD-based payload trimming defaults ON: shrinks the WAV to just the
   // detected speech, cutting upload + ingest time on sparse buffers.
   voiceTrimEnabled: true,
+  autoDisabledLenses: [],
 });
 export { settings };
 
@@ -152,6 +154,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_VOICE_GATE_RMS),
       safeGet(SETTINGS_KEY_VOICE_GATE_LEGACY),
       safeGet(SETTINGS_KEY_VOICE_TRIM),
+      safeGet(SETTINGS_KEY_AUTO_DISABLED_LENSES),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -171,6 +174,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawVoiceGateRms,
     rawVoiceGateLegacy,
     rawVoiceTrim,
+    rawAutoDisabledLenses,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -204,6 +208,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
+    autoDisabledLenses: coerceAutoDisabledLenses(rawAutoDisabledLenses),
   });
 }
 
@@ -301,6 +306,12 @@ export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promis
 export const saveVoiceTrimEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_VOICE_TRIM, 'voiceTrimEnabled', enabled);
 
+export async function saveAutoDisabledLenses(setLs: SetLs, ids: string[]): Promise<boolean> {
+  const ok = await setLs(SETTINGS_KEY_AUTO_DISABLED_LENSES, JSON.stringify(ids));
+  if (ok) setSettings({ ...settings(), autoDisabledLenses: ids });
+  return ok;
+}
+
 export const saveDiscreet = (setLs: SetLs, discreet: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_DISCREET, 'discreet', discreet);
 
@@ -384,6 +395,12 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
     }
     case 'meeting-prep':
       // No legacy shape exists for meeting-prep; require the claims array.
+      if (!Array.isArray(r['claims'])) return null;
+      migratedResult = r;
+      break;
+    case 'devils-advocate':
+    case 'key-questions':
+    case 'sentiment':
       if (!Array.isArray(r['claims'])) return null;
       migratedResult = r;
       break;
@@ -544,6 +561,15 @@ function coerceOpenaiBaseUrl(raw: string | null | undefined): OpenAiBaseUrl {
     return raw as OpenAiBaseUrl;
   }
   return DEFAULT_OPENAI_BASE_URL;
+}
+
+function coerceAutoDisabledLenses(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw || '[]');
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 // ---------- Meeting Prep context ----------
