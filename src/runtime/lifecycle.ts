@@ -7,6 +7,8 @@ import {
   ACTIVE_HINT_ANALYZING,
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
+  clearMenuSpinnerFrame,
+  clearStatusFrame,
   currentHudPage,
   flashActiveHint,
   flashPickerHint,
@@ -633,41 +635,80 @@ async function leaveActiveSession(): Promise<void> {
 }
 
 const SPINNER_FRAMES = ['|', '/', '-', '\\'];
-let spinnerTimer: ReturnType<typeof setInterval> | null = null;
+const SPINNER_INTERVAL_MS = 200;
+let spinnerTimer: ReturnType<typeof setTimeout> | null = null;
 let spinnerPrefix = '';
 // Generation counter bumped by stopSpinner so a tick callback already
-// mid-flight when clearInterval lands discards its async setStatus /
+// mid-flight when the timer is cleared discards its async setStatus /
 // setMenuSpinner writes instead of overwriting the post-stop "displaying"
 // status. Without this guard a single straggler tick can briefly revert the
 // verdict back to a spinner frame.
 let spinnerGen = 0;
+
+function statusFrameContent(frame: string): string {
+  return spinnerPrefix ? `${spinnerPrefix}${frame}` : ` ${frame}  `;
+}
 
 function startSpinner(): void {
   if (spinnerTimer) return;
   let i = 0;
   const gen = spinnerGen;
   // Push an initial frame immediately so the menu/status slot doesn't stay
-  // blank for up to one tick after analysis begins.
-  void setStatus(spinnerPrefix ? `${spinnerPrefix}${SPINNER_FRAMES[i]}` : ` ${SPINNER_FRAMES[i]}  `);
-  void setMenuSpinner(SPINNER_FRAMES[i]!);
-  spinnerTimer = setInterval(() => {
+  // blank for up to one tick after analysis begins. Update both canonical
+  // buffers in lock-step (cheap module-level assignments, no SDK call), but
+  // only push to the SDK for the slot that is currently visible. This halves
+  // bridge throughput in steady state and keeps the unseen slot seeded for
+  // when the user navigates to it mid-analysis.
+  const dispatchFrame = async (frame: string): Promise<void> => {
+    const page = currentHudPage();
+    if (page === 'active') {
+      await setStatus(statusFrameContent(frame));
+      // Seed menuSpinner buffer without an SDK round trip.
+      void setMenuSpinner(frame);
+    } else if (page === 'menu') {
+      await setMenuSpinner(frame);
+      // Seed status buffer without an SDK round trip.
+      void setStatus(statusFrameContent(frame));
+    } else {
+      // No visible spinner slot — just seed both buffers for later rebuilds.
+      void setStatus(statusFrameContent(frame));
+      void setMenuSpinner(frame);
+    }
+  };
+
+  const tick = async (): Promise<void> => {
     if (gen !== spinnerGen) return; // stale tick after stopSpinner
-    i = (i + 1) % SPINNER_FRAMES.length;
-    const frame = SPINNER_FRAMES[i];
-    void setStatus(spinnerPrefix ? `${spinnerPrefix}${frame}` : ` ${frame}  `);
-    void setMenuSpinner(frame!);
-  }, 180);
+    const frame = SPINNER_FRAMES[i]!;
+    try {
+      await dispatchFrame(frame);
+    } finally {
+      if (gen === spinnerGen) {
+        i = (i + 1) % SPINNER_FRAMES.length;
+        // Self-reschedule only after the SDK write resolves — caps cadence to
+        // what the bridge can actually deliver and prevents the setInterval
+        // catch-up burst that produced the jittery "freeze, then rush" motion.
+        spinnerTimer = setTimeout(() => { void tick(); }, SPINNER_INTERVAL_MS);
+      }
+    }
+  };
+
+  // Mark the timer as running before the first await so a reentrant startSpinner
+  // call (e.g. from onRetry) is a no-op while the first frame is in flight.
+  spinnerTimer = setTimeout(() => { void tick(); }, 0);
 }
 
 function stopSpinner(): void {
-  if (spinnerTimer) clearInterval(spinnerTimer);
+  if (spinnerTimer) clearTimeout(spinnerTimer);
   spinnerTimer = null;
   spinnerPrefix = '';
   spinnerGen++;
+  // Sync reset of the canonical buffers so any page rebuild that races the
+  // async clear writes below (notably setLensResult → renderActivePage on the
+  // success path) cannot bake a stale spinner glyph into the freshly built
+  // status container.
+  clearStatusFrame();
+  clearMenuSpinnerFrame();
   void setMenuSpinner('');
-  // Clear the corner status frame synchronously so a subsequent page rebuild
-  // (e.g. baseline → discreet-result inside setLensResult) doesn't bake the
-  // last spinner glyph back into the freshly-built status container.
   void setStatus('listening');
 }
 

@@ -670,6 +670,16 @@ export async function setMenuSpinner(content: string): Promise<void> {
   await upgradeText(CONTAINER.menuSpinner, NAME.menuSpinner, content);
 }
 
+/**
+ * Synchronously clear the canonical status / menu-spinner buffers. Used by
+ * stopSpinner so the next page rebuild (e.g. setLensResult → renderActivePage)
+ * cannot bake a stale spinner glyph into a freshly built status container
+ * while the async setStatus('listening') / setMenuSpinner('') writes are
+ * still in flight.
+ */
+export function clearStatusFrame(): void { pendingStatusFrame = ''; }
+export function clearMenuSpinnerFrame(): void { pendingMenuSpinnerFrame = ''; }
+
 let pickerHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
