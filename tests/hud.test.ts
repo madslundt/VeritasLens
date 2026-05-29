@@ -56,7 +56,6 @@ import {
   _resetHudBootstrapForTesting,
   bootstrapHud,
   currentHudPage,
-  getMidSummaryPageCount,
   hasPendingActiveResult,
   isActiveHidden,
   markActiveHidden,
@@ -66,7 +65,6 @@ import {
   resetHudSessionState,
   scrollActiveReason,
   scrollHistoryDetail,
-  scrollMidSummaryPage,
   setActiveLayout,
   setLensResult,
   setMenuSpinner,
@@ -370,7 +368,7 @@ describe('discreet mode', () => {
     expect(findText(payload, 'vl-clock')).toBeUndefined();
   });
 
-  it('discreet-minimal layout has a single top-right slot showing the rec dot + event sink', async () => {
+  it('discreet-minimal layout has a single empty top-right slot + event sink (no rec dot; the LVGL caret is the indicator)', async () => {
     await saveDiscreet(fakeSetLs, true);
     setActiveLayout('discreet-minimal');
     await bootstrapHud('picker');
@@ -379,10 +377,10 @@ describe('discreet mode', () => {
     const payload = lastRebuildPayload();
     // Discreet now uses a text-container event sink (same as baseline) so
     // both swipe and tap fire reliably on hardware; that adds one text
-    // container alongside the status/dot, and the listObject is empty.
+    // container alongside the status slot, and the listObject is empty.
     expect(payload.textObject).toHaveLength(2);
     expect(payload.listObject).toHaveLength(0);
-    expect(findText(payload, 'vl-status')?.content).toBe('•');
+    expect(findText(payload, 'vl-status')?.content).toBe('');
     expect(findText(payload, 'vl-clock')).toBeUndefined();
     expect(findText(payload, 'vl-rec')).toBeUndefined();
     expect(findText(payload, 'vl-act-hint')).toBeUndefined();
@@ -442,7 +440,7 @@ describe('discreet mode', () => {
     expect(calls[0]![0].payload.content).toBe('...');
   });
 
-  it('setLensResult(null) in discreet-minimal stays on dot-only (no upgrades, no rebuild)', async () => {
+  it('setLensResult(null) in discreet-minimal stays on the empty idle slot (no upgrades, no rebuild)', async () => {
     setActiveLayout('discreet-minimal');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
@@ -483,9 +481,9 @@ describe('discreet mode', () => {
     await setLensResult(null);
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
     const payload = lastRebuildPayload();
-    expect(findText(payload, 'vl-status')?.content).toBe('•');
+    expect(findText(payload, 'vl-status')?.content).toBe('');
     expect(findText(payload, 'vl-claim')).toBeUndefined();
-    // Demotion path skips the text upgrades — the dot-only layout has no
+    // Demotion path skips the text upgrades — the discreet idle layout has no
     // claim/verdict/reason containers to write into.
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
@@ -1898,7 +1896,7 @@ describe('showMidSummaryPage', () => {
   it('transitions to mid-summary page', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
-    await showMidSummaryPage(true, null, 0);
+    await showMidSummaryPage(true, null);
     expect(currentHudPage()).toBe('mid-summary');
   });
 
@@ -1906,7 +1904,7 @@ describe('showMidSummaryPage', () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     bridge.rebuildPageContainer.mockClear();
-    await showMidSummaryPage(true, null, 0);
+    await showMidSummaryPage(true, null);
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     expect(getBodyContent(calls)).toBe('Generating summary...');
   });
@@ -1915,7 +1913,7 @@ describe('showMidSummaryPage', () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     bridge.rebuildPageContainer.mockClear();
-    await showMidSummaryPage(false, null, 0);
+    await showMidSummaryPage(false, null);
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     expect(getBodyContent(calls)).toBe('Nothing to summarize yet');
   });
@@ -1931,7 +1929,7 @@ describe('showMidSummaryPage', () => {
       topics: ['budget', 'timeline'],
       keyPoints: ['Q3 over budget', 'Deadline extended'],
     };
-    await showMidSummaryPage(false, result, 0);
+    await showMidSummaryPage(false, result);
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     const body = getBodyContent(calls)!;
     expect(body).toContain('Meeting Recap');
@@ -1950,24 +1948,36 @@ describe('showMidSummaryPage', () => {
       topics: [],
       keyPoints: [],
     };
-    await showMidSummaryPage(true, result, 0);
+    await showMidSummaryPage(true, result);
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     const body = getBodyContent(calls)!;
     expect(body).toContain('Refreshing…');
     expect(body).toContain('Old Summary');
   });
 
-  it('getMidSummaryPageCount returns 1 for short content', async () => {
+  it('showMidSummaryPage hands the full body to the firmware-scrolled body container', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     const result: Extract<LensResult, { type: 'session-summary' }> = {
-      type: 'session-summary', title: 'T', summary: 'short', topics: [], keyPoints: [],
+      type: 'session-summary',
+      title: 'Title',
+      summary: 'concise body',
+      topics: [],
+      keyPoints: ['kp one', 'kp two'],
     };
-    await showMidSummaryPage(false, result, 0);
-    expect(getMidSummaryPageCount()).toBe(1);
+    bridge.rebuildPageContainer.mockClear();
+    await showMidSummaryPage(false, result);
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    const body = getBodyContent(calls)!;
+    // No app-side line slicing or page indicator — the firmware scrolls the
+    // full composed body inside the body container.
+    expect(body).toContain('Title');
+    expect(body).toContain('concise body');
+    expect(body).toContain('kp one');
+    expect(body).toContain('kp two');
   });
 
-  it('getMidSummaryPageCount returns >1 for long content', async () => {
+  it('caps the rebuild body at 1000 chars so the SDK accepts it', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     const result: Extract<LensResult, { type: 'session-summary' }> = {
@@ -1977,24 +1987,29 @@ describe('showMidSummaryPage', () => {
       topics: [],
       keyPoints: [],
     };
-    await showMidSummaryPage(false, result, 0);
-    expect(getMidSummaryPageCount()).toBeGreaterThan(1);
+    bridge.rebuildPageContainer.mockClear();
+    await showMidSummaryPage(false, result);
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
+    const body = getBodyContent(calls)!;
+    expect(body.length).toBeLessThanOrEqual(1000);
+    expect(body.endsWith('…')).toBe(true);
   });
 
-  it('scrollMidSummaryPage issues a textContainerUpgrade for vl-reason', async () => {
+  it('refreshing the mid-summary in place uses textContainerUpgrade so firmware scroll position is preserved', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
-    const result: Extract<LensResult, { type: 'session-summary' }> = {
-      type: 'session-summary',
-      title: 'L',
-      summary: 'word '.repeat(300),
-      topics: [],
-      keyPoints: [],
+    const first: Extract<LensResult, { type: 'session-summary' }> = {
+      type: 'session-summary', title: 'A', summary: 'first', topics: [], keyPoints: [],
     };
-    await showMidSummaryPage(false, result, 0);
+    await showMidSummaryPage(false, first);
+    const second: Extract<LensResult, { type: 'session-summary' }> = {
+      type: 'session-summary', title: 'B', summary: 'second', topics: [], keyPoints: [],
+    };
+    bridge.rebuildPageContainer.mockClear();
     bridge.textContainerUpgrade.mockClear();
-    await scrollMidSummaryPage(1);
+    await showMidSummaryPage(false, second);
     const upgrades = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string } }]>;
     expect(upgrades.some((c) => c[0].payload.containerName === 'vl-reason')).toBe(true);
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
   });
 });

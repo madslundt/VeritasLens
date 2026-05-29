@@ -181,7 +181,6 @@ let activeHidden = false;
 let latestAnalysisRange: { firstEntry: number; lastEntry: number } | null = null;
 let detailPages: PageRef[] = [];
 let detailPageIndex = 0;
-let midSummaryPageRefs: PageRef[] = [];
 /** Index into cachedHistoryEntries of the entry currently shown on history-detail. */
 let historyDetailIndex = -1;
 // Stash for results that arrive while the user is off the active page (e.g.
@@ -211,11 +210,14 @@ let recordingDotEligible = true;
 
 /** Compute the text that should currently be in the corner status slot for
  *  the active layout. Combines the canonical status frame with the recording
- *  dot fallback used on the listening-state layouts. */
+ *  dot fallback used on the listening-state layouts. Discreet idle deliberately
+ *  shows nothing in the slot — the LVGL label caret already marks the corner —
+ *  so the discreet wearer sees only the blinking caret until the spinner kicks
+ *  in during analysis. */
 function statusDisplayText(): string {
   if (pendingStatusFrame !== '') return pendingStatusFrame;
   if (!recordingDotEligible) return '';
-  return activeLayout === 'discreet-minimal' || activeLayout === 'baseline' ? '•' : '';
+  return activeLayout === 'baseline' ? '•' : '';
 }
 
 let bootstrapped = false;
@@ -398,15 +400,6 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
 
 export async function restoreHistoryListPage(): Promise<void> {
   await showHistoryListPage(cachedHistoryEntries);
-}
-
-export function getMidSummaryPageCount(): number { return midSummaryPageRefs.length; }
-
-export async function scrollMidSummaryPage(pageIndex: number): Promise<void> {
-  if (currentPage !== 'mid-summary') return;
-  const page = midSummaryPageRefs[pageIndex];
-  if (!page) return;
-  await upgradeText(CONTAINER.reason, NAME.reason, page.text);
 }
 
 /** Resume the previously-active persona page after the menu. */
@@ -1589,40 +1582,39 @@ function buildMidSummaryPage(pageText: string): RebuildPageContainer {
   return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
+// SDK content caps from https://hub.evenrealities.com/docs/guides/display.
+const MID_SUMMARY_REBUILD_CAP = 1000;
+const MID_SUMMARY_UPGRADE_CAP = 2000;
+
+function capContent(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max - 1)}…`;
+}
+
+/**
+ * Mid-summary HUD page. The body container has `isEventCapture: 1` so the
+ * firmware handles internal vertical scrolling when the content overflows —
+ * we just hand it the full body string. No app-side line slicing.
+ */
 export async function showMidSummaryPage(
   loading: boolean,
   result: MidSummaryResult | null,
-  pageIndex: number,
 ): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showMidSummaryPage().');
 
-  if (!result) {
-    midSummaryPageRefs = [];
-    const pageText = loading ? 'Generating summary...' : 'Nothing to summarize yet';
-    const ok = await getBridge().rebuildPageContainer(buildMidSummaryPage(pageText));
-    if (!ok) throw new Error('rebuildPageContainer (mid-summary) failed.');
-    currentPage = 'mid-summary';
+  const body = result
+    ? buildMidSummaryContentBody(result, loading)
+    : (loading ? 'Generating summary...' : 'Nothing to summarize yet');
+
+  // Refresh in place when already on the page so the firmware scroll position
+  // is preserved across content updates (e.g. spinner → final summary).
+  if (currentPage === 'mid-summary') {
+    await upgradeText(CONTAINER.reason, NAME.reason, capContent(body, MID_SUMMARY_UPGRADE_CAP));
     return;
   }
 
-  const body = buildMidSummaryContentBody(result, loading);
-  const firstPass = paginateText(body, BODY_INNER_W, HISTORY_DETAIL_PAGE_LINES, HISTORY_DETAIL_PAGE_LINES);
-
-  if (firstPass.length <= 1) {
-    midSummaryPageRefs = [{ claimIdx: 0, pageWithinClaim: 0, text: firstPass[0] ?? '' }];
-  } else {
-    const budget = HISTORY_DETAIL_PAGE_LINES - 2;
-    const final = paginateText(body, BODY_INNER_W, budget, budget);
-    midSummaryPageRefs = final.map((chunk, p) => ({
-      claimIdx: 0,
-      pageWithinClaim: p,
-      text: `${chunk}\n\n${bulletRow(p, final.length)}`,
-    }));
-  }
-
-  const clamped = Math.max(0, Math.min(pageIndex, midSummaryPageRefs.length - 1));
-  const page = midSummaryPageRefs[clamped] ?? midSummaryPageRefs[0];
-  const ok = await getBridge().rebuildPageContainer(buildMidSummaryPage(page?.text ?? ''));
+  const ok = await getBridge().rebuildPageContainer(
+    buildMidSummaryPage(capContent(body, MID_SUMMARY_REBUILD_CAP)),
+  );
   if (!ok) throw new Error('rebuildPageContainer (mid-summary) failed.');
   currentPage = 'mid-summary';
 }
@@ -1655,7 +1647,6 @@ export function resetHudSessionState(): void {
   detailPages = [];
   detailPageIndex = 0;
   historyDetailIndex = -1;
-  midSummaryPageRefs = [];
   sessionEntries = [];
   sessionPages = [];
   sessionPageIndex = 0;

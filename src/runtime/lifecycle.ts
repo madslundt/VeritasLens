@@ -13,7 +13,6 @@ import {
   flashActiveHint,
   flashPickerHint,
   getActiveLayout,
-  getMidSummaryPageCount,
   hasPendingActiveResult,
   markActiveHidden,
   menuOptionAtIndex,
@@ -23,7 +22,6 @@ import {
   restoreHistoryListPage,
   scrollActiveReason,
   scrollHistoryDetail,
-  scrollMidSummaryPage,
   setActiveHint,
   setActiveLayout,
   setLensResult,
@@ -149,7 +147,6 @@ let intermediateSummaries: Array<{
 type MidSummaryResult = Extract<LensResult, { type: 'session-summary' }>;
 let midSummaryResult: { result: MidSummaryResult; generatedAt: number } | null = null;
 let midSummaryLoading = false;
-let midSummaryPageIndex = 0;
 let midSummaryController: AbortController | null = null;
 
 let lastPickerIndex = 0;
@@ -257,7 +254,6 @@ export async function stopHudRuntime(): Promise<void> {
   midSummaryController = null;
   midSummaryResult = null;
   midSummaryLoading = false;
-  midSummaryPageIndex = 0;
   unsubscribeEvents?.();
   unsubscribeEvents = null;
   inflight?.abort();
@@ -363,13 +359,8 @@ function handleEvent(event: EvenHubEvent): void {
       } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
         handleActiveScroll(1).catch((err) => logDispatchError('scroll-active-fail', err));
       }
-    } else if (currentHudPage() === 'mid-summary') {
-      if (type === OsEventTypeList.SCROLL_TOP_EVENT) {
-        scrollMidSummary(-1).catch((err) => logDispatchError('scroll-mid-summary-fail', err));
-      } else if (type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
-        scrollMidSummary(1).catch((err) => logDispatchError('scroll-mid-summary-fail', err));
-      }
     }
+    // mid-summary swipes are owned by the firmware (TextContainer overflow scroll).
     return;
   }
 
@@ -471,7 +462,7 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
     switch (option) {
       case 'mid-summary': await runMidSummary(); break;
       case 'mid-summary-view':
-        await showMidSummaryPage(midSummaryLoading, midSummaryResult?.result ?? null, midSummaryPageIndex);
+        await showMidSummaryPage(midSummaryLoading, midSummaryResult?.result ?? null);
         break;
       case 'mid-summary-refresh': await runMidSummary(); break;
       case 'mid-summary-loading': break; // disabled item — no-op
@@ -540,15 +531,6 @@ async function handleMidSummaryGesture(g: Gesture): Promise<void> {
   }
 }
 
-async function scrollMidSummary(dir: 1 | -1): Promise<void> {
-  if (currentHudPage() !== 'mid-summary') return;
-  const total = getMidSummaryPageCount();
-  const next = midSummaryPageIndex + dir;
-  if (next < 0 || next >= total) return;
-  midSummaryPageIndex = next;
-  await scrollMidSummaryPage(midSummaryPageIndex);
-}
-
 async function enterActiveSession(personaId: PersonaId): Promise<void> {
   const persona = getPersona(personaId);
   if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
@@ -612,7 +594,6 @@ async function leaveActiveSession(): Promise<void> {
     midSummaryController = null;
     midSummaryResult = null;
     midSummaryLoading = false;
-    midSummaryPageIndex = 0;
     try { await getBridge().audioControl(false); } catch { /* ignore */ }
     // Snapshot the inputs for the stop-time summaries (last-tick + final
     // synthesis) while the buffer and session id are still live. Both calls
@@ -1391,8 +1372,7 @@ async function runMidSummary(): Promise<void> {
   const hasAudio = buffer !== null && buffer.bytesBuffered > 0;
   if (!hasHistory && !hasAudio) {
     midSummaryLoading = false;
-    midSummaryPageIndex = 0;
-    await showMidSummaryPage(false, null, 0);
+    await showMidSummaryPage(false, null);
     return;
   }
 
@@ -1401,7 +1381,7 @@ async function runMidSummary(): Promise<void> {
   midSummaryController = controller;
   midSummaryLoading = true;
 
-  await showMidSummaryPage(true, midSummaryResult?.result ?? null, midSummaryPageIndex);
+  await showMidSummaryPage(true, midSummaryResult?.result ?? null);
 
   let wav: Uint8Array | null = buffer
     ? encodePcmToWav(buffer.toLinearPcm(), {
@@ -1423,7 +1403,6 @@ async function runMidSummary(): Promise<void> {
     if (midSummaryController !== controller) return;
     if (result.type === 'session-summary') {
       midSummaryResult = { result, generatedAt: Date.now() };
-      midSummaryPageIndex = 0;
     }
   } catch (err) {
     wav = null;
@@ -1437,7 +1416,7 @@ async function runMidSummary(): Promise<void> {
   }
 
   if (currentHudPage() === 'mid-summary') {
-    await showMidSummaryPage(false, midSummaryResult?.result ?? null, midSummaryPageIndex);
+    await showMidSummaryPage(false, midSummaryResult?.result ?? null);
   }
 }
 
