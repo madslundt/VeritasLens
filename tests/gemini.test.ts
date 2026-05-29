@@ -144,6 +144,49 @@ describe('callLens', () => {
     await expect(p).rejects.toMatchObject({ name: 'AbortError' });
   });
 
+  it('retries 504 Gateway Timeout the same as 503', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(textResponse('gateway timeout', 504, { 'retry-after': '0' }))
+      .mockResolvedValueOnce(jsonResponse(OK_RESPONSE));
+    vi.stubGlobal('fetch', fetchMock);
+    const text = await callLens({ ...baseOpts });
+    expect(text).toContain('TRUE');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries when fetch throws a transient network error', async () => {
+    const fetchMock = vi.fn()
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce(jsonResponse(OK_RESPONSE));
+    vi.stubGlobal('fetch', fetchMock);
+    const onRetry = vi.fn();
+    const text = await callLens({ ...baseOpts, onRetry });
+    expect(text).toContain('TRUE');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onRetry).toHaveBeenCalledWith(1);
+  });
+
+  it('does not retry when the outer signal aborts mid-fetch', async () => {
+    const ac = new AbortController();
+    const fetchMock = vi.fn(async (_url: unknown, init: RequestInit) => {
+      // Simulate fetch reacting to its (combined) signal being aborted.
+      ac.abort();
+      const err = new Error('Aborted');
+      err.name = 'AbortError';
+      // init.signal is the combined signal; assert it became aborted too.
+      expect((init.signal as AbortSignal).aborted).toBe(true);
+      throw err;
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(callLens({ ...baseOpts, signal: ac.signal })).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('exhausts retries when every attempt throws a network error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Failed to fetch'); }));
+    await expect(callLens({ ...baseOpts })).rejects.toThrow(/Failed to fetch/);
+  });
+
   it('injects noSpeech into the responseSchema', async () => {
     const fetchMock = vi.fn(async () => jsonResponse(OK_RESPONSE));
     vi.stubGlobal('fetch', fetchMock);

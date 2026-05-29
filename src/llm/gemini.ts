@@ -51,7 +51,14 @@ export const MAX_RETRIES = 3;
 /**
  * Send audio + prompt to Gemini and return the raw JSON text from the response.
  * Each lens's parse() function handles decoding the JSON.
- * Retries up to MAX_RETRIES times on 503 responses, calling opts.onRetry before each retry.
+ *
+ * Retries up to MAX_RETRIES times on transient failures: HTTP 429, 503, 504, or
+ * a fetch-level network error / timeout. Each attempt gets its own
+ * FETCH_TIMEOUT_MS deadline so a single hung connection retries instead of
+ * blocking the whole user gesture. Server-supplied Retry-After / retryDelay
+ * hints are honoured exactly (clamped at MAX_RETRY_DELAY_MS); fallback delays
+ * are jittered ±25% to avoid synchronized retries across parallel lens calls.
+ * opts.onRetry fires before each retry so the HUD can flash R1/3, R2/3, R3/3.
  */
 export async function callLens(opts: CallLensOptions): Promise<string> {
   if (!opts.apiKey) throw new Error('Missing Gemini API key.');
@@ -98,22 +105,42 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       await retryDelay(nextDelayMs, opts.signal);
     }
 
-    const response = await fetch(
-      `${ENDPOINT(resolveModel(opts.model))}?key=${encodeURIComponent(opts.apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: bodyJson,
-        signal: opts.signal,
-      },
-    );
+    // Each attempt gets its own per-fetch deadline so a hung socket fails fast
+    // and retries cleanly. The outer opts.signal still cancels the whole call
+    // (user double-tap, teardown) — we combine the two so either source aborts
+    // the in-flight fetch, but only outer aborts propagate out of the loop.
+    const attemptCtl = withFetchTimeout(opts.signal, FETCH_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(
+        `${ENDPOINT(resolveModel(opts.model))}?key=${encodeURIComponent(opts.apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: bodyJson,
+          signal: attemptCtl.signal,
+        },
+      );
+    } catch (err) {
+      attemptCtl.cleanup();
+      // Outer-signal aborts (user cancel / teardown) propagate immediately —
+      // there's no point retrying something the caller no longer wants.
+      if (opts.signal?.aborted) throw err;
+      // Anything else (TypeError on dropped connection, per-fetch timeout) is
+      // treated as transient. Default to a jittered ~1 s before the next try.
+      nextDelayMs = jitter(1000);
+      lastError = err instanceof Error ? err : new Error(String(err));
+      continue;
+    }
+    attemptCtl.cleanup();
 
-    if (response.status === 503 || response.status === 429) {
+    if (response.status === 503 || response.status === 504 || response.status === 429) {
       const errText = await response.text();
       const hinted =
         parseRetryAfterMs(response.headers.get('retry-after')) ??
         parseGoogleRetryDelayMs(errText);
-      nextDelayMs = hinted ?? (response.status === 429 ? 5000 : 1000);
+      // Server hints are honoured exactly; only fallback defaults are jittered.
+      nextDelayMs = hinted ?? jitter(response.status === 429 ? 5000 : 1000);
       lastError = new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 2000)}`);
       continue;
     }
@@ -225,7 +252,46 @@ function truncate(s: string, n: number): string {
 }
 
 const MAX_RETRY_DELAY_MS = 8_000;
+const FETCH_TIMEOUT_MS = 30_000;
 const RETRY_DELAY_PATTERN = /^(\d+(?:\.\d+)?)s$/;
+
+/**
+ * ±25% jitter, floored at 250ms and capped at MAX_RETRY_DELAY_MS. Used to
+ * de-correlate parallel retries (Auto lens classifier + speculative) when both
+ * land on the same 429/503 wall — Google's response time clusters tightly, so
+ * deterministic delays cause the next attempt pair to land within milliseconds
+ * of each other and re-trip the same upstream limit.
+ */
+function jitter(ms: number): number {
+  const factor = 0.75 + Math.random() * 0.5;
+  return Math.min(Math.max(Math.round(ms * factor), 250), MAX_RETRY_DELAY_MS);
+}
+
+/**
+ * Combine the caller's AbortSignal with a per-attempt timeout. The returned
+ * signal aborts on either source, but the caller still inspects opts.signal
+ * directly to decide whether an abort is propagable (outer) or retryable
+ * (timeout). `cleanup()` must be called after the fetch settles to clear the
+ * timer and detach the listener — without it, MAX_RETRIES stale listeners
+ * accumulate on opts.signal across a long session.
+ */
+function withFetchTimeout(
+  outer: AbortSignal | undefined,
+  timeoutMs: number,
+): { signal: AbortSignal; cleanup: () => void } {
+  const ctrl = new AbortController();
+  if (outer?.aborted) ctrl.abort();
+  const onOuterAbort = (): void => ctrl.abort();
+  outer?.addEventListener('abort', onOuterAbort, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  return {
+    signal: ctrl.signal,
+    cleanup: (): void => {
+      clearTimeout(timer);
+      outer?.removeEventListener('abort', onOuterAbort);
+    },
+  };
+}
 
 /** Parse an HTTP Retry-After header (seconds only — Gemini does not emit HTTP-date here). */
 export function parseRetryAfterMs(header: string | null | undefined): number | null {
