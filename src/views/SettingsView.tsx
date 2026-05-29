@@ -55,7 +55,7 @@ import { personas } from '@/personas';
 import { MEETING_PREP_ID } from '@/personas/meetingPrep';
 import { AUTO_LENS_CANDIDATES } from '@/personas/auto';
 
-type ModelTestStatus = { state: 'idle' | 'running' | 'ok' | 'fail'; message: string };
+type ModelTestStatus = { state: 'idle' | 'running' | 'ok' | 'fail' | 'skipped'; message: string };
 const IDLE_TEST: ModelTestStatus = { state: 'idle', message: '' };
 
 const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
@@ -703,18 +703,37 @@ export const SettingsView: Component = () => {
       ? (draftOpenaiTranscribeModel().trim() || undefined)
       : undefined;
     const { runSelfTest } = await import('@/llm');
-    const probe = async (model: string): Promise<ModelTestStatus> => {
+    const probe = async (
+      model: string,
+      probeOpts?: { lightweight?: boolean },
+    ): Promise<ModelTestStatus> => {
       try {
-        const r = await runSelfTest(apiKey, model, { provider, baseUrl, transcribeModel: draftTranscribe });
+        const r = await runSelfTest(apiKey, model, {
+          provider,
+          baseUrl,
+          transcribeModel: draftTranscribe,
+          lightweight: probeOpts?.lightweight,
+        });
         return { state: 'ok', message: `Works · ${r.latencyMs} ms` };
       } catch (err) {
         return { state: 'fail', message: err instanceof Error ? err.message : String(err) };
       }
     };
 
-    const tasks: Promise<void>[] = [probe(mainModel).then((r) => { setMainTest(r); })];
-    if (autoModel) tasks.push(probe(autoModel).then((r) => { setAutoTest(r); }));
-    await Promise.all(tasks);
+    // Run the main probe first. If it fails, skip the classifier probe — a
+    // failing main probe already tells the user their key/model is broken,
+    // so burning a second request to deliver the same news is wasteful.
+    const mainResult = await probe(mainModel);
+    setMainTest(mainResult);
+    if (!autoModel) return;
+    if (mainResult.state !== 'ok') {
+      setAutoTest({ state: 'skipped', message: 'Skipped — main model failed' });
+      return;
+    }
+    // Brief gap so the two requests don't share a per-second RPM window when
+    // the user has pointed both at the same model family.
+    await new Promise((r) => setTimeout(r, 250));
+    setAutoTest(await probe(autoModel, { lightweight: true }));
   };
 
   // Session detail view. Claim-style answers are the primary content; the
@@ -1292,6 +1311,9 @@ export const SettingsView: Component = () => {
                   </Show>
                   <Show when={autoTest().state === 'fail' && autoTest().message}>
                     <span class="status err">Classifier: {autoTest().message}</span>
+                  </Show>
+                  <Show when={autoTest().state === 'skipped' && autoTest().message}>
+                    <span class="status muted">Classifier: {autoTest().message}</span>
                   </Show>
                 </div>
               </label>

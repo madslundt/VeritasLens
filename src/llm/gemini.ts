@@ -48,6 +48,11 @@ export interface CallLensOptions {
 
 export const MAX_RETRIES = 3;
 
+// Treat these HTTP statuses as transient. 500 (INTERNAL) and 502 (Bad Gateway)
+// are documented by Google as retryable; 503/504 are infra-side; 429 is the
+// rate-limit shape (handled with retry-after-aware delay).
+const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
+
 /**
  * Send audio + prompt to Gemini and return the raw JSON text from the response.
  * Each lens's parse() function handles decoding the JSON.
@@ -134,7 +139,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     }
     attemptCtl.cleanup();
 
-    if (response.status === 503 || response.status === 504 || response.status === 429) {
+    if (TRANSIENT_STATUSES.has(response.status)) {
       const errText = await response.text();
       const hinted =
         parseRetryAfterMs(response.headers.get('retry-after')) ??
@@ -180,25 +185,70 @@ function retryDelay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+export interface RunSelfTestOptions {
+  /** Skip the inline-audio payload — sends a text-only generateContent
+   *  request. Used for the classifier probe after the main probe (which
+   *  already validates the audio path against the same key/API). */
+  lightweight?: boolean;
+}
+
 /**
  * Reachability probe used by Settings "Run self-test".
  * Sends 1 second of silence and reports round-trip latency. Uses a minimal
  * connectivity-only prompt + schema rather than borrowing a real persona —
  * keeps the LLM transport decoupled from the persona layer so renaming a
  * lens can't break the self-test.
+ *
+ * When `lightweight` is set, skips the WAV entirely and POSTs a text-only
+ * generateContent body directly (bypasses `callLens`, which always inlines
+ * audio). Single attempt — failures are surfaced verbatim, just like
+ * `callLens` does on non-retryable HTTP errors.
  */
 export async function runSelfTest(
   apiKey: string,
   model?: GeminiModel | string,
+  opts?: RunSelfTestOptions,
 ): Promise<{ latencyMs: number }> {
-  const silentPcm = new Uint8Array(16_000 * 2);
-  const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
   const prompt = 'Respond with `{"ok": true}` to confirm reachability.';
   const schema = {
     type: 'object',
     properties: { ok: { type: 'boolean' } },
     required: ['ok'],
   };
+
+  if (opts?.lightweight) {
+    if (!apiKey) throw new Error('Missing Gemini API key.');
+    const bodyJson = JSON.stringify({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+        responseSchema: schema,
+      },
+    });
+    const url = `${ENDPOINT(resolveModel(model))}?key=${encodeURIComponent(apiKey)}`;
+    const t0 = performance.now();
+    let lastErr: Error | undefined;
+    // Same transient policy as callLens, but capped at 2 retries to keep the
+    // Test-model click responsive — and because the main probe already
+    // confirmed the key/endpoint are healthy.
+    for (let attempt = 0; attempt <= 2; attempt++) {
+      if (attempt > 0) await new Promise((r) => setTimeout(r, jitter(1000)));
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: bodyJson,
+      });
+      if (response.ok) return { latencyMs: Math.round(performance.now() - t0) };
+      const errText = await response.text();
+      lastErr = new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 2000)}`);
+      if (!TRANSIENT_STATUSES.has(response.status)) throw lastErr;
+    }
+    throw lastErr ?? new Error('Gemini lightweight probe: exhausted retries.');
+  }
+
+  const silentPcm = new Uint8Array(16_000 * 2);
+  const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
   const t0 = performance.now();
   await callLens({ apiKey, wav, prompt, schema, model });
   return { latencyMs: Math.round(performance.now() - t0) };

@@ -109,14 +109,23 @@ export async function runSelfTest(
   /**
    * Optional overrides for callers that want to probe an unsaved draft. When
    * omitted the function falls back to the persisted settings store as before.
+   * `lightweight` skips the inline-audio payload on the Gemini path (ignored
+   * by the OpenAI path, which doesn't have an analogous classifier model).
    */
-  overrides?: { provider?: LlmProvider; baseUrl?: OpenAiBaseUrl; transcribeModel?: string },
+  overrides?: {
+    provider?: LlmProvider;
+    baseUrl?: OpenAiBaseUrl;
+    transcribeModel?: string;
+    lightweight?: boolean;
+  },
 ): Promise<{ latencyMs: number }> {
   const s = settings();
   const provider = overrides?.provider ?? s.provider;
   const baseUrl = overrides?.baseUrl ?? s.openaiBaseUrl;
   if (provider === 'gemini') {
-    return runGeminiSelfTest(apiKey, model as GeminiModel | undefined);
+    return runGeminiSelfTest(apiKey, model as GeminiModel | undefined, {
+      lightweight: overrides?.lightweight,
+    });
   }
   const transcribeModel =
     overrides?.transcribeModel
