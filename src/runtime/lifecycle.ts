@@ -3,6 +3,7 @@ import { getBridge } from './bridge';
 import { PcmRingBuffer, encodePcmToWav, trimPcmToSegments } from './audioBuffer';
 import { analyzeBufferForVoice, extractSpeechSegments, resetVADAvailability, warmupVAD } from './vad';
 import { getSileroVAD } from './vad/silero';
+import { buildRecallContextLines, RECALL_CONTEXT_DIRECTIVE } from './recallContext';
 import {
   ACTIVE_HINT_ANALYZING,
   ACTIVE_HINT_DEFAULT,
@@ -11,6 +12,7 @@ import {
   clearStatusFrame,
   currentHudPage,
   flashActiveHint,
+  flashMenuHint,
   flashPickerHint,
   getActiveLayout,
   hasPendingActiveResult,
@@ -62,6 +64,7 @@ import {
 } from '@/personas/meetingPrep';
 import {
   activePersona,
+  appPhase,
   loadHistory,
   meetingPrepIsConfigured,
   meetingPrepSections,
@@ -121,6 +124,14 @@ let buffer: PcmRingBuffer | null = null;
 let unsubscribeEvents: (() => void) | null = null;
 let inflight: AbortController | null = null;
 let analyzing = false;
+// Auto-clears the ERR corner glyph so the wearer doesn't have to figure out
+// the dismiss gesture after a Gemini failure. Cleared early by any incoming
+// gesture (see handleEvent) so an immediate double-tap retry both clears the
+// glyph AND triggers a fresh analysis. A new retry that runs through callLens
+// will also overwrite the status itself, so the timer is purely defensive
+// against the wearer staring at ERR with no idea how to proceed.
+let errClearTimer: ReturnType<typeof setTimeout> | null = null;
+const ERR_AUTO_CLEAR_MS = 5_000;
 let autoSummaryTimer: ReturnType<typeof setInterval> | null = null;
 // Abort handle for the in-flight auto-summary tick. Separate from `inflight`
 // (which tracks the foreground analysis) so an exit during a periodic tick can
@@ -263,6 +274,10 @@ export async function stopHudRuntime(): Promise<void> {
     clearTimeout(noVoiceStatusTimer);
     noVoiceStatusTimer = null;
   }
+  if (errClearTimer) {
+    clearTimeout(errClearTimer);
+    errClearTimer = null;
+  }
   buffer?.clear();
   buffer = null;
   // Drop the Silero session reference (calls release/destroy if exposed by the
@@ -367,6 +382,15 @@ function handleEvent(event: EvenHubEvent): void {
   const gesture = extractGesture(event);
   if (!gesture) return;
 
+  // Any user gesture clears a lingering ERR glyph immediately, regardless of
+  // which gesture it is. Fall through to the normal dispatch below so e.g. a
+  // double-tap during ERR both clears the error and triggers the fresh
+  // analysis it implies (the in-flight retry will overwrite the status on
+  // its own; this branch only matters if the user gestures during the
+  // 5-second auto-clear window). clearErrorState is a no-op if phase moved
+  // on already, so it's safe to call unconditionally.
+  if (appPhase() === 'error') clearErrorState();
+
   const page = currentHudPage();
 
   // Double-tap handling. From the root pages (picker, unconfigured) it asks
@@ -460,11 +484,16 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const option = menuOptionAtIndex(lastMenuIndex);
     switch (option) {
-      case 'mid-summary': await runMidSummary(); break;
+      case 'mid-summary':
+      case 'mid-summary-refresh': {
+        const reason = summaryGateReason();
+        if (reason) { await flashMenuHint(reason, 5000); break; }
+        await runMidSummary();
+        break;
+      }
       case 'mid-summary-view':
         await showMidSummaryPage(midSummaryLoading, midSummaryResult?.result ?? null);
         break;
-      case 'mid-summary-refresh': await runMidSummary(); break;
       case 'mid-summary-loading': break; // disabled item — no-op
       case 'back': await handleBackMenuOption(); break;
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
@@ -579,6 +608,10 @@ async function leaveActiveSession(): Promise<void> {
     if (noVoiceStatusTimer) {
       clearTimeout(noVoiceStatusTimer);
       noVoiceStatusTimer = null;
+    }
+    if (errClearTimer) {
+      clearTimeout(errClearTimer);
+      errClearTimer = null;
     }
     stopSpinner();
     // Abort any auto-summary tick already in flight, then stop the periodic
@@ -713,15 +746,39 @@ function buildAlreadyAnsweredLines(): string[] {
 const ALREADY_ANSWERED_DIRECTIVE =
   'ALREADY ANSWERED in this conversation — do NOT re-extract, re-answer, or include these claims even if they appear again in the audio. If the audio contains ONLY these (nothing new), set noSpeech=true. If the audio contains both these and something new, analyze ONLY the new content and skip the rest:';
 
+/**
+ * Cancel the ERR auto-clear timer and, if we're still sitting in the error
+ * phase, demote the HUD back to listening. Safe to call from anywhere — the
+ * phase guard makes it a no-op when the user has already moved past the
+ * error (e.g. by starting a new analysis that itself set the phase).
+ */
+function clearErrorState(): void {
+  if (errClearTimer) {
+    clearTimeout(errClearTimer);
+    errClearTimer = null;
+  }
+  if (appPhase() !== 'error') return;
+  setErrorMessage(null);
+  void setStatus('listening');
+  setAppPhase('listening');
+}
+
 function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   const base = persona.buildPrompt(lang);
   const recent = buildAlreadyAnsweredLines();
+  const recall = buildRecallContextLines(intermediateSummaries, settings().autoSummaryEnabled);
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
     '',
     base,
   ];
+  // Recall context first (general background), then the already-answered
+  // directive (hard rule) closest to the call so the model's last-seen
+  // instruction is the suppression list, not the "look back" context.
+  if (recall.length > 0) {
+    parts.push('', RECALL_CONTEXT_DIRECTIVE, ...recall);
+  }
   if (recent.length > 0) {
     parts.push('', ALREADY_ANSWERED_DIRECTIVE, ...recent);
   }
@@ -741,12 +798,16 @@ function buildMeetingPromptWithContext(
 ): string {
   const base = buildMeetingPrepPrompt(lang, sections);
   const recent = buildAlreadyAnsweredLines();
+  const recall = buildRecallContextLines(intermediateSummaries, settings().autoSummaryEnabled);
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
     '',
     base,
   ];
+  if (recall.length > 0) {
+    parts.push('', RECALL_CONTEXT_DIRECTIVE, ...recall);
+  }
   if (recent.length > 0) {
     parts.push('', ALREADY_ANSWERED_DIRECTIVE, ...recent);
   }
@@ -1183,6 +1244,14 @@ async function runAnalysis(): Promise<void> {
     await setStatus('error');
     await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('error');
+    // Schedule the ERR glyph auto-clear so the wearer isn't stuck staring at
+    // a sticky corner indicator with no obvious recovery gesture. Any user
+    // gesture (see handleEvent) also clears it earlier, and a double-tap
+    // retry both clears AND starts a fresh analysis. Replaces any prior
+    // pending timer (back-to-back errors restart the countdown rather than
+    // firing two clears on overlapping timelines).
+    if (errClearTimer) clearTimeout(errClearTimer);
+    errClearTimer = setTimeout(clearErrorState, ERR_AUTO_CLEAR_MS);
   } finally {
     // Identity check prevents clobbering a newer controller spawned by a
     // back-to-back analysis. Nulling inflight here releases the AbortController
@@ -1198,8 +1267,15 @@ async function runAnalysis(): Promise<void> {
 }
 
 
-/** Fixed cadence for the in-session auto-summary tick. Hardcoded — no user knob. */
-const AUTO_SUMMARY_INTERVAL_MS = 5 * 60_000;
+/** Auto-summary cadence — scales with bufferDuration so summaries fire roughly
+ *  as the audio ring buffer rolls over (otherwise speech can scroll out of the
+ *  ring before being captured in a summary, leaving recall blind). 60 s floor
+ *  caps request cost on the smallest buffer setting; 2× factor gives silent
+ *  ticks room without starving coverage. */
+const AUTO_SUMMARY_MIN_INTERVAL_MS = 60_000;
+function autoSummaryIntervalMs(bufferDurationSec: number): number {
+  return Math.max(AUTO_SUMMARY_MIN_INTERVAL_MS, 2 * bufferDurationSec * 1000);
+}
 
 /**
  * Return at most the most-recent `maxSeconds` of audio from a 16-bit LE PCM
@@ -1265,7 +1341,10 @@ function startAutoSummaryTimer(): void {
   stopAutoSummaryTimer();
   const s = settings();
   if (!s.autoSummaryEnabled) return;
-  autoSummaryTimer = setInterval(() => void runAutoSummary(), AUTO_SUMMARY_INTERVAL_MS);
+  autoSummaryTimer = setInterval(
+    () => void runAutoSummary(),
+    autoSummaryIntervalMs(s.bufferDuration),
+  );
 }
 
 function stopAutoSummaryTimer(): void {
@@ -1282,21 +1361,51 @@ function canGenerateFinalSummary(): boolean {
   return settings().autoSummaryEnabled && intermediateSummaries.length > 0;
 }
 
+/** Minimum session duration before any summary will be generated. */
+const MIN_SUMMARY_RECORDING_MS = 60_000;
+
+/**
+ * Common gate for any summary generation (auto / mid / stop-time): at least
+ * 60 s of recording AND at least one user-driven analysis in the current
+ * session. Summary entries themselves don't count as analyses — only taps
+ * that produced an answer do.
+ */
+function canRunSummary(): boolean {
+  if (Date.now() - sessionStartTime < MIN_SUMMARY_RECORDING_MS) return false;
+  return sessionHistory().some(
+    (e) => e.sessionId === currentSessionId && e.lensId !== SESSION_SUMMARY_ID,
+  );
+}
+
+/**
+ * Specific reason `canRunSummary()` is false, for surfacing as a 5 s hint when
+ * the user taps the disabled mid-summary row. Null when the gate is open.
+ */
+function summaryGateReason(): string | null {
+  if (Date.now() - sessionStartTime < MIN_SUMMARY_RECORDING_MS) return 'Record ≥1 min first';
+  const hasAnalysis = sessionHistory().some(
+    (e) => e.sessionId === currentSessionId && e.lensId !== SESSION_SUMMARY_ID,
+  );
+  if (!hasAnalysis) return 'Ask a question first';
+  return null;
+}
+
 function buildMidSummaryMenuItems(): MenuItem[] {
   const items: MenuItem[] = [];
+  const gateOk = canRunSummary();
   if (midSummaryResult) {
     const relTime = formatRelativeTime(midSummaryResult.generatedAt);
     items.push({ id: 'mid-summary-view', label: `Summary — ${relTime}` });
     if (midSummaryLoading) {
       items.push({ id: 'mid-summary-loading', label: 'Generating summary...', disabled: true });
     } else {
-      items.push({ id: 'mid-summary-refresh', label: 'Refresh summary' });
+      items.push({ id: 'mid-summary-refresh', label: 'Refresh summary', disabled: !gateOk });
     }
   } else {
     if (midSummaryLoading) {
       items.push({ id: 'mid-summary-loading', label: 'Generating summary...', disabled: true });
     } else {
-      items.push({ id: 'mid-summary', label: 'Mid-session summary' });
+      items.push({ id: 'mid-summary', label: 'Mid-session summary', disabled: !gateOk });
     }
   }
   return items;
@@ -1307,6 +1416,9 @@ async function runAutoSummary(): Promise<void> {
   // Skip when the active provider has no API key — the facade would throw
   // and we'd just be burning Silero inference time before discovering that.
   if (!activeApiKey()) return;
+  // Don't summarise a session that has no human input yet (no analyses) or
+  // hasn't accumulated enough recording for a summary to be meaningful.
+  if (!canRunSummary()) return;
   // Always gate auto-summary on voice presence — there is no user knob for
   // this because there is nothing to summarise in a silent/noisy window, and
   // skipping the API call here is pure upside.
@@ -1368,6 +1480,11 @@ async function runAutoSummary(): Promise<void> {
 }
 
 async function runMidSummary(): Promise<void> {
+  if (!canRunSummary()) {
+    midSummaryLoading = false;
+    await showMidSummaryPage(false, null);
+    return;
+  }
   const hasHistory = sessionHistory().some((e) => e.sessionId === currentSessionId);
   const hasAudio = buffer !== null && buffer.bytesBuffered > 0;
   if (!hasHistory && !hasAudio) {
@@ -1489,6 +1606,11 @@ function captureStopTimeInputs(): StopTimeInputs | null {
  *   it would just duplicate the last tick.
  */
 async function runStopTimeSummaries(inputs: StopTimeInputs): Promise<void> {
+  // Same gate as runAutoSummary: no summary for a session shorter than the
+  // minimum, or one that produced zero analyses. Skipping here avoids the
+  // 'generating' badge flash and the last-tick Gemini call.
+  if (!canRunSummary()) return;
+
   let lastTick: IntermediateSummary | null = null;
 
   if (inputs.linearPcm) {

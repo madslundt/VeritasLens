@@ -265,25 +265,25 @@ describe('setSummaryBadgeState', () => {
       .map((c) => c[0].payload.content);
   }
 
-  it('writes "summarizing..." when auto-summary is enabled', async () => {
+  it('writes "Generating…" when auto-summary is enabled', async () => {
     await saveAutoSummaryEnabled(fakeSetLs, true);
     await bootstrapHud('picker');
     bridge.textContainerUpgrade.mockClear();
     await setSummaryBadgeState('generating');
-    expect(badgeWrites()).toEqual(['summarizing...']);
+    expect(badgeWrites()).toEqual(['Generating…']);
   });
 
-  it('flashes "summary ready" then reverts to "summary" after 2.5s', async () => {
+  it('flashes "Summary ready!" then reverts to "Summary on" after 2.5s', async () => {
     vi.useFakeTimers();
     try {
       await saveAutoSummaryEnabled(fakeSetLs, true);
       await bootstrapHud('picker');
       bridge.textContainerUpgrade.mockClear();
       await setSummaryBadgeState('ready');
-      expect(badgeWrites()).toEqual(['summary ready']);
+      expect(badgeWrites()).toEqual(['Summary ready!']);
       vi.advanceTimersByTime(2500);
       await Promise.resolve();
-      expect(badgeWrites()).toEqual(['summary ready', 'summary']);
+      expect(badgeWrites()).toEqual(['Summary ready!', 'Summary on']);
     } finally {
       vi.useRealTimers();
     }

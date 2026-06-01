@@ -417,13 +417,15 @@ export const SettingsView: Component = () => {
     setKeyError(null);
   }, { defer: true }));
 
-  // Model-list fetches are user-initiated and lazy: the dropdown's onFocus
-  // wires into these refresh functions, but each one is guarded so it only
-  // hits the network when the cached list is empty (length ≤ 1 for Gemini,
-  // == 0 for OpenAI). The provider/host-change effect above resets the lists
-  // so a host switch naturally re-arms the next focus. Pre-0.9.0 a debounced
-  // effect fired the /models endpoint on every keystroke; the store-review
-  // network monitor flagged the resulting 403s from typo'd or stale keys.
+  // Model-list fetches happen in two ways: (a) the dropdown's onFocus calls
+  // these refresh functions directly, and (b) the debounced key-watcher effect
+  // below auto-refreshes the cached list once the user finishes entering an
+  // API key of plausible length. Both call sites are guarded by the same cache
+  // check so we don't hit the network when the list is already populated. The
+  // provider/host-change effect above resets the lists so a host switch
+  // naturally re-arms the next fetch. Pre-0.9.0 a debounced effect fired the
+  // /models endpoint on every keystroke; the 800 ms debounce here mitigates
+  // the 403-noise problem that flagged in the store-review network monitor.
 
   function refreshGeminiModels(): void {
     if (modelsLoading() || draftKey().trim().length < 10) return;
@@ -470,6 +472,43 @@ export const SettingsView: Component = () => {
         .finally(() => { if (!ac.signal.aborted) setOpenaiModelsLoading(false); }),
     );
   }
+
+  // Auto-refresh the dropdown once the user finishes entering an API key.
+  // Each key edit clears the cached list (so the refresh actually re-fetches
+  // with the new credential) and schedules a fetch after an 800 ms idle
+  // window — long enough that a paste or fast-typed key fires the request
+  // exactly once, short enough that the dropdown is ready by the time the
+  // user reaches for it. The provider gate skips work for the inactive host
+  // (e.g. don't probe Gemini while the user is editing the OpenAI key).
+  const KEY_REFRESH_DEBOUNCE_MS = 800;
+  let geminiKeyDebounce: ReturnType<typeof setTimeout> | null = null;
+  createEffect(on(draftKey, (key) => {
+    if (geminiKeyDebounce) clearTimeout(geminiKeyDebounce);
+    if (draftProvider() !== 'gemini') return;
+    if (key.trim().length < 10) return;
+    geminiKeyDebounce = setTimeout(() => {
+      setAvailableModels([untrack(draftModel)]);
+      setGeminiFetchState('idle');
+      refreshGeminiModels();
+    }, KEY_REFRESH_DEBOUNCE_MS);
+  }, { defer: true }));
+
+  let openaiKeyDebounce: ReturnType<typeof setTimeout> | null = null;
+  createEffect(on([draftOpenaiKey, draftOpenaiBaseUrl], ([key]) => {
+    if (openaiKeyDebounce) clearTimeout(openaiKeyDebounce);
+    if (draftProvider() !== 'openai-compatible') return;
+    if (key.trim().length < 10) return;
+    openaiKeyDebounce = setTimeout(() => {
+      setOpenaiModels([]);
+      setOpenaiFetchState('idle');
+      refreshOpenAiModels();
+    }, KEY_REFRESH_DEBOUNCE_MS);
+  }, { defer: true }));
+
+  onCleanup(() => {
+    if (geminiKeyDebounce) clearTimeout(geminiKeyDebounce);
+    if (openaiKeyDebounce) clearTimeout(openaiKeyDebounce);
+  });
 
   /**
    * Gate Save on a verifiable configuration:
@@ -1531,21 +1570,19 @@ export const SettingsView: Component = () => {
             </div>
 
             <div class="field">
-              <span class="field-label">Summary</span>
+              <span class="field-label">Conversation memory</span>
               <label class="toggle-row">
                 <input
                   type="checkbox"
                   checked={draftAutoEnabled()}
                   onChange={(e) => setDraftAutoEnabled(e.currentTarget.checked)}
                 />
-                <span>Enable background summaries</span>
+                <span>Remember earlier moments &amp; summarise the session</span>
               </label>
               <Show when={draftAutoEnabled()}>
                 <span class="field-hint warning">
-                  ⚠ Sends a provider request every 5 minutes during a session, plus a
-                  last-tick and a final-synthesis request when you exit the session
-                  (or change provider/model/key/buffer-duration settings). Both
-                  appear in History; ticks with no voice are skipped automatically.
+                  Remembers earlier moments in this session and writes a summary to History on exit.
+                  ⚠ Sends a provider request periodically while listening (silent ticks skipped).
                 </span>
               </Show>
             </div>

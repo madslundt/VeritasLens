@@ -66,6 +66,8 @@ export const CONTAINER = {
   historyHint: 31,
   // picker badge — visible only when auto-summary is on
   summaryBadge: 32,
+  // menu hint footer — empty by default, flashed by flashMenuHint
+  menuHint: 33,
 } as const;
 
 const NAME = {
@@ -86,6 +88,7 @@ const NAME = {
   historyList: 'vl-hist-lst',
   historyHint: 'vl-hist-hint',
   summaryBadge: 'vl-sum-badge',
+  menuHint: 'vl-menu-hint',
 } as const;
 
 const STATUS_LABEL: Record<string, string> = {
@@ -103,6 +106,7 @@ export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-l
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
+export const MENU_HINT_DEFAULT = '';
 
 export const MENU_OPTIONS = [
   { id: 'back', label: '← Back' },
@@ -724,24 +728,42 @@ export async function flashActiveHint(message: string, ms = 2500): Promise<void>
   }, ms);
 }
 
+let menuHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Briefly show a message in the menu page's bottom hint slot, then revert to
+ * `MENU_HINT_DEFAULT`. Used to explain why a disabled menu row (e.g. the
+ * mid-summary row before the recording or analysis gate is met) didn't act.
+ * No-op when the menu isn't on screen.
+ */
+export async function flashMenuHint(message: string, ms = 5000): Promise<void> {
+  if (currentPage !== 'menu') return;
+  if (menuHintFlashTimer) clearTimeout(menuHintFlashTimer);
+  await upgradeText(CONTAINER.menuHint, NAME.menuHint, message);
+  menuHintFlashTimer = setTimeout(() => {
+    menuHintFlashTimer = null;
+    if (currentPage !== 'menu') return;
+    void upgradeText(CONTAINER.menuHint, NAME.menuHint, MENU_HINT_DEFAULT);
+  }, ms);
+}
+
 export type SummaryBadgeState = 'idle' | 'generating' | 'ready';
 
 let summaryBadgeReadyTimer: ReturnType<typeof setTimeout> | null = null;
 
 function summaryBadgeBaseline(): string {
-  return settings().autoSummaryEnabled ? 'summary' : '';
+  return settings().autoSummaryEnabled ? 'Summary on' : '';
 }
 
 /**
  * Drive the picker page's top-right summary badge through final-summary states.
  * No-op when the picker isn't on screen; safe to call from lifecycle hooks.
  *
- * - 'generating' → "summarizing..."
- * - 'ready'      → "summary ready", auto-reverts to baseline after 2.5 s
- * - 'idle'       → baseline ("auto-summary" if enabled, blank otherwise)
+ * - 'generating' → "Generating…"
+ * - 'ready'      → "Summary ready!", auto-reverts to baseline after 2.5 s
+ * - 'idle'       → baseline ("Summary on" if enabled, blank otherwise)
  *
- * Strings are sized to match "auto-summary" (12 chars) — the badge container
- * is 180 px wide and longer text clips on hardware.
+ * Badge container is 180 px wide; strings are sized to fit (≤14 chars).
  *
  * When autoSummaryEnabled is false the slot stays blank regardless of state —
  * the feature isn't surfaced to the wearer so progress shouldn't be either.
@@ -757,11 +779,11 @@ export async function setSummaryBadgeState(state: SummaryBadgeState): Promise<vo
     return;
   }
   if (state === 'generating') {
-    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'summarizing...');
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'Generating…');
     return;
   }
   if (state === 'ready') {
-    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'summary ready');
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'Summary ready!');
     summaryBadgeReadyTimer = setTimeout(() => {
       summaryBadgeReadyTimer = null;
       if (currentPage !== 'picker') return;
@@ -1323,7 +1345,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     containerID: CONTAINER.summaryBadge, containerName: NAME.summaryBadge,
     xPosition: SCREEN_W - 196, yPosition: 8, width: 180, height: 32,
     borderWidth: 0, paddingLength: 4,
-    content: settings().autoSummaryEnabled ? 'summary' : '',
+    content: summaryBadgeBaseline(),
     isEventCapture: 0,
   });
   const list = new ListContainerProperty({
@@ -1373,15 +1395,23 @@ function buildMenuPage(): RebuildPageContainer {
   });
   const list = new ListContainerProperty({
     containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
-    width: SCREEN_W - 32, height: SCREEN_H - 48, borderWidth: 0, paddingLength: 0,
+    width: SCREEN_W - 32, height: SCREEN_H - 48 - 32, borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
       itemCount: builtMenuItems.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: builtMenuItems.map((o) => o.label),
     }),
     isEventCapture: 1,
   });
+  // Bottom hint footer for flashMenuHint (e.g. why a disabled row didn't act).
+  // Empty by default; menuList height is reduced above to leave room.
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.menuHint, containerName: NAME.menuHint,
+    xPosition: 16, yPosition: SCREEN_H - 28, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4,
+    content: MENU_HINT_DEFAULT, isEventCapture: 0,
+  });
   const listObject = [list];
-  const textObject = [title, spinner, clock];
+  const textObject = [title, spinner, clock, hint];
   return new RebuildPageContainer({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 

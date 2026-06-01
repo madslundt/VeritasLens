@@ -200,17 +200,35 @@ describe('callLens', () => {
 });
 
 describe('fetchAvailableModels', () => {
-  it('returns gemini-* models that support generateContent, newest first', async () => {
+  it('returns gemini-* 2.x+ models that support generateContent, newest first', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
       models: [
-        { name: 'models/gemini-1.5-flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-2.5-flash', supportedGenerationMethods: ['generateContent'] },
         { name: 'models/gemini-2.5-pro', supportedGenerationMethods: ['generateContent'] },
         { name: 'models/text-bison', supportedGenerationMethods: ['generateContent'] },
         { name: 'models/gemini-embedding-001', supportedGenerationMethods: ['embedContent'] },
       ],
     })));
     const list = await fetchAvailableModels('key');
-    expect(list).toEqual(['gemini-2.5-pro', 'gemini-1.5-flash']);
+    expect(list).toEqual(['gemini-2.5-pro', 'gemini-2.5-flash']);
+  });
+
+  it('rejects -aqa, learnlm, -vision, -latest aliases, and gemini-1.* (would 4xx on our call shape)', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({
+      models: [
+        { name: 'models/gemini-2.5-pro', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-1.5-flash', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-1.5-pro-latest', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/aqa', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-2.0-pro-vision', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/learnlm-2.0-flash-experimental', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-2.5-flash-latest', supportedGenerationMethods: ['generateContent'] },
+        { name: 'models/gemini-3.0-flash', supportedGenerationMethods: ['generateContent'] },
+      ],
+    })));
+    const list = await fetchAvailableModels('key');
+    // Only the two real 2.x+ ids survive; the alias, vision, learnlm, aqa, and 1.x rows are stripped.
+    expect(list).toEqual(['gemini-3.0-flash', 'gemini-2.5-pro']);
   });
 
   it('returns [] on a non-OK response', async () => {

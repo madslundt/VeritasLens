@@ -263,6 +263,16 @@ interface ModelsListResponse {
 // also expose generateContent though (modality isn't reflected in the model
 // list), so we strip them by category keyword. These keywords are stable
 // across releases — new chat families (gemini-3.x, …) appear automatically.
+//
+// The `-aqa`, `learnlm`, and `-vision` variants advertise generateContent but
+// reliably 4xx on our (responseSchema + inline-audio) call shape: AQA is a
+// retrieval-grounded QA family with a different request envelope, LearnLM
+// rejects strict responseSchema in practice, and `-vision` accepts images
+// but not audio. The `-latest` aliases are excluded because the underlying
+// versioned model is already in the list — keeping the alias around just
+// surfaces a duplicate that points to whatever Google rotates next. And
+// `gemini-1.*` was retired in 0.8.1 (see CHANGELOG) — listing it makes the
+// dropdown look richer than it actually is.
 const GEMINI_NON_CHAT_KEYWORDS: readonly RegExp[] = [
   /-tts(\b|-)/i,           // gemini-2.5-flash-preview-tts
   /-image(\b|-)/i,         // gemini-2.5-flash-image-preview
@@ -271,6 +281,11 @@ const GEMINI_NON_CHAT_KEYWORDS: readonly RegExp[] = [
   /-live/i,
   /-search/i,
   /embedding/i,
+  /-aqa(\b|-)/i,           // retrieval-grounded QA — different request envelope
+  /learnlm/i,              // separate family; strict responseSchema unreliable
+  /-vision(\b|-)/i,        // vision-input only, rejects audio inlineData
+  /-latest$/i,             // alias entries — underlying versioned id is already listed
+  /^gemini-1\./i,          // 1.x retired by Google; calls return "no longer supported"
 ];
 
 export function isSupportedGeminiModel(id: string): boolean {
