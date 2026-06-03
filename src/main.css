@@ -27,6 +27,29 @@ body {
   min-height: 100dvh;
   background: var(--bg);
   color: var(--text);
+  /* iOS WKWebView (used by the Even App on iPhone) reveals its native scroll
+     view's background — white by default — when the user rubber-bands past
+     the bottom of the document. Containing the overscroll keeps that white
+     stripe from flashing in below our fixed bottom-stack. */
+  overscroll-behavior-y: contain;
+}
+
+/* Paint the iPhone home-indicator safe area in the same surface tone as the
+   bottom nav. The bottom-stack already pads itself with env(safe-area-inset-
+   bottom), but some host WebViews report 0 there while the OS still reserves
+   the inset natively — this fixed backstop covers the inset directly. Sits
+   below the bottom-stack (z-index 49 vs 50) so the nav still owns the
+   border-top above it. */
+body::after {
+  content: '';
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: env(safe-area-inset-bottom, 0px);
+  background: var(--surface);
+  z-index: 49;
+  pointer-events: none;
 }
 
 #root {
@@ -884,7 +907,11 @@ button:disabled {
   left: 0;
   right: 0;
   background: var(--surface);
-  padding-bottom: env(safe-area-inset-bottom);
+  /* Explicit `0px` fallback — older WebViews that don't recognise env() at
+   * all silently drop the whole declaration; the fallback keeps a valid
+   * value flowing. The body::after backstop above paints the safe area
+   * regardless, so the two together are belt-and-suspenders. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   z-index: 50;
 }
 
