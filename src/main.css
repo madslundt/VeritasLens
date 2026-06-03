@@ -943,9 +943,13 @@ button:disabled {
 }
 
 .bottom-nav-icon {
-  font-size: 1.15rem;
-  line-height: 1;
   position: relative;
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
 }
 
 /* Unsaved-changes indicator. Floats over the upper-right of the tab icon so

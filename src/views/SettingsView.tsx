@@ -1873,11 +1873,48 @@ export const SettingsView: Component = () => {
           </div>
         </Show>
         <nav class="bottom-nav" role="tablist" aria-label="Sections">
+          {/*
+            Inline SVG icons, all 22 × 22 viewBox with `currentColor` strokes
+            so they pick up the active-state colour. Switched from Unicode
+            glyphs (◉ ◷ ⚙ ✦) because iOS rendered them inconsistently:
+            `⚙` had emoji-presentation-default (rendered as a colour gear),
+            `◉` skewed larger than the rest in iOS's font fallback chain.
+            Inline SVG guarantees identical size + monochrome rendering on
+            every platform.
+          */}
           <For each={[
-            { id: 'lenses' as const, label: 'Lenses', icon: '◉', dirty: (): boolean => lensDirty() },
-            { id: 'history' as const, label: 'History', icon: '◷', dirty: (): boolean => false },
-            { id: 'settings' as const, label: 'Settings', icon: '⚙', dirty: (): boolean => appDirty() },
-            { id: 'llm' as const, label: 'LLM', icon: '✦', dirty: (): boolean => llmDirty() },
+            { id: 'lenses' as const, label: 'Lenses', dirty: (): boolean => lensDirty(), svg: (
+              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
+                <circle cx="11" cy="11" r="8" fill="none" stroke="currentColor" stroke-width="1.5" />
+                <circle cx="11" cy="11" r="3" fill="currentColor" />
+              </svg>
+            ) },
+            { id: 'history' as const, label: 'History', dirty: (): boolean => false, svg: (
+              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
+                <circle cx="11" cy="11" r="8" fill="none" stroke="currentColor" stroke-width="1.5" />
+                <path d="M11 6.5v5l3 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            ) },
+            { id: 'settings' as const, label: 'Settings', dirty: (): boolean => appDirty(), svg: (
+              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
+                <circle cx="11" cy="11" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5" />
+                <path
+                  d="M11 1.5v3M11 17.5v3M3.8 3.8l2.1 2.1M16.1 16.1l2.1 2.1M1.5 11h3M17.5 11h3M3.8 18.2l2.1-2.1M16.1 5.9l2.1-2.1"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                />
+              </svg>
+            ) },
+            { id: 'llm' as const, label: 'LLM', dirty: (): boolean => llmDirty(), svg: (
+              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
+                <path
+                  d="M11 2 L12.4 9.6 L20 11 L12.4 12.4 L11 20 L9.6 12.4 L2 11 L9.6 9.6 Z"
+                  fill="currentColor"
+                />
+              </svg>
+            ) },
           ]}>
             {(t) => (
               <button
@@ -1889,7 +1926,7 @@ export const SettingsView: Component = () => {
                 onClick={() => setActiveTab(t.id)}
               >
                 <span class="bottom-nav-icon" aria-hidden="true">
-                  {t.icon}
+                  {t.svg}
                   <Show when={t.dirty()}>
                     <span class="bottom-nav-dot" aria-label="Unsaved changes" />
                   </Show>

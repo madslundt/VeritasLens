@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.11.2 — 2026-06-03
+- **Fix inconsistent bottom-nav icons on iOS.** The four bottom-nav tabs used Unicode glyphs (`◉ ◷ ⚙ ✦`). On iPhone two of them rendered wrong: `⚙` (U+2699) has emoji-presentation-default in iOS and showed as a colour gear emoji at a different size from the rest; `◉` (U+25C9) was selected from a font-fallback chain that drew it larger than the other glyphs. Replaced all four with inline 22 × 22 SVGs using `currentColor` so they pick up the active-state colour, share the same bounding box, and render identically on iOS / Android / desktop WebView. The `.bottom-nav-icon` wrapper becomes a `display: inline-flex` 22 × 22 box so the unsaved-changes dot still floats over the upper-right corner.
+
 ## 0.11.1 — 2026-06-03
 - **Fix white stripe under the bottom nav on iPhone (iOS WKWebView).** Some iOS host WebViews report `env(safe-area-inset-bottom)` as `0` while the OS still reserves the home-indicator inset natively, so `.bottom-stack`'s `padding-bottom: env(safe-area-inset-bottom)` collapsed and the WebView's white scroll-view background showed through below the tab nav. Adds a fixed `body::after` backstop pinned to the inset that paints the safe area in `var(--surface)` regardless of what env() reports, sets `overscroll-behavior-y: contain` on the body so rubber-band past the bottom can no longer reveal the WebView's default white, and tightens the env() fallback to `0px`. No layout change on devices where env() was already correct (the backstop overlaps the existing padding with the same colour).
 
