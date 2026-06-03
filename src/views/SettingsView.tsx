@@ -28,6 +28,8 @@ import {
   saveOpenaiTranscribeModels,
   saveAutoDisabledLenses,
   saveProvider,
+  saveSttHost,
+  saveSttModel,
   saveResponseLanguage,
   sessionHistory,
   setAvailableModels,
@@ -39,8 +41,11 @@ import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecyc
 import {
   LANGUAGES,
   OPENAI_BASE_URLS,
+  OPENAI_CHAT_ONLY_HOSTS,
   OPENAI_INLINE_AUDIO_HOSTS,
   OPENAI_TRANSCRIBE_MODELS,
+  STT_HOSTS,
+  STT_MODELS_BY_HOST,
   openaiHostLabel,
   type BufferDuration,
   type GeminiModel,
@@ -50,6 +55,7 @@ import {
   type LlmProvider,
   type MeetingPrepSection,
   type OpenAiBaseUrl,
+  type SttHost,
 } from '@/types';
 import { personas } from '@/personas';
 import { MEETING_PREP_ID } from '@/personas/meetingPrep';
@@ -79,6 +85,8 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.openai.com/v1', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.groq.com/openai/v1', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://openrouter.ai/api/v1', label: 'OpenRouter (audio models)', baseUrl: 'https://openrouter.ai/api/v1' },
+  { kind: 'openai-compatible', value: 'openai-compatible:https://api.deepseek.com/v1', label: 'DeepSeek (external STT)', baseUrl: 'https://api.deepseek.com/v1' },
+  { kind: 'openai-compatible', value: 'openai-compatible:https://api.perplexity.ai', label: 'Perplexity (web-grounded, external STT)', baseUrl: 'https://api.perplexity.ai' },
 ];
 
 function providerOptionValue(provider: LlmProvider, baseUrl: OpenAiBaseUrl): string {
@@ -96,8 +104,41 @@ function openaiKeyPlaceholder(baseUrl: OpenAiBaseUrl): string {
     case 'https://api.groq.com/openai/v1': return 'gsk_…';
     case 'https://api.openai.com/v1': return 'sk-…';
     case 'https://openrouter.ai/api/v1': return 'sk-or-…';
+    case 'https://api.deepseek.com/v1': return 'sk-…';
+    case 'https://api.perplexity.ai': return 'pplx-…';
   }
 }
+
+/**
+ * Direct deep link to each host's API-key page. Rendered inline so the
+ * `href=` attribute sits on the same line as the URL literal — the
+ * network-whitelist contract test (tests/contracts/network-whitelist.test.ts)
+ * excludes URLs that appear inside JSX navigation attributes, so this shape
+ * is what keeps these *external* dashboard links from tripping the
+ * whitelist check (they open in the host browser, not the WebView).
+ *
+ * URLs are the official console paths as of 2026-Q2; update if a provider
+ * reshuffles their dashboard.
+ */
+const ApiKeyLink: Component<{ host: OpenAiBaseUrl }> = (props) => (
+  <Switch>
+    <Match when={props.host === 'https://api.openai.com/v1'}>
+      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">platform.openai.com/api-keys</a>
+    </Match>
+    <Match when={props.host === 'https://api.groq.com/openai/v1'}>
+      <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">console.groq.com/keys</a>
+    </Match>
+    <Match when={props.host === 'https://openrouter.ai/api/v1'}>
+      <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">openrouter.ai/keys</a>
+    </Match>
+    <Match when={props.host === 'https://api.deepseek.com/v1'}>
+      <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">platform.deepseek.com/api_keys</a>
+    </Match>
+    <Match when={props.host === 'https://api.perplexity.ai'}>
+      <a href="https://www.perplexity.ai/settings/api" target="_blank" rel="noreferrer">perplexity.ai/settings/api</a>
+    </Match>
+  </Switch>
+);
 
 function parseProviderOption(value: string): { provider: LlmProvider; baseUrl: OpenAiBaseUrl } {
   if (value === 'gemini') {
@@ -277,6 +318,13 @@ export const SettingsView: Component = () => {
   };
   const isInlineAudioHost = (baseUrl: OpenAiBaseUrl): boolean =>
     OPENAI_INLINE_AUDIO_HOSTS.has(baseUrl);
+  const isChatOnlyHost = (baseUrl: OpenAiBaseUrl): boolean =>
+    OPENAI_CHAT_ONLY_HOSTS.has(baseUrl);
+  // Cross-host STT draft. Used only when the active chat host is in
+  // OPENAI_CHAT_ONLY_HOSTS — for everyone else, the per-chat-host transcribe
+  // override above (draftOpenaiTranscribeModel) carries the same role.
+  const [draftSttHost, setDraftSttHost] = createSignal<SttHost>(settings().sttHost);
+  const [draftSttModel, setDraftSttModel] = createSignal<string>(settings().sttModel);
   const [openaiModels, setOpenaiModels] = createSignal<string[]>([]);
   const [openaiModelsLoading, setOpenaiModelsLoading] = createSignal(false);
   // Outcome of the most recent /models probe per provider. Used to gate
@@ -303,12 +351,19 @@ export const SettingsView: Component = () => {
       ? meetingPrepSections()
       : [{ id: newSectionId(), label: '', body: '' }],
   );
-  const [prepStatus, setPrepStatus] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  // `prepError` carries byte-budget violations returned by the global save;
+  // shown inline next to the meter. Cleared on the next successful save.
   const [prepError, setPrepError] = createSignal('');
   const [prepExpanded, setPrepExpanded] = createSignal(false);
   const [autoConfigExpanded, setAutoConfigExpanded] = createSignal(false);
+  // Auto-lens enable list is now draft-only — toggles update the local
+  // signal and are persisted by the global Save bar alongside the other
+  // tabs' drafts, so the user sees the dot indicator on the Lenses tab
+  // until they explicitly save.
+  const [draftAutoDisabledLenses, setDraftAutoDisabledLenses] =
+    createSignal<string[]>(settings().autoDisabledLenses);
   const autoEnabledCount = createMemo(() =>
-    AUTO_LENS_CANDIDATES.filter((id) => !settings().autoDisabledLenses.includes(id)).length,
+    AUTO_LENS_CANDIDATES.filter((id) => !draftAutoDisabledLenses().includes(id)).length,
   );
   const autoLensItems = createMemo(() =>
     AUTO_LENS_CANDIDATES.map((id) => {
@@ -316,14 +371,13 @@ export const SettingsView: Component = () => {
       return { id, name: p?.name ?? id };
     }),
   );
-  const toggleAutoLens = async (id: string): Promise<void> => {
-    const current = settings().autoDisabledLenses;
-    const next = current.includes(id)
-      ? current.filter((x) => x !== id)
-      : [...current, id];
-    await saveAutoDisabledLenses(getSetLs(), next);
+  const toggleAutoLens = (id: string): void => {
+    setDraftAutoDisabledLenses((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
   };
-  const [saveState, setSaveState] = createSignal<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  type SaveState = 'idle' | 'saving' | 'saved' | 'error';
+  const [saveState, setSaveState] = createSignal<SaveState>('idle');
   // Per-model test status. The Auto-classifier slot is only meaningful when
   // it's distinct from the main model (otherwise we'd double-probe the same
   // endpoint). `running` on either drives the Test button's spinner.
@@ -352,7 +406,8 @@ export const SettingsView: Component = () => {
   };
   const anyTestRunning = (): boolean =>
     mainTest().state === 'running' || autoTest().state === 'running';
-  const [activeTab, setActiveTab] = createSignal<'config' | 'history'>('config');
+  type SettingsTab = 'lenses' | 'history' | 'settings' | 'llm';
+  const [activeTab, setActiveTab] = createSignal<SettingsTab>('lenses');
 
   // Session log navigation
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
@@ -537,38 +592,11 @@ export const SettingsView: Component = () => {
   });
 
 
-  // Autosave the meeting-prep draft on debounce. Stays separate from the main
-  // Save button (which handles every other setting) because the editor is
-  // dynamic — multiple add/remove ops in a row would otherwise force the user
-  // to mash Save constantly. Persisted serialization happens through the
-  // bridge LocalStorage path used by every other setting.
-  let prepSaveTimer: ReturnType<typeof setTimeout> | null = null;
-  let prepSavedFadeTimer: ReturnType<typeof setTimeout> | null = null;
-  createEffect(() => {
-    const next = prepDraft();
-    if (prepSaveTimer) clearTimeout(prepSaveTimer);
-    prepSaveTimer = setTimeout(async () => {
-      setPrepStatus('saving');
-      const bridge = getBridge();
-      const result = await saveMeetingPrepSections(
-        (k, v) => bridge.setLocalStorage(k, v),
-        next,
-      );
-      if (result.ok) {
-        setPrepStatus('saved');
-        setPrepError('');
-        if (prepSavedFadeTimer) clearTimeout(prepSavedFadeTimer);
-        prepSavedFadeTimer = setTimeout(() => setPrepStatus('idle'), 1500);
-      } else {
-        setPrepStatus('error');
-        setPrepError(result.error ?? 'Could not save meeting prep.');
-      }
-    }, 600);
-  });
-  onCleanup(() => {
-    if (prepSaveTimer) clearTimeout(prepSaveTimer);
-    if (prepSavedFadeTimer) clearTimeout(prepSavedFadeTimer);
-  });
+  // Meeting-prep edits are draft-only now — persisted by the global Save bar
+  // alongside other tabs' drafts. `prepError` is still used to surface byte-
+  // budget violations returned from saveMeetingPrepSections when the global
+  // save fires, so the user sees inline detail next to the byte meter
+  // instead of only the generic "Could not save" toast.
 
   // Shared helper with the store so the inline counter and the cap check
   // never drift — adding a field to MeetingPrepSection updates both at once.
@@ -659,14 +687,47 @@ export const SettingsView: Component = () => {
   });
 
   let savedFadeTimer: ReturnType<typeof setTimeout> | null = null;
-  onCleanup(() => { if (savedFadeTimer) clearTimeout(savedFadeTimer); });
+  onCleanup(() => {
+    if (savedFadeTimer) clearTimeout(savedFadeTimer);
+  });
 
+  /**
+   * Single global save — persists every draft across LLM + Settings tabs in
+   * one Promise.all. Refreshes the HUD afterwards so buffer / voice-gate /
+   * provider changes take effect on the next analysis. Per-tab dirty memos
+   * still drive the action bar's visibility and the "also on …" tail; the
+   * write itself is unified for simplicity and to avoid two networked HUD
+   * refreshes when both tabs are dirty.
+   */
   const onSave = async () => {
     setSaveState('saving');
     try {
       const bridge = getBridge();
       const setLs = (k: string, v: string) => bridge.setLocalStorage(k, v);
-      const results = await Promise.all([
+      // Meeting-prep returns `{ok, error}` (byte-budget validation), so it
+      // runs in parallel with the boolean savers but contributes its own
+      // failure path. Resolve to a uniform boolean for the aggregate `ok`
+      // check and stash the inline error so it surfaces next to the meter.
+      const [
+        provider,
+        geminiKey,
+        geminiModel,
+        geminiAuto,
+        openaiKeys,
+        openaiBaseUrl,
+        openaiModel,
+        openaiTranscribe,
+        sttHost,
+        sttModel,
+        language,
+        buffer,
+        autoSummary,
+        discreet,
+        voiceGate,
+        voiceTrim,
+        autoDisabled,
+        prepResult,
+      ] = await Promise.all([
         saveProvider(setLs, draftProvider()),
         saveGeminiKey(setLs, draftKey().trim()),
         saveGeminiModel(setLs, draftModel()),
@@ -679,14 +740,37 @@ export const SettingsView: Component = () => {
         saveOpenaiTranscribeModels(setLs, Object.fromEntries(
           (Object.entries(draftOpenaiTranscribeModels()) as Array<[OpenAiBaseUrl, string]>).map(([u, v]) => [u, v.trim()]),
         ) as Record<OpenAiBaseUrl, string>),
+        saveSttHost(setLs, draftSttHost()),
+        saveSttModel(setLs, draftSttModel().trim()),
         saveResponseLanguage(setLs, draftLanguage()),
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
         saveDiscreet(setLs, draftDiscreet()),
         saveVoiceGateRmsFloor(setLs, draftVoiceGate()),
         saveVoiceTrimEnabled(setLs, draftVoiceTrim()),
+        saveAutoDisabledLenses(setLs, draftAutoDisabledLenses()),
+        saveMeetingPrepSections(setLs, prepDraft()),
       ]);
-      if (results.every(Boolean)) {
+      if (prepResult.ok) setPrepError('');
+      else setPrepError(prepResult.error ?? 'Could not save meeting prep.');
+      const allOk = [
+        provider, geminiKey, geminiModel, geminiAuto, openaiKeys,
+        openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
+        language, buffer, autoSummary, discreet, voiceGate, voiceTrim,
+        autoDisabled,
+      ].every(Boolean) && prepResult.ok;
+      if (allOk) {
+        // Re-seed the draft signals from the persisted store. The store may
+        // have normalized values (e.g. meeting-prep labels are sliced at
+        // MEETING_PREP_LABEL_MAX); without this re-seed the draft would
+        // retain the un-normalized value and lensDirty would stay true.
+        setDraftAutoDisabledLenses(settings().autoDisabledLenses);
+        const freshPrep = meetingPrepSections();
+        setPrepDraft(
+          freshPrep.length > 0
+            ? freshPrep
+            : [{ id: newSectionId(), label: '', body: '' }],
+        );
         setSaveState('saved');
         if (savedFadeTimer) clearTimeout(savedFadeTimer);
         savedFadeTimer = setTimeout(() => setSaveState('idle'), 1500);
@@ -699,6 +783,82 @@ export const SettingsView: Component = () => {
       setSaveState('error');
     }
   };
+
+  /**
+   * Dirty flags: drafts vs persisted store. Drive the cross-tab "unsaved
+   * changes" bar that surfaces above the bottom nav when the user navigates
+   * away from a tab without saving. The bar only fires for tabs the user
+   * isn't currently looking at — when they're on the tab itself, the in-tab
+   * Save button is already visible.
+   */
+  const shallowRecordEq = (
+    a: Record<string, string>,
+    b: Record<string, string>,
+  ): boolean => {
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    if (aKeys.length !== bKeys.length) return false;
+    for (const k of aKeys) if (a[k] !== b[k]) return false;
+    return true;
+  };
+  const llmDirty = createMemo(() => {
+    const s = settings();
+    return (
+      draftProvider() !== s.provider
+      || draftKey() !== s.geminiApiKey
+      || draftModel() !== s.geminiModel
+      || draftAutoModel() !== s.geminiAutoModel
+      || !shallowRecordEq(draftOpenaiKeys() as Record<string, string>, s.openaiApiKeys as Record<string, string>)
+      || draftOpenaiBaseUrl() !== s.openaiBaseUrl
+      || draftOpenaiModel() !== s.openaiModel
+      || !shallowRecordEq(draftOpenaiTranscribeModels() as Record<string, string>, s.openaiTranscribeModels as Record<string, string>)
+      || draftSttHost() !== s.sttHost
+      || draftSttModel() !== s.sttModel
+    );
+  });
+  const appDirty = createMemo(() => {
+    const s = settings();
+    return (
+      draftLanguage() !== s.responseLanguage
+      || draftBuffer() !== s.bufferDuration
+      || draftAutoEnabled() !== s.autoSummaryEnabled
+      || draftDiscreet() !== s.discreet
+      || draftVoiceGate() !== s.voiceGateRmsFloor
+      || draftVoiceTrim() !== s.voiceTrimEnabled
+    );
+  });
+  /**
+   * Lens-tab dirty flag: covers both the Auto-classifier enable list and
+   * the meeting-prep editor. Compared against the persisted store signals
+   * (`settings().autoDisabledLenses`, `meetingPrepSections()`) rather than
+   * a snapshot — so an outside writer (e.g. lifecycle's session-summary
+   * append) doesn't fool the bar into thinking the user has unsaved work.
+   */
+  const lensDirty = createMemo(() => {
+    const a = draftAutoDisabledLenses();
+    const b = settings().autoDisabledLenses;
+    if (a.length !== b.length) return true;
+    const aSet = new Set(a);
+    for (const id of b) if (!aSet.has(id)) return true;
+    // Normalize meeting-prep before comparing: drop fully-empty rows (so the
+    // "always at least one row" seed on a fresh install doesn't read as a
+    // dirty diff vs the empty persisted array) and compare by label+body
+    // only (ids are regenerated on add, so they're not stable identity).
+    const norm = (rows: MeetingPrepSection[]) =>
+      rows
+        .filter((s) => s.label.trim().length > 0 || s.body.trim().length > 0)
+        .map((s) => ({ label: s.label, body: s.body }));
+    const draftPrep = norm(prepDraft());
+    const persistedPrep = norm(meetingPrepSections());
+    if (draftPrep.length !== persistedPrep.length) return true;
+    for (let i = 0; i < draftPrep.length; i++) {
+      if (
+        draftPrep[i]!.label !== persistedPrep[i]!.label
+        || draftPrep[i]!.body !== persistedPrep[i]!.body
+      ) return true;
+    }
+    return false;
+  });
 
   const onTest = async () => {
     // Read everything from drafts so the probe matches what the user is about
@@ -738,9 +898,23 @@ export const SettingsView: Component = () => {
     // model into the probe so the Test button reflects what Save would do.
     // Empty draft falls back to the static default inside runSelfTest. Inline-
     // audio hosts (OpenRouter) skip transcription entirely — pass undefined.
-    const draftTranscribe = isOpenAi && !isInlineAudioHost(baseUrl)
+    // Chat-only hosts (DeepSeek, Perplexity) borrow STT from draftSttHost
+    // and use that host's key from the per-host key draft.
+    const isChatOnly = isOpenAi && isChatOnlyHost(baseUrl);
+    const draftTranscribe = isOpenAi && !isInlineAudioHost(baseUrl) && !isChatOnly
       ? (draftOpenaiTranscribeModel().trim() || undefined)
       : undefined;
+    const sttDraftHost: SttHost | undefined = isChatOnly ? draftSttHost() : undefined;
+    const sttDraftModel = isChatOnly ? (draftSttModel().trim() || undefined) : undefined;
+    const sttDraftApiKey = isChatOnly ? (draftOpenaiKeys()[draftSttHost()] ?? '').trim() : undefined;
+    if (isChatOnly && !sttDraftApiKey) {
+      // STT key input lives right below the host picker — surface a hint
+      // pointing at it rather than asking the user to navigate elsewhere.
+      setKeyError(`Add a ${openaiHostLabel(draftSttHost())} API key in the Speech-to-text section so ${openaiHostLabel(baseUrl)} can transcribe.`);
+      setMainTest(IDLE_TEST);
+      setAutoTest(IDLE_TEST);
+      return;
+    }
     const { runSelfTest } = await import('@/llm');
     const probe = async (
       model: string,
@@ -751,6 +925,9 @@ export const SettingsView: Component = () => {
           provider,
           baseUrl,
           transcribeModel: draftTranscribe,
+          sttHost: sttDraftHost,
+          sttModel: sttDraftModel,
+          sttApiKey: sttDraftApiKey,
           lightweight: probeOpts?.lightweight,
         });
         return { state: 'ok', message: `Works · ${r.latencyMs} ms` };
@@ -968,49 +1145,28 @@ export const SettingsView: Component = () => {
         <p class="tagline">Silent intelligence for your G2.</p>
       </header>
 
-      <Show
-        when={deviceStatus()}
-        fallback={<div class="device-badge muted">Waiting for glasses…</div>}
-      >
-        {(s) => (
-          <div class="device-badge">
-            <span class={`dot ${s().connectType}`} />
-            <span>{s().connectType}</span>
-            <Show when={typeof s().batteryLevel === 'number'}>
-              <span class="sep">·</span>
-              <span>{s().batteryLevel}%</span>
-            </Show>
-            <Show when={s().isWearing}>
-              <span class="sep">·</span>
-              <span>wearing</span>
-            </Show>
-          </div>
-        )}
-      </Show>
-
-      <div class="tab-bar" role="tablist">
-        <button
-          type="button"
-          role="tab"
-          class="tab-btn"
-          classList={{ active: activeTab() === 'config' }}
-          onClick={() => setActiveTab('config')}
-        >
-          Settings
-        </button>
-        <button
-          type="button"
-          role="tab"
-          class="tab-btn"
-          classList={{ active: activeTab() === 'history' }}
-          onClick={() => setActiveTab('history')}
-        >
-          History
-        </button>
-      </div>
-
-      <Show when={activeTab() === 'config'}>
+      <Show when={activeTab() === 'lenses'}>
         <>
+          <Show
+            when={deviceStatus()}
+            fallback={<div class="device-badge muted">Waiting for glasses…</div>}
+          >
+            {(s) => (
+              <div class="device-badge">
+                <span class={`dot ${s().connectType}`} />
+                <span>{s().connectType}</span>
+                <Show when={typeof s().batteryLevel === 'number'}>
+                  <span class="sep">·</span>
+                  <span>{s().batteryLevel}%</span>
+                </Show>
+                <Show when={s().isWearing}>
+                  <span class="sep">·</span>
+                  <span>wearing</span>
+                </Show>
+              </div>
+            )}
+          </Show>
+
           <section class="lenses-card">
             <div class="field-header">
               <span class="field-label">Lenses</span>
@@ -1070,12 +1226,12 @@ export const SettingsView: Component = () => {
                             <ul class="meeting-prep-list">
                               <For each={autoLensItems()}>
                                 {(item) => (
-                                  <li class="lens-row" style="padding: 6px 0;">
-                                    <label class="toggle-row">
+                                  <li class="lens-row lens-row--toggle">
+                                    <label class="toggle-row toggle-row--full">
                                       <input
                                         type="checkbox"
-                                        checked={!settings().autoDisabledLenses.includes(item.id)}
-                                        onChange={() => void toggleAutoLens(item.id)}
+                                        checked={!draftAutoDisabledLenses().includes(item.id)}
+                                        onChange={() => toggleAutoLens(item.id)}
                                       />
                                       <span>{item.name}</span>
                                     </label>
@@ -1226,14 +1382,8 @@ export const SettingsView: Component = () => {
                                   {Math.round(prepUsedBytes() / 1024)} / {Math.round(MEETING_PREP_BYTE_BUDGET / 1024)} KB
                                 </span>
                               </div>
-                              <Show when={prepStatus() === 'saving'}>
-                                <span class="status">Saving…</span>
-                              </Show>
-                              <Show when={prepStatus() === 'saved'}>
-                                <span class="status ok">Saved</span>
-                              </Show>
-                              <Show when={prepStatus() === 'error'}>
-                                <span class="status err">{prepError() || 'Could not save'}</span>
+                              <Show when={prepError()}>
+                                <span class="status err">{prepError()}</span>
                               </Show>
                             </div>
                           </div>
@@ -1245,14 +1395,17 @@ export const SettingsView: Component = () => {
               </For>
             </ul>
           </section>
+        </>
+      </Show>
 
-          <form
-            class="config"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void onSave();
-            }}
-          >
+      <Show when={activeTab() === 'llm'}>
+        <form
+          class="config"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onSave();
+          }}
+        >
             <label class="field">
               <span class="field-label">Provider</span>
               <select
@@ -1395,8 +1548,7 @@ export const SettingsView: Component = () => {
                   <span class="field-error">{keyError()}</span>
                 </Show>
                 <span class="field-hint">
-                  Stored only on this device. Get one from your provider's
-                  dashboard.
+                  Stored only on this device. Get one at <ApiKeyLink host={draftOpenaiBaseUrl()} />.
                 </span>
               </label>
 
@@ -1460,32 +1612,101 @@ export const SettingsView: Component = () => {
                 </div>
               </label>
 
-              <Show when={!isInlineAudioHost(draftOpenaiBaseUrl())}>
+              <Show when={!isInlineAudioHost(draftOpenaiBaseUrl()) && !isChatOnlyHost(draftOpenaiBaseUrl())}>
                 <label class="field">
                   <span class="field-label">Transcription model</span>
-                  <input
-                    type="text"
-                    autocomplete="off"
-                    spellcheck={false}
-                    placeholder={OPENAI_TRANSCRIBE_MODELS[draftOpenaiBaseUrl()] ?? ''}
+                  <select
                     value={draftOpenaiTranscribeModel()}
-                    onInput={(e) => { setDraftOpenaiTranscribeModel(e.currentTarget.value); clearStatuses(); }}
-                  />
+                    onChange={(e) => { setDraftOpenaiTranscribeModel(e.currentTarget.value); clearStatuses(); }}
+                  >
+                    <option value="">
+                      Default ({OPENAI_TRANSCRIBE_MODELS[draftOpenaiBaseUrl()] ?? ''})
+                    </option>
+                    <For each={(STT_MODELS_BY_HOST[draftOpenaiBaseUrl() as SttHost] ?? [])}>
+                      {(m) => <option value={m}>{m}</option>}
+                    </For>
+                  </select>
                   <span class="field-hint">
                     Posted to <code>/audio/transcriptions</code> before chat
-                    completions. Leave blank to use the {openaiHostLabel(draftOpenaiBaseUrl())} default
-                    (<code>{OPENAI_TRANSCRIBE_MODELS[draftOpenaiBaseUrl()] ?? ''}</code>); override
-                    with e.g. <code>gpt-4o-mini-transcribe</code> or <code>whisper-large-v3-turbo</code>
-                    if the default has been deprecated or you want a different price/quality point.
+                    completions on {openaiHostLabel(draftOpenaiBaseUrl())}. The default
+                    (<code>{OPENAI_TRANSCRIBE_MODELS[draftOpenaiBaseUrl()] ?? ''}</code>) is
+                    the cheapest current pick; override for a different price/quality point.
                   </span>
+                </label>
+              </Show>
+
+              <Show when={isChatOnlyHost(draftOpenaiBaseUrl())}>
+                <div class="config-section-divider" role="separator">
+                  <span>Speech-to-text</span>
+                </div>
+                <p class="field-hint">
+                  {openaiHostLabel(draftOpenaiBaseUrl())} doesn't transcribe audio. VeritasLens
+                  will send the WAV to a separate Whisper host you pick below and forward only
+                  the transcript to {openaiHostLabel(draftOpenaiBaseUrl())}.
+                </p>
+                <label class="field">
+                  <span class="field-label">STT host</span>
+                  <select
+                    value={draftSttHost()}
+                    onChange={(e) => {
+                      const next = e.currentTarget.value as SttHost;
+                      setDraftSttHost(next);
+                      // Reset the STT model whenever the host changes so a stale
+                      // Groq model id can't be silently sent to OpenAI Whisper.
+                      const first = STT_MODELS_BY_HOST[next][0] ?? '';
+                      setDraftSttModel(first);
+                      clearStatuses();
+                    }}
+                  >
+                    <For each={STT_HOSTS}>
+                      {(h) => <option value={h}>{openaiHostLabel(h)} Whisper</option>}
+                    </For>
+                  </select>
+                </label>
+                <label class="field">
+                  <span class="field-label">{openaiHostLabel(draftSttHost())} API key</span>
+                  <input
+                    type="password"
+                    autocomplete="off"
+                    spellcheck={false}
+                    placeholder={openaiKeyPlaceholder(draftSttHost())}
+                    value={draftOpenaiKeys()[draftSttHost()] ?? ''}
+                    onInput={(e) => {
+                      const next = e.currentTarget.value;
+                      setDraftOpenaiKeys((prev) => ({ ...prev, [draftSttHost()]: next }));
+                      clearStatuses();
+                    }}
+                  />
+                  <span class="field-hint">
+                    Used for transcription only — the chat call still goes to {openaiHostLabel(draftOpenaiBaseUrl())}.
+                    Get one at <ApiKeyLink host={draftSttHost()} />.
+                  </span>
+                </label>
+                <label class="field">
+                  <span class="field-label">STT model</span>
+                  <select
+                    value={draftSttModel() || STT_MODELS_BY_HOST[draftSttHost()][0]}
+                    onChange={(e) => { setDraftSttModel(e.currentTarget.value); clearStatuses(); }}
+                  >
+                    <For each={STT_MODELS_BY_HOST[draftSttHost()]}>
+                      {(m) => <option value={m}>{m}</option>}
+                    </For>
+                  </select>
                 </label>
               </Show>
             </Show>
 
-            <div class="config-section-divider" role="separator">
-              <span>App settings</span>
-            </div>
+        </form>
+      </Show>
 
+      <Show when={activeTab() === 'settings'}>
+        <form
+          class="config"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void onSave();
+          }}
+        >
             <label class="field">
               <span class="field-label">Response language</span>
               <select
@@ -1587,24 +1808,11 @@ export const SettingsView: Component = () => {
               </Show>
             </div>
 
-            <div class="form-actions">
-              <button type="submit" class="primary" disabled={!canSave() || saveState() === 'saving'}>
-                {saveState() === 'saving' ? 'Saving…' : 'Save'}
-              </button>
-              <Show when={saveState() === 'saved'}>
-                <span class="status ok">Saved</span>
-              </Show>
-              <Show when={saveState() === 'error'}>
-                <span class="status err">Could not save</span>
-              </Show>
-            </div>
-          </form>
-
           <footer class="privacy">
             Audio is held in a rolling in-memory buffer, never written to disk. Your API key is sent
             only as part of the provider request you trigger. Session log is cleared when the app closes.
           </footer>
-        </>
+        </form>
       </Show>
 
       <Show when={activeTab() === 'history'}>
@@ -1629,6 +1837,69 @@ export const SettingsView: Component = () => {
         </section>
 
       </Show>
+
+      {/*
+        Bottom-fixed stack: optional Save bar on top, tab nav below. Wrapping
+        both in one fixed container guarantees zero gap between them (the
+        previous absolute-positioned approach left a few px of background
+        bleed-through whenever the bar's hard-coded offset didn't match the
+        nav's rendered height) and the shared surface + bottom padding makes
+        the home-indicator safe area read as part of the nav rather than a
+        floating bottom strip. `canSave` only gates the button when there
+        are LLM-side drafts to write; otherwise it would block the user from
+        saving plain app preferences just because they haven't yet entered
+        an API key.
+      */}
+      <div class="bottom-stack">
+        <Show when={llmDirty() || appDirty() || lensDirty()}>
+          <div class="action-bar" role="region" aria-label="Unsaved changes">
+            <span class="action-bar-status">
+              <span>Unsaved changes</span>
+              <Show when={saveState() === 'saved'}>
+                <span class="status ok">Saved</span>
+              </Show>
+              <Show when={saveState() === 'error'}>
+                <span class="status err">Could not save</span>
+              </Show>
+            </span>
+            <button
+              type="button"
+              class="primary"
+              disabled={(llmDirty() && !canSave()) || saveState() === 'saving'}
+              onClick={() => void onSave()}
+            >
+              {saveState() === 'saving' ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </Show>
+        <nav class="bottom-nav" role="tablist" aria-label="Sections">
+          <For each={[
+            { id: 'lenses' as const, label: 'Lenses', icon: '◉', dirty: (): boolean => lensDirty() },
+            { id: 'history' as const, label: 'History', icon: '◷', dirty: (): boolean => false },
+            { id: 'settings' as const, label: 'Settings', icon: '⚙', dirty: (): boolean => appDirty() },
+            { id: 'llm' as const, label: 'LLM', icon: '✦', dirty: (): boolean => llmDirty() },
+          ]}>
+            {(t) => (
+              <button
+                type="button"
+                role="tab"
+                class="bottom-nav-btn"
+                classList={{ active: activeTab() === t.id }}
+                aria-selected={activeTab() === t.id}
+                onClick={() => setActiveTab(t.id)}
+              >
+                <span class="bottom-nav-icon" aria-hidden="true">
+                  {t.icon}
+                  <Show when={t.dirty()}>
+                    <span class="bottom-nav-dot" aria-label="Unsaved changes" />
+                  </Show>
+                </span>
+                <span class="bottom-nav-label">{t.label}</span>
+              </button>
+            )}
+          </For>
+        </nav>
+      </div>
     </main>
   );
 };

@@ -9,9 +9,12 @@ import {
   DEFAULT_LLM_PROVIDER,
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
+  DEFAULT_STT_HOST,
+  DEFAULT_STT_MODEL,
   GEMINI_MODEL_PATTERN,
   LANGUAGES,
   OPENAI_BASE_URLS,
+  STT_HOSTS,
   type AppMode,
   type AppPhase,
   type BufferDuration,
@@ -23,6 +26,7 @@ import {
   type MeetingPrepSection,
   type OpenAiBaseUrl,
   type Settings,
+  type SttHost,
 } from '@/types';
 
 const emptyOpenaiKeys = (): Record<OpenAiBaseUrl, string> =>
@@ -48,6 +52,10 @@ const openaiTranscribeStorageKey = (baseUrl: OpenAiBaseUrl): string =>
   `${SETTINGS_KEY_OPENAI_TRANSCRIBE_PREFIX}${baseUrl}`;
 const SETTINGS_KEY_OPENAI_BASE_URL = 'veritaslens.openaiBaseUrl';
 const SETTINGS_KEY_OPENAI_MODEL = 'veritaslens.openaiModel';
+/** STT host used for chat-only providers (DeepSeek, Perplexity). One of `STT_HOSTS`. */
+const SETTINGS_KEY_STT_HOST = 'veritaslens.sttHost';
+/** Transcription model id on `sttHost`. Empty means "use the first entry of `STT_MODELS_BY_HOST[sttHost]`". */
+const SETTINGS_KEY_STT_MODEL = 'veritaslens.sttModel';
 const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
@@ -110,6 +118,8 @@ const [settings, setSettings] = createSignal<Settings>({
   openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
   openaiModel: DEFAULT_OPENAI_MODEL,
   openaiTranscribeModels: emptyOpenaiKeys(),
+  sttHost: DEFAULT_STT_HOST,
+  sttModel: DEFAULT_STT_MODEL,
   responseLanguage: DEFAULT_LANGUAGE,
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
@@ -155,6 +165,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_VOICE_GATE_LEGACY),
       safeGet(SETTINGS_KEY_VOICE_TRIM),
       safeGet(SETTINGS_KEY_AUTO_DISABLED_LENSES),
+      safeGet(SETTINGS_KEY_STT_HOST),
+      safeGet(SETTINGS_KEY_STT_MODEL),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -175,6 +187,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawVoiceGateLegacy,
     rawVoiceTrim,
     rawAutoDisabledLenses,
+    rawSttHost,
+    rawSttModel,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -202,6 +216,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     openaiBaseUrl: coercedBaseUrl,
     openaiModel: rawOpenaiModel || DEFAULT_OPENAI_MODEL,
     openaiTranscribeModels,
+    sttHost: coerceSttHost(rawSttHost),
+    sttModel: rawSttModel || DEFAULT_STT_MODEL,
     responseLanguage: coerceLanguage(rawLang),
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
@@ -267,6 +283,12 @@ export const saveOpenaiBaseUrl = (setLs: SetLs, url: OpenAiBaseUrl): Promise<boo
 
 export const saveOpenaiModel = (setLs: SetLs, model: string): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_OPENAI_MODEL, 'openaiModel', model);
+
+export const saveSttHost = (setLs: SetLs, host: SttHost): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_STT_HOST, 'sttHost', host);
+
+export const saveSttModel = (setLs: SetLs, model: string): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_STT_MODEL, 'sttModel', model);
 
 /**
  * Persist all per-host transcription model overrides at once. Empty values
@@ -561,6 +583,13 @@ function coerceOpenaiBaseUrl(raw: string | null | undefined): OpenAiBaseUrl {
     return raw as OpenAiBaseUrl;
   }
   return DEFAULT_OPENAI_BASE_URL;
+}
+
+function coerceSttHost(raw: string | null | undefined): SttHost {
+  if (raw && (STT_HOSTS as readonly string[]).includes(raw)) {
+    return raw as SttHost;
+  }
+  return DEFAULT_STT_HOST;
 }
 
 function coerceAutoDisabledLenses(raw: string): string[] {

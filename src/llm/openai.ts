@@ -23,12 +23,22 @@ export interface CallOpenAiLensOptions {
   /** Chat-completions model. */
   model: string;
   /**
-   * Transcription model id for the chosen host (e.g. `whisper-1` on OpenAI,
-   * `whisper-large-v3` on Groq). Required for transcribe-then-chat hosts;
-   * omitted for inline-audio hosts (OpenRouter) where the WAV is attached as
-   * an `input_audio` content part on the chat completion itself.
+   * Transcription model id (e.g. `whisper-1` on OpenAI, `whisper-large-v3` on
+   * Groq). Required whenever the audio path is transcribe-then-chat; omitted
+   * for inline-audio hosts (OpenRouter) where the WAV is attached as an
+   * `input_audio` content part on the chat completion itself.
    */
   transcribeModel?: string;
+  /**
+   * STT host. When omitted or equal to `baseUrl`, STT happens on the chat
+   * host (current behavior for OpenAI/Groq). When set to a different host,
+   * the runtime posts to that host's `/audio/transcriptions` and only sends
+   * the resulting transcript to `baseUrl`'s chat endpoint — the path used by
+   * chat-only providers (DeepSeek, Perplexity) that have no STT of their own.
+   */
+  transcribeBaseUrl?: OpenAiBaseUrl;
+  /** API key for `transcribeBaseUrl`. Falls back to `apiKey` when STT runs on the chat host. */
+  transcribeApiKey?: string;
   /** WAV-encoded audio bytes. Transcribed before chat completions. */
   wav: Uint8Array;
   /** Fully-built, language-aware system prompt. */
@@ -107,24 +117,39 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
   };
   const strict = toStrictSchema(augmentedSchema);
 
-  // Build per-host user-message content. Inline-audio hosts attach the WAV
-  // directly to the chat completion; transcribe-then-chat hosts upload it to
-  // Whisper first (held outside the retry loop so a 429 doesn't re-burn STT
-  // quota by re-uploading the WAV).
-  const userContent: unknown = OPENAI_INLINE_AUDIO_HOSTS.has(opts.baseUrl)
-    ? [
-        { type: 'input_audio', input_audio: { data: base64FromBytes(opts.wav), format: 'wav' } },
-        { type: 'text', text: 'Analyze the audio above according to the system prompt.' },
-      ]
-    : transcriptUserMessage(
-        await transcribeAudio({
-          apiKey: opts.apiKey,
-          baseUrl: opts.baseUrl,
-          model: requireTranscribeModel(opts),
-          wav: opts.wav,
-          signal: opts.signal,
-        }),
-      );
+  // Build per-host user-message content. Three audio paths:
+  //   1. Inline-audio hosts (OpenRouter): attach the WAV directly to the chat
+  //      completion.
+  //   2. Cross-host STT (DeepSeek, Perplexity): transcribe on a different
+  //      whitelisted host (Groq/OpenAI Whisper), then send the transcript to
+  //      the chat host. The STT key is opts.transcribeApiKey, not opts.apiKey.
+  //   3. Same-host transcribe-then-chat (OpenAI, Groq): upload the WAV to the
+  //      chat host's own Whisper endpoint with the same key.
+  // STT happens outside the retry loop so a 429 from chat doesn't re-burn STT
+  // quota by re-uploading the WAV.
+  let userContent: unknown;
+  if (OPENAI_INLINE_AUDIO_HOSTS.has(opts.baseUrl)) {
+    userContent = [
+      { type: 'input_audio', input_audio: { data: base64FromBytes(opts.wav), format: 'wav' } },
+      { type: 'text', text: 'Analyze the audio above according to the system prompt.' },
+    ];
+  } else {
+    const sttBaseUrl = opts.transcribeBaseUrl ?? opts.baseUrl;
+    const sttApiKey = opts.transcribeBaseUrl && opts.transcribeBaseUrl !== opts.baseUrl
+      ? (opts.transcribeApiKey ?? '')
+      : opts.apiKey;
+    if (!sttApiKey) {
+      throw new Error(`Missing ${openaiHostLabel(sttBaseUrl)} API key for transcription.`);
+    }
+    const transcript = await transcribeAudio({
+      apiKey: sttApiKey,
+      baseUrl: sttBaseUrl,
+      model: requireTranscribeModel(opts, sttBaseUrl),
+      wav: opts.wav,
+      signal: opts.signal,
+    });
+    userContent = transcriptUserMessage(transcript);
+  }
 
   // Build the chat-completions body once so retries don't re-stringify the
   // (potentially long) transcript on every attempt.
@@ -182,15 +207,16 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
 }
 
 /**
- * Validate that a transcribe model was passed in for transcribe-then-chat
- * hosts. Throws a clear error if the facade forgot to look one up — this
- * should never fire in production but guards against silently sending an
- * `undefined` model id to Whisper.
+ * Validate that a transcribe model was passed in. Throws a clear error if
+ * the facade forgot to look one up — this should never fire in production
+ * but guards against silently sending an `undefined` model id to Whisper.
+ * The label uses the STT host (which may differ from the chat host for the
+ * cross-host STT path used by DeepSeek/Perplexity).
  */
-function requireTranscribeModel(opts: CallOpenAiLensOptions): string {
+function requireTranscribeModel(opts: CallOpenAiLensOptions, sttBaseUrl: OpenAiBaseUrl): string {
   if (!opts.transcribeModel) {
     throw new Error(
-      `Missing transcribeModel for ${openaiHostLabel(opts.baseUrl)} (expected one of OPENAI_TRANSCRIBE_MODELS).`,
+      `Missing transcribeModel for ${openaiHostLabel(sttBaseUrl)}.`,
     );
   }
   return opts.transcribeModel;
@@ -307,6 +333,8 @@ export async function runSelfTest(
    *  when omitted, which keeps inline-audio hosts (OpenRouter) on the
    *  inline-audio branch (the lookup returns undefined). */
   transcribeModel?: string,
+  /** Cross-host STT overrides for chat-only hosts (DeepSeek, Perplexity). */
+  cross?: { transcribeBaseUrl?: OpenAiBaseUrl; transcribeApiKey?: string },
 ): Promise<{ latencyMs: number }> {
   const silentPcm = new Uint8Array(16_000 * 2);
   const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
@@ -321,7 +349,9 @@ export async function runSelfTest(
     apiKey,
     baseUrl,
     model,
-    transcribeModel: transcribeModel || OPENAI_TRANSCRIBE_MODELS[baseUrl],
+    transcribeModel: transcribeModel || OPENAI_TRANSCRIBE_MODELS[cross?.transcribeBaseUrl ?? baseUrl],
+    transcribeBaseUrl: cross?.transcribeBaseUrl,
+    transcribeApiKey: cross?.transcribeApiKey,
     wav,
     prompt,
     schema,

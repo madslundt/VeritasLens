@@ -103,6 +103,54 @@ describe('callOpenAiLens — transcribe-then-chat path', () => {
   });
 });
 
+describe('callOpenAiLens — cross-host STT (chat-only chat host)', () => {
+  it('posts STT to the STT host with the STT key, then chat to the chat host with the chat key', async () => {
+    const calls: Array<{ url: string; auth: string }> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      const auth = String(((init?.headers ?? {}) as Record<string, string>).authorization ?? '');
+      calls.push({ url, auth });
+      if (url.endsWith('/audio/transcriptions')) return jsonResponse({ text: 'hello deepseek' });
+      return jsonResponse(CHAT_OK);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await callOpenAiLens({
+      ...baseOpts,
+      apiKey: 'chat-key-deepseek',
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-chat',
+      transcribeBaseUrl: 'https://api.groq.com/openai/v1',
+      transcribeApiKey: 'stt-key-groq',
+      transcribeModel: 'whisper-large-v3-turbo',
+    });
+
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://api.groq.com/openai/v1/audio/transcriptions',
+      'https://api.deepseek.com/v1/chat/completions',
+    ]);
+    // Each request must carry the host-appropriate key — no spillover.
+    expect(calls[0]!.auth).toBe('Bearer stt-key-groq');
+    expect(calls[1]!.auth).toBe('Bearer chat-key-deepseek');
+
+    const chatBody = JSON.parse(fetchMock.mock.calls[1][1]!.body as string);
+    const userMessage = chatBody.messages.find((m: { role: string }) => m.role === 'user');
+    expect(typeof userMessage.content).toBe('string');
+    expect(userMessage.content).toContain('hello deepseek');
+  });
+
+  it('throws if the STT host has no API key', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(CHAT_OK)));
+    await expect(callOpenAiLens({
+      ...baseOpts,
+      apiKey: 'chat-key',
+      baseUrl: 'https://api.perplexity.ai',
+      transcribeBaseUrl: 'https://api.groq.com/openai/v1',
+      transcribeApiKey: '',
+      transcribeModel: 'whisper-large-v3-turbo',
+    })).rejects.toThrow(/Missing Groq API key for transcription/);
+  });
+});
+
 describe('fetchOpenAiModels', () => {
   it('filters OpenRouter models to those with audio in architecture.input_modalities', async () => {
     vi.stubGlobal('fetch', vi.fn(async () =>

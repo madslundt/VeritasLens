@@ -26,7 +26,16 @@ import {
   fetchOpenAiModels,
   runSelfTest as runOpenAiSelfTest,
 } from './openai';
-import { OPENAI_TRANSCRIBE_MODELS, type GeminiModel, type LlmProvider, type OpenAiBaseUrl } from '@/types';
+import {
+  OPENAI_CHAT_ONLY_HOSTS,
+  OPENAI_TRANSCRIBE_MODELS,
+  STT_MODELS_BY_HOST,
+  openaiHostLabel,
+  type GeminiModel,
+  type LlmProvider,
+  type OpenAiBaseUrl,
+  type SttHost,
+} from '@/types';
 
 export { MAX_RETRIES, parseRetryAfterMs, parseGoogleRetryDelayMs };
 
@@ -44,24 +53,61 @@ export interface CallLensOptions extends Omit<GeminiCallLensOptions, 'apiKey' | 
 }
 
 /**
- * Dispatch the lens call to the active provider. The runtime's existing
- * callLens(...) call sites all pass apiKey + model derived from the Gemini
- * settings; this facade accepts them as overrides but otherwise falls back to
- * the store so callers can stay provider-agnostic.
+ * Resolve the STT host + key + model for a given chat host. Chat-only hosts
+ * (DeepSeek, Perplexity) borrow STT from `settings().sttHost`; everyone else
+ * runs STT on their own chat host (current behavior for OpenAI/Groq, or
+ * undefined for inline-audio hosts like OpenRouter where the chat call
+ * carries the audio inline).
+ */
+function resolveStt(chatHost: OpenAiBaseUrl): {
+  transcribeBaseUrl: OpenAiBaseUrl;
+  transcribeApiKey: string;
+  transcribeModel: string | undefined;
+  isCrossHost: boolean;
+} {
+  const s = settings();
+  if (OPENAI_CHAT_ONLY_HOSTS.has(chatHost)) {
+    const sttHost: SttHost = s.sttHost;
+    return {
+      transcribeBaseUrl: sttHost,
+      transcribeApiKey: s.openaiApiKeys[sttHost] ?? '',
+      transcribeModel: s.sttModel || STT_MODELS_BY_HOST[sttHost][0],
+      isCrossHost: true,
+    };
+  }
+  return {
+    transcribeBaseUrl: chatHost,
+    transcribeApiKey: s.openaiApiKeys[chatHost] ?? '',
+    transcribeModel: s.openaiTranscribeModels[chatHost] || OPENAI_TRANSCRIBE_MODELS[chatHost],
+    isCrossHost: false,
+  };
+}
+
+/**
+ * Dispatch the lens call to the active provider. Pulls credentials, model,
+ * and STT routing from `settings()` at call time so a mid-session settings
+ * change takes effect on the next trigger. For chat-only OpenAI-compatible
+ * hosts (DeepSeek, Perplexity) the STT host + key are resolved via
+ * `resolveStt`, and a missing STT credential fails fast with a clear error
+ * rather than firing a 401 from Whisper.
  */
 export async function callLens(opts: CallLensOptions): Promise<string> {
   const s = settings();
   if (s.provider === 'openai-compatible') {
+    const chatHost = s.openaiBaseUrl;
+    const stt = resolveStt(chatHost);
+    if (stt.isCrossHost && !stt.transcribeApiKey) {
+      throw new Error(
+        `Add a ${openaiHostLabel(stt.transcribeBaseUrl)} API key for transcription before using ${openaiHostLabel(chatHost)}.`,
+      );
+    }
     return callOpenAiLens({
-      apiKey: opts.apiKey ?? (s.openaiApiKeys[s.openaiBaseUrl] ?? ''),
-      baseUrl: s.openaiBaseUrl,
+      apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
+      baseUrl: chatHost,
       model: opts.model ?? s.openaiModel,
-      // Per-host transcription model id. User override (from Settings) wins
-      // over the static default in OPENAI_TRANSCRIBE_MODELS. Undefined for
-      // inline-audio hosts (OpenRouter) — callOpenAiLens branches on
-      // OPENAI_INLINE_AUDIO_HOSTS and skips STT.
-      transcribeModel:
-        s.openaiTranscribeModels[s.openaiBaseUrl] || OPENAI_TRANSCRIBE_MODELS[s.openaiBaseUrl],
+      transcribeModel: stt.transcribeModel,
+      transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
+      transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
       wav: opts.wav,
       prompt: opts.prompt,
       schema: opts.schema,
@@ -111,11 +157,18 @@ export async function runSelfTest(
    * omitted the function falls back to the persisted settings store as before.
    * `lightweight` skips the inline-audio payload on the Gemini path (ignored
    * by the OpenAI path, which doesn't have an analogous classifier model).
+   *
+   * `sttHost` / `sttModel` / `sttApiKey` override the cross-host STT path for
+   * chat-only chat hosts (DeepSeek, Perplexity). The Settings UI's Test
+   * button passes drafts here so an unsaved STT change is what's probed.
    */
   overrides?: {
     provider?: LlmProvider;
     baseUrl?: OpenAiBaseUrl;
     transcribeModel?: string;
+    sttHost?: SttHost;
+    sttModel?: string;
+    sttApiKey?: string;
     lightweight?: boolean;
   },
 ): Promise<{ latencyMs: number }> {
@@ -125,6 +178,24 @@ export async function runSelfTest(
   if (provider === 'gemini') {
     return runGeminiSelfTest(apiKey, model as GeminiModel | undefined, {
       lightweight: overrides?.lightweight,
+    });
+  }
+  if (OPENAI_CHAT_ONLY_HOSTS.has(baseUrl)) {
+    const sttHost: SttHost = overrides?.sttHost ?? s.sttHost;
+    const sttApiKey = overrides?.sttApiKey ?? (s.openaiApiKeys[sttHost] ?? '');
+    if (!sttApiKey) {
+      throw new Error(
+        `Add a ${openaiHostLabel(sttHost)} API key for transcription before using ${openaiHostLabel(baseUrl)}.`,
+      );
+    }
+    const sttModel =
+      overrides?.sttModel
+      || overrides?.transcribeModel
+      || s.sttModel
+      || STT_MODELS_BY_HOST[sttHost][0];
+    return runOpenAiSelfTest(apiKey, baseUrl, model ?? s.openaiModel, sttModel, {
+      transcribeBaseUrl: sttHost,
+      transcribeApiKey: sttApiKey,
     });
   }
   const transcribeModel =

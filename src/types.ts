@@ -161,6 +161,8 @@ export const OPENAI_BASE_URLS = [
   'https://api.openai.com/v1',
   'https://api.groq.com/openai/v1',
   'https://openrouter.ai/api/v1',
+  'https://api.deepseek.com/v1',
+  'https://api.perplexity.ai',
 ] as const;
 export type OpenAiBaseUrl = (typeof OPENAI_BASE_URLS)[number];
 export const DEFAULT_OPENAI_BASE_URL: OpenAiBaseUrl = 'https://api.openai.com/v1';
@@ -172,10 +174,10 @@ export const DEFAULT_OPENAI_BASE_URL: OpenAiBaseUrl = 'https://api.openai.com/v1
 export const DEFAULT_OPENAI_MODEL = 'gpt-4o-mini';
 
 /**
- * Per-host transcription model name. Partial because inline-audio hosts
- * (OpenRouter) have no transcription endpoint — the absence of a key is the
- * typed signal that `callOpenAiLens` should take the inline-audio branch
- * instead of calling `/audio/transcriptions`.
+ * Per-host transcription model name. Partial because not every host can
+ * transcribe itself: inline-audio hosts (OpenRouter) accept audio on the chat
+ * endpoint, and chat-only hosts (DeepSeek, Perplexity) have no audio surface
+ * at all and must borrow STT from another whitelisted host (see `STT_HOSTS`).
  *
  * Same `/audio/transcriptions` path across OpenAI and Groq, only the model
  * id differs (`whisper-1` vs `whisper-large-v3`). One API key per host
@@ -196,12 +198,52 @@ export const OPENAI_INLINE_AUDIO_HOSTS: ReadonlySet<OpenAiBaseUrl> = new Set<Ope
   'https://openrouter.ai/api/v1',
 ]);
 
+/**
+ * Chat-only hosts: OpenAI-compatible for `/chat/completions` but with no
+ * transcription endpoint and no audio modality on their chat models. The
+ * runtime borrows STT from a separate whitelisted host (`Settings.sttHost`)
+ * before posting the transcript to these hosts.
+ */
+export const OPENAI_CHAT_ONLY_HOSTS: ReadonlySet<OpenAiBaseUrl> = new Set<OpenAiBaseUrl>([
+  'https://api.deepseek.com/v1',
+  'https://api.perplexity.ai',
+]);
+
+/**
+ * Hosts the runtime will route STT through when the chat host can't do its
+ * own. Each entry must also appear in `OPENAI_BASE_URLS` (so it has a key
+ * slot in `Settings.openaiApiKeys`) and in `OPENAI_TRANSCRIBE_MODELS` (so it
+ * exposes `/audio/transcriptions`). No new whitelist entries needed in
+ * `app.json` — these hosts are already permitted.
+ */
+export const STT_HOSTS = [
+  'https://api.openai.com/v1',
+  'https://api.groq.com/openai/v1',
+] as const;
+export type SttHost = (typeof STT_HOSTS)[number];
+/** Groq Whisper is the recommended default — free tier, faster than OpenAI Whisper. */
+export const DEFAULT_STT_HOST: SttHost = 'https://api.groq.com/openai/v1';
+/**
+ * Concrete transcription models surfaced in the Settings STT dropdown for
+ * each host. First entry is the default when `Settings.sttModel` is empty.
+ * Static list rather than a `/models` probe because OpenAI/Groq's listing
+ * doesn't tag transcription models specifically, so the keyword filter in
+ * `isSupportedChatModel` rejects them anyway.
+ */
+export const STT_MODELS_BY_HOST: Record<SttHost, readonly string[]> = {
+  'https://api.openai.com/v1': ['whisper-1', 'gpt-4o-transcribe', 'gpt-4o-mini-transcribe'],
+  'https://api.groq.com/openai/v1': ['whisper-large-v3-turbo', 'whisper-large-v3', 'distil-whisper-large-v3-en'],
+};
+export const DEFAULT_STT_MODEL: string = STT_MODELS_BY_HOST[DEFAULT_STT_HOST][0]!;
+
 /** Human-readable host name. Shared by error messages, UI labels, and the settings placeholder lookup. */
 export function openaiHostLabel(baseUrl: OpenAiBaseUrl): string {
   switch (baseUrl) {
     case 'https://api.openai.com/v1': return 'OpenAI';
     case 'https://api.groq.com/openai/v1': return 'Groq';
     case 'https://openrouter.ai/api/v1': return 'OpenRouter';
+    case 'https://api.deepseek.com/v1': return 'DeepSeek';
+    case 'https://api.perplexity.ai': return 'Perplexity';
   }
 }
 
@@ -259,6 +301,21 @@ export interface Settings {
    * `OPENAI_TRANSCRIBE_MODELS[host]` is undefined.
    */
   openaiTranscribeModels: Record<OpenAiBaseUrl, string>;
+  /**
+   * STT host borrowed when the active chat host can't transcribe (DeepSeek,
+   * Perplexity). The runtime hits this host's `/audio/transcriptions`
+   * endpoint, then sends the transcript to the chat host's `/chat/completions`.
+   * The STT API key is read from `openaiApiKeys[sttHost]` — no separate key
+   * field, since these hosts are already whitelisted as chat providers too.
+   */
+  sttHost: SttHost;
+  /**
+   * Transcription model id on `sttHost`. Empty means "use the first entry of
+   * `STT_MODELS_BY_HOST[sttHost]`". Persisted separately from the per-host
+   * chat overrides so the same host can drive its own chat AND act as STT
+   * for a different chat host with independent model picks.
+   */
+  sttModel: string;
 
   responseLanguage: LanguageCode;
   bufferDuration: BufferDuration;

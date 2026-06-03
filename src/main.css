@@ -94,13 +94,13 @@ a {
 .settings {
   max-width: 520px;
   margin: 0 auto;
-  /* The Even App's WebView doesn't shrink the layout viewport when the soft
-     keyboard opens, so the bottom of the form ends up shifted above the
-     visible area with no scroll room to reveal it. A permanent +350px below
-     the form gives enough scrollable space to bring every field up above the
-     keyboard. 350px was empirically the smallest value that comfortably
-     clears the keyboard on test hardware. */
-  padding: 1.75rem 1.25rem calc(max(3rem, env(safe-area-inset-bottom)) + 350px);
+  /* Bottom padding clears (a) the fixed bottom nav (~64px), (b) the
+     conditionally-rendered dirty-changes bar above it (~32px), and (c) the
+     soft-keyboard reveal buffer the Even App's WebView needs because it
+     doesn't shrink the layout viewport when the keyboard opens. Empirically
+     350px clears the keyboard on test hardware; adding the nav+bar makes it
+     445 + safe-area. */
+  padding: 1.75rem 1.25rem calc(max(3rem, env(safe-area-inset-bottom)) + 445px);
   display: flex;
   flex-direction: column;
   gap: 1.25rem;
@@ -295,14 +295,6 @@ a {
   margin-bottom: 0.8rem;
   font: inherit;
   color: inherit;
-}
-
-.form-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  margin-top: 0.25rem;
 }
 
 button.primary,
@@ -880,34 +872,97 @@ button:disabled {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/* ---------- Tabs ---------- */
+/* ---------- Bottom navigation ---------- */
 
-.tab-bar {
-  display: flex;
+/* Single fixed container that owns the bottom edge of the viewport. Wraps
+   both the optional Save bar and the tab nav so they stack with no gap
+   between them, and the safe-area padding sits below the nav rather than
+   under a separate floating element. */
+.bottom-stack {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
   background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  padding: 0.25rem;
-  gap: 0.25rem;
+  padding-bottom: env(safe-area-inset-bottom);
+  z-index: 50;
 }
 
-.tab-btn {
-  flex: 1;
+.bottom-nav {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border-top: 1px solid var(--border);
+  padding: 0.25rem 0;
+}
+
+.bottom-nav-btn {
   background: none;
   border: none;
-  border-radius: 0.55rem;
-  padding: 0.55rem 1rem;
-  font-size: 0.9rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.2rem;
+  padding: 0.55rem 0.25rem;
+  font-size: 0.75rem;
   font-weight: 500;
   color: var(--muted);
   cursor: pointer;
-  text-align: center;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition: color 0.15s ease;
 }
 
-.tab-btn.active {
-  background: rgba(255, 255, 255, 0.07);
+.bottom-nav-btn.active {
   color: var(--text);
+}
+
+.bottom-nav-icon {
+  font-size: 1.15rem;
+  line-height: 1;
+  position: relative;
+}
+
+/* Unsaved-changes indicator. Floats over the upper-right of the tab icon so
+   it's visible regardless of which tab is currently selected. */
+.bottom-nav-dot {
+  position: absolute;
+  top: -3px;
+  right: -7px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--warn, #f0b400);
+  box-shadow: 0 0 0 2px var(--surface);
+}
+
+.bottom-nav-label {
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+}
+
+/* Global Save bar — rendered inside .bottom-stack so it stacks naturally on
+   top of the tab nav with no gap. Styled to share the same surface as the
+   nav so the whole footer reads as one continuous chrome element. */
+.action-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 1rem;
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+.action-bar-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+  color: var(--muted);
+}
+
+.action-bar .primary {
+  flex-shrink: 0;
 }
 
 /* ---------- Misc helpers ---------- */
@@ -926,6 +981,19 @@ button:disabled {
   align-items: center;
   gap: 0.6rem;
   cursor: pointer;
+}
+
+/* Full-row toggle: label expands to the host row so a tap anywhere on the
+   row hits the native label-to-input association and flips the checkbox.
+   Used by the Auto-lens enable list — the previous markup left padding on
+   the <li> outside the label, so taps in that gutter did nothing. */
+.lens-row--toggle {
+  padding: 0;
+}
+
+.toggle-row--full {
+  width: 100%;
+  padding: 0.5rem 0;
 }
 
 .slider-row {

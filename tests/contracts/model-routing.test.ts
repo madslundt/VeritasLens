@@ -196,12 +196,16 @@ describe('callLens facade routes the stored model to the provider', () => {
         'https://api.openai.com/v1': 'k',
         'https://api.groq.com/openai/v1': '',
         'https://openrouter.ai/api/v1': '',
+        'https://api.deepseek.com/v1': '',
+        'https://api.perplexity.ai': '',
       },
       openaiModel: DEFAULT_OPENAI_MODEL,
       openaiTranscribeModels: {
         'https://api.openai.com/v1': '',
         'https://api.groq.com/openai/v1': '',
         'https://openrouter.ai/api/v1': '',
+        'https://api.deepseek.com/v1': '',
+        'https://api.perplexity.ai': '',
       },
     });
 
@@ -235,12 +239,16 @@ describe('callLens facade routes the stored model to the provider', () => {
         'https://api.openai.com/v1': 'k',
         'https://api.groq.com/openai/v1': '',
         'https://openrouter.ai/api/v1': '',
+        'https://api.deepseek.com/v1': '',
+        'https://api.perplexity.ai': '',
       },
       openaiModel: DEFAULT_OPENAI_MODEL,
       openaiTranscribeModels: {
         'https://api.openai.com/v1': override,
         'https://api.groq.com/openai/v1': '',
         'https://openrouter.ai/api/v1': '',
+        'https://api.deepseek.com/v1': '',
+        'https://api.perplexity.ai': '',
       },
     });
 
@@ -273,12 +281,16 @@ describe('callLens facade routes the stored model to the provider', () => {
         'https://api.openai.com/v1': 'k',
         'https://api.groq.com/openai/v1': '',
         'https://openrouter.ai/api/v1': '',
+        'https://api.deepseek.com/v1': '',
+        'https://api.perplexity.ai': '',
       },
       openaiModel: DEFAULT_OPENAI_MODEL,
       openaiTranscribeModels: {
         'https://api.openai.com/v1': '',
         'https://api.groq.com/openai/v1': '',
         'https://openrouter.ai/api/v1': '',
+        'https://api.deepseek.com/v1': '',
+        'https://api.perplexity.ai': '',
       },
     });
 
