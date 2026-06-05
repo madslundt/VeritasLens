@@ -556,6 +556,27 @@ describe('auto-classifier', () => {
     expect(() => parseAutoClassifierResponse(JSON.stringify({ noSpeech: true })))
       .toThrow(/no clear human speech/i);
   });
+
+  // Routing-quality regression guards. We can't run Gemini in unit tests, but
+  // we can lock the *prompt language* that drove the moon-distance →
+  // key-questions misroute so the fix can't silently regress.
+  it('Trivia description names the lens as the answer-lookup pick', () => {
+    const prompt = buildAutoPrompt('en');
+    expect(prompt).toMatch(/how far is the moon/);
+    expect(prompt).toMatch(/settled, well-known answer/);
+  });
+
+  it('Key Questions description scopes it to discussion gaps, not direct questions', () => {
+    const prompt = buildAutoPrompt('en');
+    expect(prompt).toMatch(/NOT asking but should/);
+    expect(prompt).not.toMatch(/important questions remain open/);
+  });
+
+  it('Disambiguation prefers Trivia over Key Questions for direct factual questions', () => {
+    const prompt = buildAutoPrompt('en');
+    expect(prompt).toMatch(/Prefer "trivia" over "key-questions"/);
+    expect(prompt).not.toMatch(/no clear known answer/);
+  });
 });
 
 describe("devil's advocate", () => {

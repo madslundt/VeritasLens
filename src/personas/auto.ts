@@ -21,13 +21,13 @@ export type AutoLensCandidate = (typeof AUTO_LENS_CANDIDATES)[number];
 /** Per-candidate descriptions injected into the classifier prompt. */
 const CANDIDATE_DESCRIPTIONS: Record<string, string> = {
   'fact-checker': '"fact-checker": A specific factual claim is being made that can be verified against reliable knowledge (history, geography, science, attributions).',
-  'trivia': '"trivia": Someone is asking or wondering about a piece of common knowledge — a question with a direct factual answer.',
+  'trivia': '"trivia": The speaker asks a direct factual question that has a settled, well-known answer in general knowledge — names, dates, distances, capitals, definitions, numbers, who/what/when/where/how-many style lookups (e.g., "how far is the moon?", "who wrote Hamlet?", "what year did WW2 end?"). Phrased as a question, not an assertion.',
   'logical-fallacy': '"logical-fallacy": An argument is being made that likely contains a logical fallacy (ad hominem, straw man, false dilemma, slippery slope, etc.).',
   'stats-check': '"stats-check": A numerical or statistical claim is being made — percentages, large numbers, comparisons, or rates.',
   'bias-detector': '"bias-detector": Loaded language, charged political/emotional rhetoric, or one-sided framing that hints at bias.',
   'eli5': '"eli5": Jargon-heavy, technical, or unusually complex language that a listener would benefit from having explained in plain terms.',
   'devils-advocate': '"devils-advocate": Someone makes a strong one-sided argument or assertion and the most compelling counterargument is worth surfacing.',
-  'key-questions': '"key-questions": A topic is being discussed but important questions remain open, unaddressed, or unresolved — not trivia, but things worth asking.',
+  'key-questions': '"key-questions": The speakers are discussing a topic but failing to raise important follow-up questions a careful listener would want answered. Use this to SURFACE questions the participants are NOT asking but should — not to answer a direct question the speaker just asked.',
   'sentiment': '"sentiment": The emotional tone, intent, or attitude behind what was said is worth examining — charged language, unexpected affect, or notable framing.',
 };
 
@@ -39,7 +39,8 @@ const DISAMBIGUATION_NOTES = `Pick exactly one. If multiple lenses could plausib
 Prefer "fact-checker" over "trivia" when the speaker is asserting a claim rather than asking.
 Prefer "stats-check" over "fact-checker" when the claim is primarily numerical.
 Prefer "fact-checker" over "devils-advocate" when a specific factual claim can be verified.
-Prefer "key-questions" over "trivia" when there is no clear known answer.
+Prefer "trivia" over "key-questions" whenever the speaker directly asks a question that has a settled, well-known factual answer — even if the answer is long or technical.
+Prefer "key-questions" over "trivia" only when the audio is a discussion (not a direct question) and a careful listener would want to raise follow-ups the speakers aren't asking themselves.
 Prefer "bias-detector" over "sentiment" when the framing is politically or factionally loaded.
 
 If no clear human speech is detected, set noSpeech to true.

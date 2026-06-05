@@ -969,12 +969,15 @@ export const SettingsView: Component = () => {
         >
           <span class={`history-icon ${badgeClass(entry.badge)}`}>{badgeIcon(entry.badge)}</span>
           <span class="history-time">{formatTime(entry.timestamp)}</span>
+          <Show when={entry.result.autoSelected && entry.lensName}>
+            <span class="history-lens">Auto → {entry.lensName}</span>
+          </Show>
           <span class="history-q">{entry.question}</span>
         </button>
         <Show when={expandedEntryId() === entry.id}>
           <div class="history-detail">
             <Show when={entry.result.autoSelected && entry.lensName}>
-              <p class="history-detail-lens">{entry.lensName}</p>
+              <p class="history-detail-lens">Auto → {entry.lensName}</p>
             </Show>
             <p class="history-detail-question">{entry.question}</p>
             <pre>{formatResultText(entry.result)}</pre>

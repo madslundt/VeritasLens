@@ -1165,7 +1165,7 @@ button:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 7rem;
+  max-width: 12rem;
 }
 
 .history-q {

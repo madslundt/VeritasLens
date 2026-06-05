@@ -236,7 +236,7 @@ describe('setLensResult', () => {
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
 
-  it('does not stamp an "Auto" badge into the heading when autoSelected is set', async () => {
+  it('prepends "Auto · <Lens>" to the heading when autoSelected is set', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     bridge.textContainerUpgrade.mockClear();
@@ -250,8 +250,54 @@ describe('setLensResult', () => {
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
     const bodyCall = calls.find((c) => c[0].payload.containerName === 'vl-reason');
     expect(bodyCall).toBeDefined();
+    // The chosen lens name is composed with the existing session tag on the
+    // first line so the wearer can see at a glance which lens Auto picked
+    // for this result.
+    expect(bodyCall![0].payload.content).toContain('Auto · Fact Check · 1/1 · X');
+    expect(bodyCall![0].payload.content).toContain('+ TRUE');
+    expect(bodyCall![0].payload.content).toContain('Y');
+  });
+
+  it('does not prepend the Auto prefix when autoSelected is false', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    bridge.textContainerUpgrade.mockClear();
+
+    const result: LensResult = {
+      type: 'fact-check',
+      claims: [{ quote: '', verdict: 'TRUE', claim: 'X', reason: 'Y' }],
+    };
+    await setLensResult(result);
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    const bodyCall = calls.find((c) => c[0].payload.containerName === 'vl-reason');
+    expect(bodyCall).toBeDefined();
+    // Manual-lens entries keep the original session-tag-only prefix shape.
+    expect(bodyCall![0].payload.content).toBe('1/1 · X\n\n+ TRUE\n\nY');
     expect(bodyCall![0].payload.content).not.toContain('Auto');
-    expect(bodyCall![0].payload.content).toContain('X');
+  });
+
+  it('also prepends "Auto · <Lens>" on the history-detail page for an Auto entry', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    const entry: HistoryEntry = {
+      id: 'h1', timestamp: 1, sessionId: 's',
+      lensId: 'fact-checker', lensName: 'Fact Check', question: 'q',
+      badge: 'TRUE', quote: '',
+      result: {
+        type: 'fact-check',
+        claims: [{ quote: '', verdict: 'TRUE', claim: 'X', reason: 'Y' }],
+        autoSelected: true,
+      },
+    };
+    bridge.rebuildPageContainer.mockClear();
+    await showHistoryDetailPage(entry);
+
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { textObject: Array<{ payload: { containerName: string; content: string } }> } }]>;
+    const lastRebuild = calls.at(-1)![0].payload;
+    const body = lastRebuild.textObject.find((t) => t.payload.containerName === 'vl-reason')?.payload.content;
+    expect(body).toBeDefined();
+    expect(body!).toContain('Auto · Fact Check · 1/1 · X');
   });
 });
 

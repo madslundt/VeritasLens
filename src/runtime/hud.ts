@@ -366,6 +366,7 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     : '';
   detailPages = computePagesForResult(entry.result, HISTORY_DETAIL_PAGE_LINES, {
     autoSelected: entry.result.autoSelected === true,
+    autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
   });
   detailPageIndex = 0;
@@ -395,6 +396,7 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
     : '';
   detailPages = computePagesForResult(entry.result, HISTORY_DETAIL_PAGE_LINES, {
     autoSelected: entry.result.autoSelected === true,
+    autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
   });
   detailPageIndex = 0;
@@ -438,13 +440,38 @@ export interface SetLensResultContext {
  *  entry deterministically (rather than accumulating ghost entries). */
 const SYNTHETIC_ENTRY_ID = '__veritaslens_synthetic_active__';
 
+/** result.type → persona id. Names are looked up from BUILTINS via
+ *  `getPersona(id).name` at call time so renames in personas/index.ts can
+ *  never drift from this table. The id mapping itself is unavoidable: some
+ *  result types differ from their persona id (e.g. 'bias' ↔ 'bias-detector').
+ *  TypeScript's Record exhaustiveness fails the build if a new LensResult
+ *  variant is added without a row here. */
+const PERSONA_ID_BY_RESULT_TYPE: Record<LensResult['type'], string> = {
+  'fact-check': 'fact-checker',
+  'trivia': 'trivia',
+  'logical-fallacy': 'logical-fallacy',
+  'stats-check': 'stats-check',
+  'bias': 'bias-detector',
+  'eli5': 'eli5',
+  'devils-advocate': 'devils-advocate',
+  'key-questions': 'key-questions',
+  'sentiment': 'sentiment',
+  'meeting-prep': 'meeting-prep',
+  'session-summary': 'session-summary',
+};
+
 function synthesizeEntryFromResult(result: LensResult, idx = 0): HistoryEntry {
+  // When Auto picked this result, the synthetic entry needs a real lensName so
+  // the Auto-chose prefix on the active / history-detail page survives the
+  // synthetic round-trip (tests + menu-replay).
+  const personaId = result.autoSelected ? PERSONA_ID_BY_RESULT_TYPE[result.type] : '';
+  const lensName = personaId ? (getPersona(personaId)?.name ?? '') : '';
   return {
     id: `${SYNTHETIC_ENTRY_ID}-${idx}`,
     sessionId: '',
     timestamp: 0,
-    lensId: '',
-    lensName: '',
+    lensId: personaId,
+    lensName,
     question: '',
     badge: '',
     quote: '',
@@ -1138,17 +1165,23 @@ function bulletRow(currentIdx: number, total: number): string {
 function computePagesForResult(
   result: LensResult,
   pageLines: number,
-  options: { autoSelected?: boolean; sessionTag?: string } = {},
+  options: { autoSelected?: boolean; sessionTag?: string; autoLensLabel?: string } = {},
 ): PageRef[] {
   const autoSelected = options.autoSelected ?? (result.autoSelected === true);
   const sessionTag = options.sessionTag ?? '';
+  const autoPrefix =
+    autoSelected && options.autoLensLabel ? `Auto · ${options.autoLensLabel}` : '';
   const body = formatEntryBody(result, autoSelected);
 
-  const applyPrefix = (chunk: string) =>
-    sessionTag ? `${sessionTag} · ${chunk}` : chunk;
+  // Auto prefix and session tag share the first line, joined by ' · ' so the
+  // shape is `Auto · Fact Check · 1/3 · <body>`. Either or both may be empty.
+  const head = [autoPrefix, sessionTag].filter(Boolean).join(' · ');
+  const applyPrefix = (chunk: string) => (head ? `${head} · ${chunk}` : chunk);
 
-  // First pass with budget reduced only by the prefix overhead (if any).
-  const prefixOverhead = sessionTag ? 1 : 0;
+  // First pass with budget reduced by one line whenever any head prefix is
+  // present (covers both the session tag and the auto prefix — they share the
+  // same line, so they share the same one-line wrap reserve).
+  const prefixOverhead = head ? 1 : 0;
   const firstBudget = Math.max(1, pageLines - prefixOverhead);
   const firstPass = paginateText(body, BODY_INNER_W, firstBudget, firstBudget);
 
@@ -1234,6 +1267,7 @@ function recomputeSessionPages(): void {
     const sessionTag = totalEntries > 0 ? `${i + 1}/${totalEntries}` : '';
     const pages = computePagesForResult(entry.result, pageLines, {
       autoSelected: entry.result.autoSelected === true,
+      autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
       sessionTag,
     });
     for (const p of pages) {
