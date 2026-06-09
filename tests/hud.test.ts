@@ -236,7 +236,7 @@ describe('setLensResult', () => {
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
   });
 
-  it('prepends "Auto · <Lens>" to the heading when autoSelected is set', async () => {
+  it('prepends the chosen lens name to the heading when autoSelected is set', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     bridge.textContainerUpgrade.mockClear();
@@ -253,12 +253,13 @@ describe('setLensResult', () => {
     // The chosen lens name is composed with the existing session tag on the
     // first line so the wearer can see at a glance which lens Auto picked
     // for this result.
-    expect(bodyCall![0].payload.content).toContain('Auto · Fact Check · 1/1 · X');
+    expect(bodyCall![0].payload.content).toContain('Fact Check · 1/1 · X');
+    expect(bodyCall![0].payload.content).not.toContain('Auto');
     expect(bodyCall![0].payload.content).toContain('+ TRUE');
     expect(bodyCall![0].payload.content).toContain('Y');
   });
 
-  it('does not prepend the Auto prefix when autoSelected is false', async () => {
+  it('does not prepend the chosen-lens label when autoSelected is false', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     bridge.textContainerUpgrade.mockClear();
@@ -276,7 +277,7 @@ describe('setLensResult', () => {
     expect(bodyCall![0].payload.content).not.toContain('Auto');
   });
 
-  it('also prepends "Auto · <Lens>" on the history-detail page for an Auto entry', async () => {
+  it('also prepends the chosen lens name on the history-detail page for an Auto entry', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
@@ -297,7 +298,8 @@ describe('setLensResult', () => {
     const lastRebuild = calls.at(-1)![0].payload;
     const body = lastRebuild.textObject.find((t) => t.payload.containerName === 'vl-reason')?.payload.content;
     expect(body).toBeDefined();
-    expect(body!).toContain('Auto · Fact Check · 1/1 · X');
+    expect(body!).toContain('Fact Check · 1/1 · X');
+    expect(body!).not.toContain('Auto');
   });
 });
 

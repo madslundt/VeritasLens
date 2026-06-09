@@ -1238,11 +1238,11 @@ function computePagesForResult(
   const autoSelected = options.autoSelected ?? (result.autoSelected === true);
   const sessionTag = options.sessionTag ?? '';
   const autoPrefix =
-    autoSelected && options.autoLensLabel ? `Auto · ${options.autoLensLabel}` : '';
+    autoSelected && options.autoLensLabel ? options.autoLensLabel : '';
   const body = formatEntryBody(result, autoSelected);
 
   // Auto prefix and session tag share the first line, joined by ' · ' so the
-  // shape is `Auto · Fact Check · 1/3 · <body>`. Either or both may be empty.
+  // shape is `Fact Check · 1/3 · <body>`. Either or both may be empty.
   const head = [autoPrefix, sessionTag].filter(Boolean).join(' · ');
   const applyPrefix = (chunk: string) => (head ? `${head} · ${chunk}` : chunk);
 
