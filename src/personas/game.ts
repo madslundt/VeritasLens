@@ -45,8 +45,35 @@ const COMMON_OUTPUT_RULES = [
   'Do not repeat the same question. Each question must cover distinct sub-areas of the topic.',
 ].join('\n');
 
+/** Header used at the start of the avoid-list block. Exported as a const so
+ *  the prompt-shape regression tests can assert on it without inlining the
+ *  exact wording in two places. */
+export const AVOID_LIST_HEADER =
+  'AVOID — these were asked in recent sessions on this preset. Pick distinct sub-areas, not paraphrases of these:';
+
+/**
+ * Format a list of recently-asked question texts as a Markdown-style
+ * bullet block that follows the COMMON_OUTPUT_RULES section. Returns `''`
+ * for an empty / missing input so callers can splice unconditionally — no
+ * AVOID block is emitted when there's nothing to avoid.
+ *
+ * The list is fed in newest-first by the runtime (so the LLM sees recency
+ * as the first bullets); we preserve that order here.
+ */
+function buildAvoidBlock(recentQuestions: readonly string[] | undefined): string {
+  if (!recentQuestions || recentQuestions.length === 0) return '';
+  const bullets = recentQuestions.map((q) => `- ${q}`).join('\n');
+  return `${AVOID_LIST_HEADER}\n${bullets}`;
+}
+
 /** Quiz (4-option multiple choice). One correct answer per question. */
-export function buildQuizPrompt(topic: string, difficulty: GameDifficulty, lang: LanguageCode): string {
+export function buildQuizPrompt(
+  topic: string,
+  difficulty: GameDifficulty,
+  lang: LanguageCode,
+  recentQuestions?: readonly string[],
+): string {
+  const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a quiz master generating a multiple-choice quiz for a smart-glasses HUD.',
     '',
@@ -60,13 +87,20 @@ export function buildQuizPrompt(topic: string, difficulty: GameDifficulty, lang:
     '- `reveal`: a thorough 2-4 sentence explanation (≤340 chars). Say WHY the correct answer is right AND, where useful, why the closest distractor is wrong, plus one concrete supporting fact (date, name, mechanism, number) so the wearer learns something each round — not just "yes/no".',
     '',
     COMMON_OUTPUT_RULES,
+    ...(avoid ? ['', avoid] : []),
     '',
     languageDirective(lang),
   ].join('\n');
 }
 
 /** True / False — 2-option binary. `options` is exactly ["True", "False"] (in the response language). */
-export function buildTrueFalsePrompt(topic: string, difficulty: GameDifficulty, lang: LanguageCode): string {
+export function buildTrueFalsePrompt(
+  topic: string,
+  difficulty: GameDifficulty,
+  lang: LanguageCode,
+  recentQuestions?: readonly string[],
+): string {
+  const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a quiz master generating a TRUE / FALSE quiz for a smart-glasses HUD.',
     '',
@@ -80,13 +114,20 @@ export function buildTrueFalsePrompt(topic: string, difficulty: GameDifficulty, 
     '- `reveal`: a 2-4 sentence explanation grounding the verdict in fact (≤340 chars). Name the specific evidence or counter-evidence (date, named source, mechanism) — avoid generic "yes/no" answers so the wearer learns the supporting detail.',
     '',
     COMMON_OUTPUT_RULES,
+    ...(avoid ? ['', avoid] : []),
     '',
     languageDirective(lang),
   ].join('\n');
 }
 
 /** Riddle — no options. User taps to reveal the answer. */
-export function buildRiddlePrompt(topic: string, difficulty: GameDifficulty, lang: LanguageCode): string {
+export function buildRiddlePrompt(
+  topic: string,
+  difficulty: GameDifficulty,
+  lang: LanguageCode,
+  recentQuestions?: readonly string[],
+): string {
+  const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a riddle master generating tap-to-reveal riddles for a smart-glasses HUD.',
     '',
@@ -100,6 +141,7 @@ export function buildRiddlePrompt(topic: string, difficulty: GameDifficulty, lan
     '- `reveal`: the answer followed by a 2-3 sentence walkthrough of the trick / logic and the key clue in the riddle (≤340 chars). Aim for "ah-ha"-level clarity, not just the bare answer.',
     '',
     COMMON_OUTPUT_RULES,
+    ...(avoid ? ['', avoid] : []),
     '',
     languageDirective(lang),
   ].join('\n');
@@ -111,11 +153,12 @@ export function buildGamePrompt(
   topic: string,
   difficulty: GameDifficulty,
   lang: LanguageCode,
+  recentQuestions?: readonly string[],
 ): string {
   switch (format) {
-    case 'quiz-mc': return buildQuizPrompt(topic, difficulty, lang);
-    case 'true-false': return buildTrueFalsePrompt(topic, difficulty, lang);
-    case 'riddle': return buildRiddlePrompt(topic, difficulty, lang);
+    case 'quiz-mc': return buildQuizPrompt(topic, difficulty, lang, recentQuestions);
+    case 'true-false': return buildTrueFalsePrompt(topic, difficulty, lang, recentQuestions);
+    case 'riddle': return buildRiddlePrompt(topic, difficulty, lang, recentQuestions);
   }
 }
 

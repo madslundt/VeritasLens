@@ -8,6 +8,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  AVOID_LIST_HEADER,
   GAME_RESPONSE_SCHEMA,
   buildGamePrompt,
   buildGameResult,
@@ -278,5 +279,48 @@ describe('shuffleQuizOptions', () => {
       expect([...after.options].sort()).toEqual([...before.options].sort());
       expect(after.options[after.correctIndex!]).toBe(before.options[before.correctIndex!]);
     }
+  });
+});
+
+describe('buildGamePrompt avoid-list', () => {
+  it('emits no AVOID block when recentQuestions is omitted', () => {
+    const prompt = buildGamePrompt('quiz-mc', 'WWII', 'medium', 'en');
+    expect(prompt).not.toContain('AVOID');
+    // COMMON_OUTPUT_RULES still present.
+    expect(prompt).toContain('Do not repeat the same question');
+  });
+
+  it('emits no AVOID block when recentQuestions is empty', () => {
+    const prompt = buildGamePrompt('quiz-mc', 'WWII', 'medium', 'en', []);
+    expect(prompt).not.toContain('AVOID');
+  });
+
+  it('splices an AVOID block with bulleted entries on quiz-mc when recentQuestions is non-empty', () => {
+    const prompt = buildGamePrompt('quiz-mc', 'WWII', 'medium', 'en', [
+      'Who led the Normandy landings?',
+      'When did Pearl Harbor happen?',
+    ]);
+    expect(prompt).toContain(AVOID_LIST_HEADER);
+    expect(prompt).toContain('- Who led the Normandy landings?');
+    expect(prompt).toContain('- When did Pearl Harbor happen?');
+    // Avoid block lives after COMMON_OUTPUT_RULES and before the language
+    // directive — assert ordering so a future refactor can't accidentally
+    // move it ahead of the rules and de-prioritise it.
+    const rulesIdx = prompt.indexOf('Do not repeat the same question');
+    const avoidIdx = prompt.indexOf(AVOID_LIST_HEADER);
+    expect(rulesIdx).toBeGreaterThan(-1);
+    expect(avoidIdx).toBeGreaterThan(rulesIdx);
+  });
+
+  it('splices the same AVOID block into the true-false prompt', () => {
+    const prompt = buildGamePrompt('true-false', 'physics', 'easy', 'en', ['Light is faster than sound.']);
+    expect(prompt).toContain(AVOID_LIST_HEADER);
+    expect(prompt).toContain('- Light is faster than sound.');
+  });
+
+  it('splices the same AVOID block into the riddle prompt', () => {
+    const prompt = buildGamePrompt('riddle', 'classic', 'medium', 'en', ['What has hands but cannot clap?']);
+    expect(prompt).toContain(AVOID_LIST_HEADER);
+    expect(prompt).toContain('- What has hands but cannot clap?');
   });
 });

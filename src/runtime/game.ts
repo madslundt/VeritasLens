@@ -33,9 +33,11 @@ import {
   pushDebugEvent,
   pushHistoryEntry,
   saveGamePresets,
+  sessionHistory,
   settings,
 } from '@/state/store';
 import { getBridge } from './bridge';
+import { extractRecentGameQuestions } from './gameHistory';
 import {
   showGameEndPage,
   showGameFeedbackPage,
@@ -133,7 +135,19 @@ export async function startGame(preset: GamePreset): Promise<void> {
   // Per-preset override wins; null/undefined falls back to the global
   // setting so legacy presets keep working without a migration step.
   const lang = preset.language ?? settings().responseLanguage;
-  const prompt = buildGamePrompt(preset.format, preset.topic, preset.difficulty, lang);
+  // Scan history for previously-asked questions on this preset (Random
+  // matches by format+difficulty only). Empty array → no AVOID block in
+  // the prompt; non-empty → buildGamePrompt splices in a bulleted "don't
+  // repeat these" section so the wearer doesn't get the same opener
+  // trivia three replays in a row.
+  const recentQuestions = extractRecentGameQuestions(sessionHistory(), preset);
+  const prompt = buildGamePrompt(
+    preset.format,
+    preset.topic,
+    preset.difficulty,
+    lang,
+    recentQuestions,
+  );
 
   try {
     const rawText = await callGame({
