@@ -2,6 +2,15 @@
 import { createSignal } from 'solid-js';
 import type { DeviceStatus } from '@evenrealities/even_hub_sdk';
 import {
+  AUTO_MODE_SILENCE_MS_MAX,
+  AUTO_MODE_SILENCE_MS_MIN,
+  AUTO_MODE_START_MS_MAX,
+  AUTO_MODE_START_MS_MIN,
+  AUTO_MODE_STEP_MS,
+  CLAUDE_MODELS,
+  DEFAULT_AUTO_MODE_SILENCE_MS,
+  DEFAULT_AUTO_MODE_START_MS,
+  DEFAULT_CLAUDE_MODEL,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_AUTO_MODEL,
   DEFAULT_LANGUAGE,
@@ -18,6 +27,10 @@ import {
   type AppMode,
   type AppPhase,
   type BufferDuration,
+  type ClaudeModel,
+  type GameDifficulty,
+  type GameFormat,
+  type GamePreset,
   type GeminiModel,
   type HistoryEntry,
   type LanguageCode,
@@ -39,6 +52,8 @@ const SETTINGS_KEY_PROVIDER = 'veritaslens.provider';
 const SETTINGS_KEY_GEMINI = 'veritaslens.geminiKey';
 const SETTINGS_KEY_MODEL = 'veritaslens.geminiModel';
 const SETTINGS_KEY_AUTO_MODEL = 'veritaslens.geminiAutoModel';
+const SETTINGS_KEY_CLAUDE_KEY = 'veritaslens.claudeKey';
+const SETTINGS_KEY_CLAUDE_MODEL = 'veritaslens.claudeModel';
 /** Legacy single-key storage. Read once on load and migrated into the per-host map. */
 const SETTINGS_KEY_OPENAI_KEY_LEGACY = 'veritaslens.openaiKey';
 /** Per-host OpenAI API key. The host base URL is appended as a suffix. */
@@ -59,18 +74,32 @@ const SETTINGS_KEY_STT_MODEL = 'veritaslens.sttModel';
 const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
+const SETTINGS_KEY_CROSS_SESSION_RECALL = 'veritaslens.crossSessionRecallEnabled';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
 const SETTINGS_KEY_VOICE_GATE_LEGACY = 'veritaslens.voiceGateEnabled';
 const SETTINGS_KEY_VOICE_TRIM = 'veritaslens.voiceTrimEnabled';
 const SETTINGS_KEY_AUTO_DISABLED_LENSES = 'veritaslens.autoDisabledLenses';
+const SETTINGS_KEY_AUTO_MODE_ENABLED = 'veritaslens.autoModeEnabled';
+const SETTINGS_KEY_AUTO_MODE_START_MS = 'veritaslens.autoModeStartMs';
+const SETTINGS_KEY_AUTO_MODE_SILENCE_MS = 'veritaslens.autoModeSilenceMs';
 /** Default RMS floor when neither the new nor legacy key is set. */
 const DEFAULT_VOICE_GATE_RMS_FLOOR = 200;
 /** Slider granularity exposed in the Settings UI. */
 export const VOICE_GATE_RMS_STEP = 50;
 /** UI clamp for the slider's upper end; above this is shouting territory. */
 export const VOICE_GATE_RMS_MAX = 1000;
+
+/** Parse a persisted auto-mode threshold (in ms), snap to step, and clamp to
+ *  the published [min, max] range. Falls back to `fallback` on empty/invalid. */
+function coerceAutoModeMs(raw: string, fallback: number, min: number, max: number): number {
+  if (raw === '') return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const snapped = Math.round(n / AUTO_MODE_STEP_MS) * AUTO_MODE_STEP_MS;
+  return Math.min(max, Math.max(min, snapped));
+}
 
 function coerceVoiceGateRmsFloor(raw: string, legacy: string): number {
   // New key wins when present and parseable.
@@ -92,6 +121,13 @@ const HISTORY_KEY = 'veritaslens.history';
 const HISTORY_BYTE_BUDGET = 400 * 1024;
 const HISTORY_MAX_ENTRIES = 500;
 
+const GAME_PRESETS_KEY = 'veritaslens.gamePresets';
+/** Hard cap on persisted presets. Glasses picker scrolls but a saner limit
+ *  keeps the games sub-picker from becoming unusable on the small display. */
+const GAME_PRESETS_MAX = 30;
+const GAME_FORMATS: readonly GameFormat[] = ['quiz-mc', 'true-false', 'riddle'];
+const GAME_DIFFICULTIES: readonly GameDifficulty[] = ['easy', 'medium', 'hard'];
+
 const MEETING_PREP_KEY = 'veritaslens.meetingPrep';
 /** Total UTF-8 byte cap for the meeting-prep payload (label+body across all sections). */
 export const MEETING_PREP_BYTE_BUDGET = 50 * 1024;
@@ -108,12 +144,15 @@ export const [deviceStatus, setDeviceStatus] = createSignal<DeviceStatus | null>
 export const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
 export const [sessionHistory, setSessionHistory] = createSignal<HistoryEntry[]>([]);
 export const [meetingPrepSections, setMeetingPrepSectionsSignal] = createSignal<MeetingPrepSection[]>([]);
+export const [gamePresets, setGamePresetsSignal] = createSignal<GamePreset[]>([]);
 
 const [settings, setSettings] = createSignal<Settings>({
   provider: DEFAULT_LLM_PROVIDER,
   geminiApiKey: '',
   geminiModel: DEFAULT_GEMINI_MODEL,
   geminiAutoModel: DEFAULT_GEMINI_AUTO_MODEL,
+  claudeApiKey: '',
+  claudeModel: DEFAULT_CLAUDE_MODEL,
   openaiApiKeys: emptyOpenaiKeys(),
   openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
   openaiModel: DEFAULT_OPENAI_MODEL,
@@ -123,6 +162,7 @@ const [settings, setSettings] = createSignal<Settings>({
   responseLanguage: DEFAULT_LANGUAGE,
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
+  crossSessionRecallEnabled: false,
   discreet: false,
   // VAD gate defaults to the historical RMS floor (200 int16 units). 0
   // disables the gate entirely; lower values are more permissive. Exposed
@@ -133,6 +173,11 @@ const [settings, setSettings] = createSignal<Settings>({
   // detected speech, cutting upload + ingest time on sparse buffers.
   voiceTrimEnabled: true,
   autoDisabledLenses: [],
+  // Auto-mode VAD: off by default; user opts in from Settings. Thresholds
+  // default to a snappy-but-not-twitchy 1.5 s arm / 2 s silence trigger.
+  autoModeEnabled: false,
+  autoModeStartMs: DEFAULT_AUTO_MODE_START_MS,
+  autoModeSilenceMs: DEFAULT_AUTO_MODE_SILENCE_MS,
 });
 export { settings };
 
@@ -154,12 +199,15 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_GEMINI),
       safeGet(SETTINGS_KEY_MODEL),
       safeGet(SETTINGS_KEY_AUTO_MODEL),
+      safeGet(SETTINGS_KEY_CLAUDE_KEY),
+      safeGet(SETTINGS_KEY_CLAUDE_MODEL),
       safeGet(SETTINGS_KEY_OPENAI_KEY_LEGACY),
       safeGet(SETTINGS_KEY_OPENAI_BASE_URL),
       safeGet(SETTINGS_KEY_OPENAI_MODEL),
       safeGet(SETTINGS_KEY_LANGUAGE),
       safeGet(SETTINGS_KEY_BUFFER_DURATION),
       safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
+      safeGet(SETTINGS_KEY_CROSS_SESSION_RECALL),
       safeGet(SETTINGS_KEY_DISCREET),
       safeGet(SETTINGS_KEY_VOICE_GATE_RMS),
       safeGet(SETTINGS_KEY_VOICE_GATE_LEGACY),
@@ -167,6 +215,9 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_AUTO_DISABLED_LENSES),
       safeGet(SETTINGS_KEY_STT_HOST),
       safeGet(SETTINGS_KEY_STT_MODEL),
+      safeGet(SETTINGS_KEY_AUTO_MODE_ENABLED),
+      safeGet(SETTINGS_KEY_AUTO_MODE_START_MS),
+      safeGet(SETTINGS_KEY_AUTO_MODE_SILENCE_MS),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -176,12 +227,15 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     key,
     rawModel,
     rawAutoModel,
+    rawClaudeKey,
+    rawClaudeModel,
     rawLegacyOpenaiKey,
     rawOpenaiBaseUrl,
     rawOpenaiModel,
     rawLang,
     rawBuffer,
     rawAutoEnabled,
+    rawCrossSessionRecall,
     rawDiscreet,
     rawVoiceGateRms,
     rawVoiceGateLegacy,
@@ -189,6 +243,9 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoDisabledLenses,
     rawSttHost,
     rawSttModel,
+    rawAutoModeEnabled,
+    rawAutoModeStartMs,
+    rawAutoModeSilenceMs,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -212,6 +269,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     geminiApiKey: key,
     geminiModel: coerceModel(rawModel),
     geminiAutoModel: coerceAutoModel(rawAutoModel),
+    claudeApiKey: rawClaudeKey,
+    claudeModel: coerceClaudeModel(rawClaudeModel),
     openaiApiKeys,
     openaiBaseUrl: coercedBaseUrl,
     openaiModel: rawOpenaiModel || DEFAULT_OPENAI_MODEL,
@@ -221,10 +280,24 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     responseLanguage: coerceLanguage(rawLang),
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
+    crossSessionRecallEnabled: rawCrossSessionRecall === 'true',
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
     autoDisabledLenses: coerceAutoDisabledLenses(rawAutoDisabledLenses),
+    autoModeEnabled: rawAutoModeEnabled === 'true',
+    autoModeStartMs: coerceAutoModeMs(
+      rawAutoModeStartMs,
+      DEFAULT_AUTO_MODE_START_MS,
+      AUTO_MODE_START_MS_MIN,
+      AUTO_MODE_START_MS_MAX,
+    ),
+    autoModeSilenceMs: coerceAutoModeMs(
+      rawAutoModeSilenceMs,
+      DEFAULT_AUTO_MODE_SILENCE_MS,
+      AUTO_MODE_SILENCE_MS_MIN,
+      AUTO_MODE_SILENCE_MS_MAX,
+    ),
   });
 }
 
@@ -249,6 +322,12 @@ export const saveGeminiKey = (setLs: SetLs, key: string): Promise<boolean> =>
 
 export const saveGeminiModel = (setLs: SetLs, model: GeminiModel): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_MODEL, 'geminiModel', model);
+
+export const saveClaudeKey = (setLs: SetLs, key: string): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_CLAUDE_KEY, 'claudeApiKey', key);
+
+export const saveClaudeModel = (setLs: SetLs, model: ClaudeModel): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_CLAUDE_MODEL, 'claudeModel', model);
 
 export async function saveGeminiAutoModel(
   setLs: SetLs,
@@ -316,6 +395,9 @@ export const saveBufferDuration = (setLs: SetLs, duration: BufferDuration): Prom
 export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_SUMMARY_ENABLED, 'autoSummaryEnabled', enabled);
 
+export const saveCrossSessionRecallEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_CROSS_SESSION_RECALL, 'crossSessionRecallEnabled', enabled);
+
 export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promise<boolean> {
   // Snap + clamp before persisting so we never write a value the UI couldn't
   // render. `String(floor)` would otherwise round-trip e.g. `175` and the
@@ -327,6 +409,31 @@ export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promis
 
 export const saveVoiceTrimEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_VOICE_TRIM, 'voiceTrimEnabled', enabled);
+
+export const saveAutoModeEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_AUTO_MODE_ENABLED, 'autoModeEnabled', enabled);
+
+export async function saveAutoModeStartMs(setLs: SetLs, ms: number): Promise<boolean> {
+  const snapped = Math.round(ms / AUTO_MODE_STEP_MS) * AUTO_MODE_STEP_MS;
+  const clamped = Math.min(AUTO_MODE_START_MS_MAX, Math.max(AUTO_MODE_START_MS_MIN, snapped));
+  return saveSetting(setLs, SETTINGS_KEY_AUTO_MODE_START_MS, 'autoModeStartMs', clamped);
+}
+
+export async function saveAutoModeSilenceMs(setLs: SetLs, ms: number): Promise<boolean> {
+  const snapped = Math.round(ms / AUTO_MODE_STEP_MS) * AUTO_MODE_STEP_MS;
+  const clamped = Math.min(AUTO_MODE_SILENCE_MS_MAX, Math.max(AUTO_MODE_SILENCE_MS_MIN, snapped));
+  return saveSetting(setLs, SETTINGS_KEY_AUTO_MODE_SILENCE_MS, 'autoModeSilenceMs', clamped);
+}
+
+// Re-export the thresholds + step so SettingsView can render a consistent
+// slider without hard-coding magic numbers.
+export {
+  AUTO_MODE_SILENCE_MS_MAX,
+  AUTO_MODE_SILENCE_MS_MIN,
+  AUTO_MODE_START_MS_MAX,
+  AUTO_MODE_START_MS_MIN,
+  AUTO_MODE_STEP_MS,
+};
 
 export async function saveAutoDisabledLenses(setLs: SetLs, ids: string[]): Promise<boolean> {
   const ok = await setLs(SETTINGS_KEY_AUTO_DISABLED_LENSES, JSON.stringify(ids));
@@ -574,8 +681,15 @@ function coerceBufferDuration(raw: string | null | undefined): BufferDuration {
 }
 
 function coerceProvider(raw: string | null | undefined): LlmProvider {
-  if (raw === 'gemini' || raw === 'openai-compatible') return raw;
+  if (raw === 'gemini' || raw === 'openai-compatible' || raw === 'claude') return raw;
   return DEFAULT_LLM_PROVIDER;
+}
+
+function coerceClaudeModel(raw: string | null | undefined): ClaudeModel {
+  if (raw && (CLAUDE_MODELS as readonly string[]).includes(raw)) {
+    return raw as ClaudeModel;
+  }
+  return DEFAULT_CLAUDE_MODEL;
 }
 
 function coerceOpenaiBaseUrl(raw: string | null | undefined): OpenAiBaseUrl {
@@ -600,6 +714,74 @@ function coerceAutoDisabledLenses(raw: string): string[] {
     return [];
   }
 }
+
+// ---------- Game presets ----------
+
+/**
+ * Load persisted game presets. Tolerates missing or corrupt blobs — falls
+ * back to an empty list rather than throwing. Drops entries that fail to
+ * normalize so a single bad row can't poison the whole list.
+ */
+export async function loadGamePresets(
+  getLocalStorage: (k: string) => Promise<string>,
+): Promise<void> {
+  try {
+    const raw = await getLocalStorage(GAME_PRESETS_KEY);
+    if (!raw) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+    const presets: GamePreset[] = [];
+    for (const entry of parsed) {
+      const normalized = normalizeGamePreset(entry);
+      if (normalized) presets.push(normalized);
+    }
+    setGamePresetsSignal(presets.slice(0, GAME_PRESETS_MAX));
+  } catch (err) {
+    pushDebugEvent({
+      label: 'game-presets-load-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Persist the full preset list. Returns false if the underlying KV write
+ * failed; on success replaces the in-memory signal so the HUD sees the
+ * change immediately.
+ */
+export async function saveGamePresets(
+  setLs: SetLs,
+  presets: GamePreset[],
+): Promise<boolean> {
+  const trimmed = presets.slice(0, GAME_PRESETS_MAX);
+  const ok = await setLs(GAME_PRESETS_KEY, JSON.stringify(trimmed));
+  if (ok) setGamePresetsSignal(trimmed);
+  return ok;
+}
+
+function normalizeGamePreset(raw: unknown): GamePreset | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const r = raw as Record<string, unknown>;
+  const id = typeof r['id'] === 'string' && r['id'].length > 0 ? r['id'] : newGamePresetId();
+  const format = (GAME_FORMATS as readonly string[]).includes(r['format'] as string)
+    ? (r['format'] as GameFormat)
+    : null;
+  if (!format) return null;
+  const topic = typeof r['topic'] === 'string' ? r['topic'].slice(0, 200).trim() : '';
+  if (!topic) return null;
+  const difficulty = (GAME_DIFFICULTIES as readonly string[]).includes(r['difficulty'] as string)
+    ? (r['difficulty'] as GameDifficulty)
+    : 'medium';
+  const saveToHistory = r['saveToHistory'] !== false;
+  return { id, format, topic, difficulty, saveToHistory };
+}
+
+export function newGamePresetId(): string {
+  return `gp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** Cap exported for UI gating ("max N presets" footer). */
+export const GAME_PRESETS_CAP = GAME_PRESETS_MAX;
 
 // ---------- Meeting Prep context ----------
 

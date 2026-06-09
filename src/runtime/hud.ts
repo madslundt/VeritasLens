@@ -12,7 +12,8 @@ import { measureTextWrap } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
 import { getPersona, getPickerPersonas, type Persona } from '@/personas';
 import { activePersona, settings } from '@/state/store';
-import type { HistoryEntry, LensResult } from '@/types';
+import type { GamePreset, GameSession, HistoryEntry, LensResult } from '@/types';
+import { gameDifficultyLabel, gameFormatLabel } from '@/types';
 
 /**
  * HUD layout for VeritasLens.
@@ -68,6 +69,12 @@ export const CONTAINER = {
   summaryBadge: 32,
   // menu hint footer — empty by default, flashed by flashMenuHint
   menuHint: 33,
+  // game pages (40+)
+  gameList: 40,
+  gameTitle: 41,
+  gameBody: 42,
+  gameProgress: 43,
+  gameHint: 44,
 } as const;
 
 const NAME = {
@@ -89,6 +96,11 @@ const NAME = {
   historyHint: 'vl-hist-hint',
   summaryBadge: 'vl-sum-badge',
   menuHint: 'vl-menu-hint',
+  gameList: 'vl-game-lst',
+  gameTitle: 'vl-game-title',
+  gameBody: 'vl-game-body',
+  gameProgress: 'vl-game-prog',
+  gameHint: 'vl-game-hint',
 } as const;
 
 const STATUS_LABEL: Record<string, string> = {
@@ -102,7 +114,20 @@ const STATUS_LABEL: Record<string, string> = {
   error: 'ERR',
 };
 
-export type HudPage = 'unconfigured' | 'picker' | 'active' | 'menu' | 'history-list' | 'history-detail' | 'mid-summary' | 'none';
+export type HudPage =
+  | 'unconfigured'
+  | 'picker'
+  | 'active'
+  | 'menu'
+  | 'history-list'
+  | 'history-detail'
+  | 'mid-summary'
+  | 'games-picker'
+  | 'game-loading'
+  | 'game-question'
+  | 'game-feedback'
+  | 'game-end'
+  | 'none';
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
@@ -212,6 +237,12 @@ let pendingStatusFrame = '';
 // view), and back to true when the answer is dismissed / hidden.
 let recordingDotEligible = true;
 
+// True while auto-mode VAD is actively watching the mic. Causes the resting
+// recording indicator on baseline to read 'AUTO' instead of '•' so the wearer
+// can tell a tap isn't required. Driven by the lifecycle so this module stays
+// free of any settings-store coupling.
+let autoModeIndicator = false;
+
 /** Compute the text that should currently be in the corner status slot for
  *  the active layout. Combines the canonical status frame with the recording
  *  dot fallback used on the listening-state layouts. Discreet idle deliberately
@@ -221,7 +252,20 @@ let recordingDotEligible = true;
 function statusDisplayText(): string {
   if (pendingStatusFrame !== '') return pendingStatusFrame;
   if (!recordingDotEligible) return '';
-  return activeLayout === 'baseline' ? '•' : '';
+  if (activeLayout !== 'baseline') return '';
+  // Auto-mode replaces the dot with a short label so the wearer can tell
+  // at a glance that no tap is required. Confined to baseline because the
+  // discreet layouts are intentionally chrome-free.
+  return autoModeIndicator ? 'AUTO' : '•';
+}
+
+/** Toggle the resting "AUTO" indicator in the corner status slot. Called by
+ *  the lifecycle when the VAD watcher starts/stops. Idempotent. */
+export async function setAutoModeIndicator(on: boolean): Promise<void> {
+  if (autoModeIndicator === on) return;
+  autoModeIndicator = on;
+  if (currentPage !== 'active') return;
+  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
 }
 
 let bootstrapped = false;
@@ -458,6 +502,7 @@ const PERSONA_ID_BY_RESULT_TYPE: Record<LensResult['type'], string> = {
   'sentiment': 'sentiment',
   'meeting-prep': 'meeting-prep',
   'session-summary': 'session-summary',
+  'game': 'game',
 };
 
 function synthesizeEntryFromResult(result: LensResult, idx = 0): HistoryEntry {
@@ -513,6 +558,8 @@ function splitForSynthesis(result: LensResult): LensResult[] {
       return result.claims.length <= 1 ? [result]
         : result.claims.map((c) => ({ type: 'devils-advocate' as const, claims: [c], autoSelected: result.autoSelected }));
     case 'sentiment':
+      return [result];
+    case 'game':
       return [result];
   }
 }
@@ -847,6 +894,8 @@ function claimCount(result: LensResult): number {
     case 'key-questions':
     case 'sentiment':
       return Math.max(1, result.claims.length);
+    case 'game':
+      return 1;
     default:
       return 1;
   }
@@ -955,6 +1004,14 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
         : c.tone === 'MIXED' ? '~ MIXED'
         : '= NEUTRAL';
       return { top: clip(c.quote, 140), middle: toneLabel, bottom: c.explanation };
+    }
+    case 'game': {
+      const topic = result.preset.topic || 'Random';
+      const formatLabel = gameFormatLabel(result.preset.format);
+      const scored = result.questions.some((q) => q.correctIndex !== null);
+      const middle = scored ? `${result.score} / ${result.questions.length}` : '';
+      const summary = `${formatLabel} · ${gameDifficultyLabel(result.preset.difficulty)}`;
+      return { top: clip(topic, 140), middle, bottom: summary };
     }
   }
 }
@@ -1369,7 +1426,7 @@ function buildUnconfiguredPage(mode: 'create' | 'rebuild'): CreateStartUpPageCon
 }
 
 function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer | RebuildPageContainer {
-  const currentPersonas = getPickerPersonas();
+  const itemNames = buildPickerItemNames();
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: 240, height: 36, borderWidth: 0, paddingLength: 4,
@@ -1386,21 +1443,52 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
     containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 48,
     width: SCREEN_W - 32, height: 200, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
-      itemCount: currentPersonas.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
-      itemName: currentPersonas.map((p) => p.name),
+      itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: itemNames,
     }),
     isEventCapture: 1,
   });
   const hint = new TextContainerProperty({
     containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
     width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
-    content: currentPersonas.length > 1 ? 'Swipe ⇅ · Tap: start · Double-tap: exit' : 'Tap: start · Double-tap: exit',
+    content: itemNames.length > 1 ? 'Swipe ⇅ · Tap: start · Double-tap: exit' : 'Tap: start · Double-tap: exit',
     isEventCapture: 0,
   });
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
   const listObject = [list];
   const textObject = [title, hint, summaryBadge];
   return new Ctor({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
+}
+
+/**
+ * Build the picker item labels. Games is pinned at the BOTTOM so the wearer
+ * lands on a lens (the common case) without scrolling, and Games is one
+ * scroll-down away. The lifecycle's `pickerEntryAtIndex` keeps this offset
+ * in sync — if you reorder here, update that too.
+ */
+const PICKER_GAMES_LABEL = 'Games';
+function buildPickerItemNames(): string[] {
+  return [...getPickerPersonas().map((p) => p.name), PICKER_GAMES_LABEL];
+}
+
+export type PickerEntry =
+  | { kind: 'games' }
+  | { kind: 'persona'; persona: Persona };
+
+/**
+ * Resolve a picker list index to the entry it represents. Indices `0..N-1`
+ * map to the personas (N = `getPickerPersonas().length`); index N is the
+ * Games sub-picker entry pinned at the bottom of the list. Out-of-range
+ * indices fall back to the first persona — picker should never silently
+ * no-op on a tap, and falling back to a lens (rather than Games) matches
+ * the typical "I want to ask a question" intent.
+ */
+export function pickerEntryAtIndex(idx: number | undefined | null): PickerEntry {
+  const personas = getPickerPersonas();
+  const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
+  if (safe >= personas.length) return { kind: 'games' };
+  const p = personas[safe];
+  return p ? { kind: 'persona', persona: p } : { kind: 'games' };
 }
 
 function buildMenuPage(): RebuildPageContainer {
@@ -1704,6 +1792,289 @@ function buildHistoryDetailPage(_entry: HistoryEntry, page: PageRef): RebuildPag
   return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
+// ---------- Game pages ----------
+
+/** Sentinel value indicating the games-picker `← Back` row. */
+const GAMES_PICKER_BACK_KIND = 'back' as const;
+/** Sentinel value indicating the runtime-only Random preset row. */
+const GAMES_PICKER_RANDOM_KIND = 'random' as const;
+export type GamesPickerEntry =
+  | { kind: typeof GAMES_PICKER_BACK_KIND }
+  | { kind: typeof GAMES_PICKER_RANDOM_KIND }
+  | { kind: 'preset'; preset: GamePreset };
+
+let cachedGamesEntries: GamesPickerEntry[] = [];
+
+export function gamesPickerEntryAtIndex(idx: number | undefined | null): GamesPickerEntry | null {
+  const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
+  return cachedGamesEntries[safe] ?? null;
+}
+
+export interface ShowGamesPickerOpts {
+  /** Optional flash to surface a failure from the previous attempt. */
+  errorMessage?: string;
+}
+
+export async function showGamesPickerPage(
+  presets: GamePreset[],
+  opts: ShowGamesPickerOpts = {},
+): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showGamesPickerPage().');
+  cachedGamesEntries = [
+    { kind: GAMES_PICKER_BACK_KIND },
+    { kind: GAMES_PICKER_RANDOM_KIND },
+    ...presets.map((p) => ({ kind: 'preset' as const, preset: p })),
+  ];
+  const ok = await getBridge().rebuildPageContainer(buildGamesPickerPage(presets, opts));
+  if (!ok) throw new Error('rebuildPageContainer (games-picker) failed.');
+  currentPage = 'games-picker';
+}
+
+function buildGamesPickerPage(presets: GamePreset[], opts: ShowGamesPickerOpts): RebuildPageContainer {
+  const itemNames = [
+    '← Back',
+    'Random — surprise me',
+    ...presets.map((p) => clip(`${p.topic} · ${gameFormatLabel(p.format)}`, 60)),
+  ];
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
+    xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 36,
+    borderWidth: 0, paddingLength: 4, content: 'Games', isEventCapture: 0,
+  });
+  const list = new ListContainerProperty({
+    containerID: CONTAINER.gameList, containerName: NAME.gameList,
+    xPosition: 16, yPosition: 48, width: SCREEN_W - 32, height: 200,
+    borderWidth: 0, paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: itemNames,
+    }),
+    isEventCapture: 1,
+  });
+  const hintText = opts.errorMessage && opts.errorMessage.length > 0
+    ? opts.errorMessage
+    : (presets.length > 0
+        ? 'Tap a preset or Random · ← Back to lenses'
+        : 'Add presets in phone settings · ← Back to lenses');
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.gameHint, containerName: NAME.gameHint,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4, content: hintText, isEventCapture: 0,
+  });
+  const listObject = [list];
+  const textObject = [title, hint];
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers(listObject, textObject),
+    listObject,
+    textObject,
+  });
+}
+
+export async function showGameLoadingPage(preset: GamePreset, retryLabel: string): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameLoadingPage().');
+  const ok = await getBridge().rebuildPageContainer(buildGameLoadingPage(preset, retryLabel));
+  if (!ok) throw new Error('rebuildPageContainer (game-loading) failed.');
+  currentPage = 'game-loading';
+}
+
+function buildGameLoadingPage(preset: GamePreset, retryLabel: string): RebuildPageContainer {
+  const headline = retryLabel ? `Loading ${retryLabel}…` : 'Loading…';
+  const topic = preset.topic ? preset.topic : '…picking a topic';
+  const sub = clip(`${gameFormatLabel(preset.format)} · ${topic} · ${gameDifficultyLabel(preset.difficulty)}`, 200);
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
+    xPosition: 16, yPosition: 72, width: SCREEN_W - 32, height: 36,
+    borderWidth: 0, paddingLength: 4, content: headline, isEventCapture: 0,
+  });
+  const body = new TextContainerProperty({
+    containerID: CONTAINER.gameBody, containerName: NAME.gameBody,
+    xPosition: 16, yPosition: 120, width: SCREEN_W - 32, height: 80,
+    borderWidth: 0, paddingLength: 4, content: sub, isEventCapture: 0,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.gameHint, containerName: NAME.gameHint,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4, content: 'Double-tap to cancel', isEventCapture: 0,
+  });
+  // Invisible event capturer — a single-item list ensures double-tap reliably
+  // reaches the lifecycle event router on this hardware.
+  const sink = new ListContainerProperty({
+    containerID: CONTAINER.gameList, containerName: NAME.gameList,
+    xPosition: 0, yPosition: SCREEN_H - 1, width: SCREEN_W, height: 1,
+    borderWidth: 0, paddingLength: 0,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: 1, itemWidth: SCREEN_W, isItemSelectBorderEn: 0, itemName: [' '],
+    }),
+    isEventCapture: 1,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers([sink], [title, body, hint]),
+    listObject: [sink],
+    textObject: [title, body, hint],
+  });
+}
+
+/** Renders the ASCII progress bar shown in the footer of question/feedback pages. */
+function formatGameProgress(index: number, total: number): string {
+  const cells = 10;
+  const filled = total > 0 ? Math.min(cells, Math.max(0, Math.round(((index + 1) / total) * cells))) : 0;
+  return `${'█'.repeat(filled)}${'░'.repeat(cells - filled)}  ${index + 1}/${total}`;
+}
+
+export async function showGameQuestionPage(session: GameSession): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameQuestionPage().');
+  const ok = await getBridge().rebuildPageContainer(buildGameQuestionPage(session));
+  if (!ok) throw new Error('rebuildPageContainer (game-question) failed.');
+  currentPage = 'game-question';
+}
+
+function buildGameQuestionPage(session: GameSession): RebuildPageContainer {
+  const q = session.questions[session.index];
+  const questionText = clip(`Q${session.index + 1}. ${q?.text ?? ''}`, 240);
+  // Question text occupies the top half; options in the middle as a list;
+  // progress bar pinned to the bottom.
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
+    xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 80,
+    borderWidth: 0, paddingLength: 4, content: questionText, isEventCapture: 0,
+  });
+  const isRiddle = !q || q.options.length === 0;
+  const optionNames = isRiddle
+    ? ['› Tap to reveal']
+    : (q!.options.map((o) => clip(o, 60)));
+  const list = new ListContainerProperty({
+    containerID: CONTAINER.gameList, containerName: NAME.gameList,
+    xPosition: 16, yPosition: 92, width: SCREEN_W - 32, height: 152,
+    borderWidth: 0, paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: optionNames.length, itemWidth: SCREEN_W - 48,
+      isItemSelectBorderEn: isRiddle ? 0 : 1, itemName: optionNames,
+    }),
+    isEventCapture: 1,
+  });
+  const progress = new TextContainerProperty({
+    containerID: CONTAINER.gameProgress, containerName: NAME.gameProgress,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4,
+    content: formatGameProgress(session.index, session.questions.length),
+    isEventCapture: 0,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers([list], [title, progress]),
+    listObject: [list],
+    textObject: [title, progress],
+  });
+}
+
+export async function showGameFeedbackPage(session: GameSession): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameFeedbackPage().');
+  const ok = await getBridge().rebuildPageContainer(buildGameFeedbackPage(session));
+  if (!ok) throw new Error('rebuildPageContainer (game-feedback) failed.');
+  currentPage = 'game-feedback';
+}
+
+function buildGameFeedbackPage(session: GameSession): RebuildPageContainer {
+  const q = session.questions[session.index];
+  const selected = session.answers[session.index];
+  let headline = '';
+  let detail = '';
+  if (!q) {
+    headline = '—';
+  } else if (q.correctIndex === null) {
+    // Riddle — no scoring; reveal directly.
+    headline = 'Answer';
+    detail = q.reveal;
+  } else if (selected === q.correctIndex) {
+    headline = '✓ Correct';
+    detail = q.reveal;
+  } else {
+    const correctText = q.options[q.correctIndex] ?? '';
+    headline = '✗ Wrong';
+    detail = `Answer: ${correctText}\n${q.reveal}`;
+  }
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
+    xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 40,
+    borderWidth: 0, paddingLength: 4, content: clip(headline, 80), isEventCapture: 0,
+  });
+  const body = new TextContainerProperty({
+    containerID: CONTAINER.gameBody, containerName: NAME.gameBody,
+    xPosition: 16, yPosition: 52, width: SCREEN_W - 32, height: 192,
+    borderWidth: 0, paddingLength: 4, content: clip(detail, 320), isEventCapture: 0,
+  });
+  const progress = new TextContainerProperty({
+    containerID: CONTAINER.gameProgress, containerName: NAME.gameProgress,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4,
+    content: formatGameProgress(session.index, session.questions.length),
+    isEventCapture: 0,
+  });
+  // Single-item sink list so click/double-click reach the lifecycle event router.
+  const sink = new ListContainerProperty({
+    containerID: CONTAINER.gameList, containerName: NAME.gameList,
+    xPosition: 0, yPosition: SCREEN_H - 1, width: SCREEN_W, height: 1,
+    borderWidth: 0, paddingLength: 0,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: 1, itemWidth: SCREEN_W, isItemSelectBorderEn: 0, itemName: [' '],
+    }),
+    isEventCapture: 1,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers([sink], [title, body, progress]),
+    listObject: [sink],
+    textObject: [title, body, progress],
+  });
+}
+
+export async function showGameEndPage(session: GameSession): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameEndPage().');
+  const ok = await getBridge().rebuildPageContainer(buildGameEndPage(session));
+  if (!ok) throw new Error('rebuildPageContainer (game-end) failed.');
+  currentPage = 'game-end';
+}
+
+function buildGameEndPage(session: GameSession): RebuildPageContainer {
+  const scored = session.questions.some((q) => q.correctIndex !== null);
+  let score = 0;
+  for (let i = 0; i < session.questions.length; i++) {
+    const q = session.questions[i]!;
+    if (q.correctIndex === null) continue;
+    if (session.answers[i] === q.correctIndex) score += 1;
+  }
+  const headline = scored ? `${score} / ${session.questions.length}` : 'Done';
+  const topic = session.preset.topic || 'Random topic';
+  const sub = `${topic} · ${gameFormatLabel(session.preset.format)} · ${gameDifficultyLabel(session.preset.difficulty)}`;
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
+    xPosition: 16, yPosition: 72, width: SCREEN_W - 32, height: 56,
+    borderWidth: 0, paddingLength: 4, content: headline, isEventCapture: 0,
+  });
+  const body = new TextContainerProperty({
+    containerID: CONTAINER.gameBody, containerName: NAME.gameBody,
+    xPosition: 16, yPosition: 140, width: SCREEN_W - 32, height: 80,
+    borderWidth: 0, paddingLength: 4, content: clip(sub, 200), isEventCapture: 0,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.gameHint, containerName: NAME.gameHint,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4, content: 'Tap to return to games', isEventCapture: 0,
+  });
+  const sink = new ListContainerProperty({
+    containerID: CONTAINER.gameList, containerName: NAME.gameList,
+    xPosition: 0, yPosition: SCREEN_H - 1, width: SCREEN_W, height: 1,
+    borderWidth: 0, paddingLength: 0,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: 1, itemWidth: SCREEN_W, isItemSelectBorderEn: 0, itemName: [' '],
+    }),
+    isEventCapture: 1,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers([sink], [title, body, hint]),
+    listObject: [sink],
+    textObject: [title, body, hint],
+  });
+}
+
 /** Clear per-session HUD state so a fresh session doesn't inherit stale buffers. */
 export function resetHudSessionState(): void {
   menuPersona = null;
@@ -1739,6 +2110,7 @@ export function resetHudSessionState(): void {
     summaryBadgeReadyTimer = null;
   }
   builtMenuItems = MENU_OPTIONS.map((o) => ({ id: o.id, label: o.label }));
+  cachedGamesEntries = [];
 }
 
 export function _resetHudBootstrapForTesting(): void {

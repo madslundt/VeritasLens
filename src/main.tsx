@@ -5,6 +5,7 @@ import { initBridge } from './runtime/bridge';
 import { attachBootstrapTeardown } from './runtime/bootstrap';
 import { startHudRuntime } from './runtime/lifecycle';
 import {
+  loadGamePresets,
   loadHistory,
   loadMeetingPrepSections,
   loadSettings,
@@ -54,6 +55,7 @@ async function bootstrap(): Promise<void> {
     await loadSettings((k) => bridge.getLocalStorage(k));
     await loadHistory((k) => bridge.getLocalStorage(k));
     await loadMeetingPrepSections((k) => bridge.getLocalStorage(k));
+    await loadGamePresets((k) => bridge.getLocalStorage(k));
 
     // Picker starts with just the persisted model. Live model-list fetches
     // are user-initiated only (Settings → Refresh models) so the store-review

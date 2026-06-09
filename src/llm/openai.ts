@@ -16,6 +16,15 @@
 import { encodePcmToWav } from '@/runtime/audioBuffer';
 import { OPENAI_INLINE_AUDIO_HOSTS, OPENAI_TRANSCRIBE_MODELS, openaiHostLabel, type OpenAiBaseUrl } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
+import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
+
+// Per-attempt deadlines for the OpenAI-compatible path. STT gets a longer
+// ceiling because a 5-minute WAV (≈ 9.6 MB) takes meaningful upload time on
+// flaky cellular; the chat completion sees a transcript-sized body so 60s is
+// plenty. Without these the underlying browser fetch has no upper bound and
+// will sit on a stalled socket indefinitely.
+const STT_TIMEOUT_MS = 120_000;
+const CHAT_TIMEOUT_MS = 60_000;
 
 export interface CallOpenAiLensOptions {
   apiKey: string;
@@ -175,15 +184,36 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
       await opts.onRetry?.(attempt);
       await retryDelay(nextDelayMs, opts.signal);
     }
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${opts.apiKey}`,
-      },
-      body: bodyJson,
-      signal: opts.signal,
-    });
+    // Per-attempt deadline: a hung socket on /chat/completions used to wedge
+    // the whole user gesture. Now we abort after CHAT_TIMEOUT_MS and either
+    // retry (transient-equivalent) or surface UploadTimeoutError on exhaust.
+    const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${opts.apiKey}`,
+        },
+        body: bodyJson,
+        signal: attemptCtl.signal,
+      });
+    } catch (err) {
+      attemptCtl.cleanup();
+      if (opts.signal?.aborted) throw err;
+      if (attemptCtl.timedOut()) {
+        lastError = new UploadTimeoutError(
+          `${openaiHostLabel(opts.baseUrl)} chat request timed out after ${CHAT_TIMEOUT_MS / 1000}s.`,
+        );
+        nextDelayMs = 1000;
+        continue;
+      }
+      lastError = err instanceof Error ? err : new Error(String(err));
+      nextDelayMs = 1000;
+      continue;
+    }
+    attemptCtl.cleanup();
 
     if (response.status === 503 || response.status === 429) {
       const errText = await response.text();
@@ -243,7 +273,7 @@ function transcriptUserMessage(transcript: string): string {
   return `[Audio transcript]\n${trimmed}`;
 }
 
-interface TranscribeOptions {
+export interface TranscribeOptions {
   apiKey: string;
   baseUrl: OpenAiBaseUrl;
   model: string;
@@ -251,19 +281,36 @@ interface TranscribeOptions {
   signal?: AbortSignal;
 }
 
-async function transcribeAudio(opts: TranscribeOptions): Promise<string> {
+export async function transcribeAudio(opts: TranscribeOptions): Promise<string> {
   const form = new FormData();
   form.append('file', new Blob([opts.wav as BlobPart], { type: 'audio/wav' }), 'audio.wav');
   form.append('model', opts.model);
   form.append('response_format', 'json');
-  const response = await fetch(`${opts.baseUrl}/audio/transcriptions`, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${opts.apiKey}`,
-    },
-    body: form,
-    signal: opts.signal,
-  });
+  // STT_TIMEOUT_MS bounds the upload + Whisper inference. Without it, a
+  // stalled connection on a 5-minute WAV (≈ 9.6 MB) sits forever — the bug
+  // that prompted item-A in the v0.12.0 plan.
+  const attemptCtl = withFetchTimeout(opts.signal, STT_TIMEOUT_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${opts.baseUrl}/audio/transcriptions`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${opts.apiKey}`,
+      },
+      body: form,
+      signal: attemptCtl.signal,
+    });
+  } catch (err) {
+    attemptCtl.cleanup();
+    if (opts.signal?.aborted) throw err;
+    if (attemptCtl.timedOut()) {
+      throw new UploadTimeoutError(
+        `${openaiHostLabel(opts.baseUrl)} transcription timed out after ${STT_TIMEOUT_MS / 1000}s (model "${opts.model}"). Try a shorter buffer or a faster connection.`,
+      );
+    }
+    throw err;
+  }
+  attemptCtl.cleanup();
   if (!response.ok) {
     const errText = await response.text();
     throw new Error(

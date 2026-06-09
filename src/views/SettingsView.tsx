@@ -1,6 +1,7 @@
 // src/views/SettingsView.tsx
 import { createEffect, createMemo, createSignal, For, Index, Match, on, onCleanup, Show, Switch, untrack, type Component } from 'solid-js';
 import {
+  GAME_PRESETS_CAP,
   MEETING_PREP_BYTE_BUDGET,
   MEETING_PREP_LABEL_MAX,
   availableModels,
@@ -8,12 +9,24 @@ import {
   computeMeetingPrepBytes,
   deleteHistorySession,
   deviceStatus,
+  gamePresets,
   meetingPrepSections,
   modelsLoading,
+  newGamePresetId,
   newSectionId,
   saveAutoSummaryEnabled,
+  saveCrossSessionRecallEnabled,
+  saveGamePresets,
+  saveAutoModeEnabled,
+  saveAutoModeStartMs,
+  saveAutoModeSilenceMs,
   saveVoiceGateRmsFloor,
   saveVoiceTrimEnabled,
+  AUTO_MODE_SILENCE_MS_MAX,
+  AUTO_MODE_SILENCE_MS_MIN,
+  AUTO_MODE_START_MS_MAX,
+  AUTO_MODE_START_MS_MIN,
+  AUTO_MODE_STEP_MS,
   VOICE_GATE_RMS_STEP,
   VOICE_GATE_RMS_MAX,
   saveBufferDuration,
@@ -21,6 +34,8 @@ import {
   saveGeminiKey,
   saveGeminiModel,
   saveGeminiAutoModel,
+  saveClaudeKey,
+  saveClaudeModel,
   saveMeetingPrepSections,
   saveOpenaiBaseUrl,
   saveOpenaiKeys,
@@ -39,6 +54,7 @@ import {
 import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import {
+  CLAUDE_MODELS,
   LANGUAGES,
   OPENAI_BASE_URLS,
   OPENAI_CHAT_ONLY_HOSTS,
@@ -46,8 +62,14 @@ import {
   OPENAI_TRANSCRIBE_MODELS,
   STT_HOSTS,
   STT_MODELS_BY_HOST,
+  gameDifficultyLabel,
+  gameFormatLabel,
   openaiHostLabel,
   type BufferDuration,
+  type ClaudeModel,
+  type GameDifficulty,
+  type GameFormat,
+  type GamePreset,
   type GeminiModel,
   type HistoryEntry,
   type LanguageCode,
@@ -78,10 +100,12 @@ const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
  */
 type ProviderOption =
   | { kind: 'gemini'; value: 'gemini'; label: string }
+  | { kind: 'claude'; value: 'claude'; label: string }
   | { kind: 'openai-compatible'; value: string; label: string; baseUrl: OpenAiBaseUrl };
 
 const PROVIDER_OPTIONS: ProviderOption[] = [
   { kind: 'gemini', value: 'gemini', label: 'Google Gemini' },
+  { kind: 'claude', value: 'claude', label: 'Anthropic Claude (external STT)' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.openai.com/v1', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://api.groq.com/openai/v1', label: 'Groq', baseUrl: 'https://api.groq.com/openai/v1' },
   { kind: 'openai-compatible', value: 'openai-compatible:https://openrouter.ai/api/v1', label: 'OpenRouter (audio models)', baseUrl: 'https://openrouter.ai/api/v1' },
@@ -90,7 +114,9 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
 ];
 
 function providerOptionValue(provider: LlmProvider, baseUrl: OpenAiBaseUrl): string {
-  return provider === 'gemini' ? 'gemini' : `openai-compatible:${baseUrl}`;
+  if (provider === 'gemini') return 'gemini';
+  if (provider === 'claude') return 'claude';
+  return `openai-compatible:${baseUrl}`;
 }
 
 /**
@@ -143,6 +169,9 @@ const ApiKeyLink: Component<{ host: OpenAiBaseUrl }> = (props) => (
 function parseProviderOption(value: string): { provider: LlmProvider; baseUrl: OpenAiBaseUrl } {
   if (value === 'gemini') {
     return { provider: 'gemini', baseUrl: 'https://api.openai.com/v1' };
+  }
+  if (value === 'claude') {
+    return { provider: 'claude', baseUrl: 'https://api.openai.com/v1' };
   }
   const sep = value.indexOf(':');
   const url = sep > -1 ? value.slice(sep + 1) : '';
@@ -270,6 +299,35 @@ function formatResultText(result: LensResult): string {
       if (!c) return '';
       return `${c.tone}\n\n${c.explanation}`;
     }
+    case 'game': {
+      const scored = result.questions.some((q) => q.correctIndex !== null);
+      const header = scored
+        ? `Score: ${result.score} / ${result.questions.length}`
+        : `${result.questions.length} ${result.preset.format === 'riddle' ? 'riddles' : 'rounds'}`;
+      const topic = result.preset.topic || 'Random topic';
+      const sub = `${topic} · ${gameFormatLabel(result.preset.format)} · ${gameDifficultyLabel(result.preset.difficulty)}`;
+      const lines: string[] = [header, sub, ''];
+      result.questions.forEach((q, i) => {
+        const userPicked = result.answers[i];
+        const userText = userPicked !== null && userPicked !== undefined && q.options[userPicked]
+          ? q.options[userPicked]
+          : (q.correctIndex === null ? '(revealed)' : '(skipped)');
+        const correctText = q.correctIndex !== null ? q.options[q.correctIndex] ?? '' : q.reveal;
+        const mark = q.correctIndex === null
+          ? '•'
+          : userPicked === q.correctIndex ? '✓' : '✗';
+        lines.push(`${mark} Q${i + 1}. ${q.text}`);
+        if (q.correctIndex !== null) {
+          lines.push(`  Your answer: ${userText}`);
+          if (userPicked !== q.correctIndex) lines.push(`  Correct: ${correctText}`);
+        } else {
+          lines.push(`  Answer: ${q.reveal}`);
+        }
+        if (q.reveal && q.correctIndex !== null) lines.push(`  ${q.reveal}`);
+        lines.push('');
+      });
+      return lines.join('\n').trimEnd();
+    }
   }
 }
 
@@ -295,6 +353,14 @@ export const SettingsView: Component = () => {
   const [draftKey, setDraftKey] = createSignal(settings().geminiApiKey);
   const [draftModel, setDraftModel] = createSignal<GeminiModel>(settings().geminiModel);
   const [draftAutoModel, setDraftAutoModel] = createSignal<GeminiModel | null>(settings().geminiAutoModel);
+  const [draftClaudeKey, setDraftClaudeKey] = createSignal(settings().claudeApiKey);
+  const [draftClaudeModel, setDraftClaudeModel] = createSignal<ClaudeModel>(settings().claudeModel);
+  // Claude model picker uses the curated CLAUDE_MODELS list directly. No live
+  // /v1/models probe — the curated list covers the production lineup and a
+  // failing key would block the "Test model" button anyway, which is where
+  // we want surface-level verification.
+  const claudeModels = (): readonly string[] => CLAUDE_MODELS;
+  const claudeFetchState = (): 'idle' | 'loading' | 'ok' | 'fail' => 'idle';
   // Per-host draft of OpenAI keys so switching providers (OpenAI ↔ Groq) does
   // not lose what the user typed in another slot. `draftOpenaiKey()` reads the
   // value for whichever host is currently selected in the Provider dropdown.
@@ -340,9 +406,13 @@ export const SettingsView: Component = () => {
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
+  const [draftCrossSessionRecall, setDraftCrossSessionRecall] = createSignal(settings().crossSessionRecallEnabled);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
   const [draftVoiceTrim, setDraftVoiceTrim] = createSignal(settings().voiceTrimEnabled);
+  const [draftAutoMode, setDraftAutoMode] = createSignal(settings().autoModeEnabled);
+  const [draftAutoModeStart, setDraftAutoModeStart] = createSignal(settings().autoModeStartMs);
+  const [draftAutoModeSilence, setDraftAutoModeSilence] = createSignal(settings().autoModeSilenceMs);
   // Local draft of meeting-prep sections. Mirrors the persisted store value but
   // always carries at least one row so the editor never collapses to nothing.
   // Autosaves on debounce; cap violations surface inline in `prepError`.
@@ -376,6 +446,84 @@ export const SettingsView: Component = () => {
       prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
     );
   };
+
+  // ---------- Games presets ----------
+  //
+  // Saved presets are persisted directly to the KV store on every CRUD action
+  // (no global Save bar): the section is self-contained and the user expects
+  // adding a preset to make it immediately available on the glasses without
+  // having to also press Save at the top.
+  const [gameEditorOpen, setGameEditorOpen] = createSignal(false);
+  /** null = creating a new preset; string = editing an existing preset by id. */
+  const [gameEditingId, setGameEditingId] = createSignal<string | null>(null);
+  const [gameFormFormat, setGameFormFormat] = createSignal<GameFormat>('quiz-mc');
+  const [gameFormTopic, setGameFormTopic] = createSignal('');
+  const [gameFormDifficulty, setGameFormDifficulty] = createSignal<GameDifficulty>('medium');
+  const [gameFormSaveToHistory, setGameFormSaveToHistory] = createSignal(true);
+  const [gameFormError, setGameFormError] = createSignal('');
+  const GAME_FORMATS: readonly GameFormat[] = ['quiz-mc', 'true-false', 'riddle'];
+  const GAME_DIFFICULTIES: readonly GameDifficulty[] = ['easy', 'medium', 'hard'];
+  const difficultyIndex = (d: GameDifficulty): number => GAME_DIFFICULTIES.indexOf(d);
+  const resetGameForm = (): void => {
+    setGameEditingId(null);
+    setGameFormFormat('quiz-mc');
+    setGameFormTopic('');
+    setGameFormDifficulty('medium');
+    setGameFormSaveToHistory(true);
+    setGameFormError('');
+  };
+  const openGameEditor = (preset?: GamePreset): void => {
+    if (preset) {
+      setGameEditingId(preset.id);
+      setGameFormFormat(preset.format);
+      setGameFormTopic(preset.topic);
+      setGameFormDifficulty(preset.difficulty);
+      setGameFormSaveToHistory(preset.saveToHistory);
+    } else {
+      resetGameForm();
+    }
+    setGameFormError('');
+    setGameEditorOpen(true);
+  };
+  const closeGameEditor = (): void => {
+    setGameEditorOpen(false);
+    resetGameForm();
+  };
+  const submitGamePreset = async (): Promise<void> => {
+    const topic = gameFormTopic().trim().slice(0, 200);
+    if (!topic) { setGameFormError('Topic is required.'); return; }
+    const list = [...gamePresets()];
+    const editingId = gameEditingId();
+    const preset: GamePreset = {
+      id: editingId ?? newGamePresetId(),
+      format: gameFormFormat(),
+      topic,
+      difficulty: gameFormDifficulty(),
+      saveToHistory: gameFormSaveToHistory(),
+    };
+    if (editingId) {
+      const idx = list.findIndex((p) => p.id === editingId);
+      if (idx >= 0) list[idx] = preset;
+      else list.push(preset);
+    } else {
+      if (list.length >= GAME_PRESETS_CAP) {
+        setGameFormError(`Limit of ${GAME_PRESETS_CAP} presets reached.`);
+        return;
+      }
+      list.push(preset);
+    }
+    const ok = await saveGamePresets(getSetLs(), list);
+    if (!ok) { setGameFormError('Could not save preset.'); return; }
+    await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+    closeGameEditor();
+  };
+  const deleteGamePreset = async (id: string): Promise<void> => {
+    const list = gamePresets().filter((p) => p.id !== id);
+    await saveGamePresets(getSetLs(), list);
+    if (gameEditingId() === id) closeGameEditor();
+    await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+  };
+
   type SaveState = 'idle' | 'saving' | 'saved' | 'error';
   const [saveState, setSaveState] = createSignal<SaveState>('idle');
   // Per-model test status. The Auto-classifier slot is only meaningful when
@@ -583,6 +731,14 @@ export const SettingsView: Component = () => {
       if (draftKey().trim().length < 10) return false;
       const st = geminiFetchState();
       if (st === 'loading' || st === 'fail') return false;
+    } else if (provider === 'claude') {
+      if (draftClaudeKey().trim().length < 10) return false;
+      const st = claudeFetchState();
+      if (st === 'loading' || st === 'fail') return false;
+      // Claude needs an STT key too — fail-fast in the UI rather than at first
+      // call. Reads from the saved store (not the draft) since the STT key
+      // lives in the openai-compatible tab's per-host slot.
+      if (!(settings().openaiApiKeys[draftSttHost()] ?? '').trim()) return false;
     } else {
       if (draftOpenaiKey().trim().length < 10) return false;
       const st = openaiFetchState();
@@ -713,6 +869,8 @@ export const SettingsView: Component = () => {
         geminiKey,
         geminiModel,
         geminiAuto,
+        claudeKey,
+        claudeModel,
         openaiKeys,
         openaiBaseUrl,
         openaiModel,
@@ -722,9 +880,13 @@ export const SettingsView: Component = () => {
         language,
         buffer,
         autoSummary,
+        crossSessionRecall,
         discreet,
         voiceGate,
         voiceTrim,
+        autoMode,
+        autoModeStart,
+        autoModeSilence,
         autoDisabled,
         prepResult,
       ] = await Promise.all([
@@ -732,6 +894,8 @@ export const SettingsView: Component = () => {
         saveGeminiKey(setLs, draftKey().trim()),
         saveGeminiModel(setLs, draftModel()),
         saveGeminiAutoModel(setLs, draftAutoModel()),
+        saveClaudeKey(setLs, draftClaudeKey().trim()),
+        saveClaudeModel(setLs, draftClaudeModel()),
         saveOpenaiKeys(setLs, Object.fromEntries(
           (Object.entries(draftOpenaiKeys()) as Array<[OpenAiBaseUrl, string]>).map(([u, v]) => [u, v.trim()]),
         ) as Record<OpenAiBaseUrl, string>),
@@ -745,19 +909,23 @@ export const SettingsView: Component = () => {
         saveResponseLanguage(setLs, draftLanguage()),
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
+        saveCrossSessionRecallEnabled(setLs, draftCrossSessionRecall()),
         saveDiscreet(setLs, draftDiscreet()),
         saveVoiceGateRmsFloor(setLs, draftVoiceGate()),
         saveVoiceTrimEnabled(setLs, draftVoiceTrim()),
+        saveAutoModeEnabled(setLs, draftAutoMode()),
+        saveAutoModeStartMs(setLs, draftAutoModeStart()),
+        saveAutoModeSilenceMs(setLs, draftAutoModeSilence()),
         saveAutoDisabledLenses(setLs, draftAutoDisabledLenses()),
         saveMeetingPrepSections(setLs, prepDraft()),
       ]);
       if (prepResult.ok) setPrepError('');
       else setPrepError(prepResult.error ?? 'Could not save meeting prep.');
       const allOk = [
-        provider, geminiKey, geminiModel, geminiAuto, openaiKeys,
+        provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
-        language, buffer, autoSummary, discreet, voiceGate, voiceTrim,
-        autoDisabled,
+        language, buffer, autoSummary, crossSessionRecall, discreet, voiceGate, voiceTrim,
+        autoMode, autoModeStart, autoModeSilence, autoDisabled,
       ].every(Boolean) && prepResult.ok;
       if (allOk) {
         // Re-seed the draft signals from the persisted store. The store may
@@ -765,6 +933,11 @@ export const SettingsView: Component = () => {
         // MEETING_PREP_LABEL_MAX); without this re-seed the draft would
         // retain the un-normalized value and lensDirty would stay true.
         setDraftAutoDisabledLenses(settings().autoDisabledLenses);
+        // Auto-mode threshold saves snap+clamp before persisting, so re-seed
+        // from the store value to avoid keeping the un-normalized draft (e.g.
+        // 1234 → 1250) and letting appDirty stay true.
+        setDraftAutoModeStart(settings().autoModeStartMs);
+        setDraftAutoModeSilence(settings().autoModeSilenceMs);
         const freshPrep = meetingPrepSections();
         setPrepDraft(
           freshPrep.length > 0
@@ -808,6 +981,8 @@ export const SettingsView: Component = () => {
       || draftKey() !== s.geminiApiKey
       || draftModel() !== s.geminiModel
       || draftAutoModel() !== s.geminiAutoModel
+      || draftClaudeKey() !== s.claudeApiKey
+      || draftClaudeModel() !== s.claudeModel
       || !shallowRecordEq(draftOpenaiKeys() as Record<string, string>, s.openaiApiKeys as Record<string, string>)
       || draftOpenaiBaseUrl() !== s.openaiBaseUrl
       || draftOpenaiModel() !== s.openaiModel
@@ -822,9 +997,13 @@ export const SettingsView: Component = () => {
       draftLanguage() !== s.responseLanguage
       || draftBuffer() !== s.bufferDuration
       || draftAutoEnabled() !== s.autoSummaryEnabled
+      || draftCrossSessionRecall() !== s.crossSessionRecallEnabled
       || draftDiscreet() !== s.discreet
       || draftVoiceGate() !== s.voiceGateRmsFloor
       || draftVoiceTrim() !== s.voiceTrimEnabled
+      || draftAutoMode() !== s.autoModeEnabled
+      || draftAutoModeStart() !== s.autoModeStartMs
+      || draftAutoModeSilence() !== s.autoModeSilenceMs
     );
   });
   /**
@@ -867,23 +1046,26 @@ export const SettingsView: Component = () => {
     const provider = draftProvider();
     const baseUrl = draftOpenaiBaseUrl();
     const isOpenAi = provider === 'openai-compatible';
-    const apiKey = isOpenAi ? draftOpenaiKey() : draftKey();
-    const mainModel = isOpenAi ? draftOpenaiModel() : draftModel();
+    const isClaude = provider === 'claude';
+    const apiKey = isClaude ? draftClaudeKey() : isOpenAi ? draftOpenaiKey() : draftKey();
+    const mainModel = isClaude ? draftClaudeModel() : isOpenAi ? draftOpenaiModel() : draftModel();
     // Auto classifier only exists on the Gemini path today, and is optional —
     // a null draft means "reuse the main model", so we don't double-probe.
     // Also skip when the user explicitly picked the same model as the main
     // one (both probes would hit the same endpoint, wasting tokens).
     const auto = draftAutoModel();
-    const autoModel = !isOpenAi && auto && auto !== mainModel ? auto : null;
+    const autoModel = provider === 'gemini' && auto && auto !== mainModel ? auto : null;
 
     // Pre-flight: a missing API key isn't a model failure, so surface it on
     // the key input instead of as a model-test result. Skips the network call
     // entirely (and avoids polluting `mainTest` with a key-shaped error).
     if (apiKey.trim().length < 10) {
       setKeyError(
-        isOpenAi
-          ? `Missing ${openaiHostLabel(baseUrl)} API key.`
-          : 'Missing Gemini API key.',
+        isClaude
+          ? 'Missing Anthropic API key.'
+          : isOpenAi
+            ? `Missing ${openaiHostLabel(baseUrl)} API key.`
+            : 'Missing Gemini API key.',
       );
       setMainTest(IDLE_TEST);
       setAutoTest(IDLE_TEST);
@@ -1398,6 +1580,127 @@ export const SettingsView: Component = () => {
               </For>
             </ul>
           </section>
+
+          <section class="lenses-card">
+            <div class="field-header">
+              <span class="field-label">Games</span>
+              <span class="muted" style="margin-left: 0.5rem; font-size: 0.85em;">
+                {gamePresets().length} / {GAME_PRESETS_CAP}
+              </span>
+            </div>
+            <p class="field-hint">
+              Hands-free quizzes, true/false rounds, and riddles you can play on the glasses.
+              Tap the Games entry at the top of the lens picker to start one — Random is always available.
+            </p>
+            <ul class="lens-list">
+              <For each={gamePresets()}>
+                {(preset) => (
+                  <li class="lens-row">
+                    <div class="lens-info">
+                      <strong>{preset.topic}</strong>
+                      <span class="lens-desc">
+                        {gameFormatLabel(preset.format)} · {gameDifficultyLabel(preset.difficulty)}
+                        {preset.saveToHistory ? '' : ' · history off'}
+                      </span>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem;">
+                      <button
+                        type="button"
+                        class="link-button"
+                        onClick={() => openGameEditor(preset)}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        class="link-button"
+                        onClick={() => void deleteGamePreset(preset.id)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </li>
+                )}
+              </For>
+              <Show when={gamePresets().length === 0 && !gameEditorOpen()}>
+                <li class="lens-row">
+                  <span class="muted">No saved games yet. Create one below.</span>
+                </li>
+              </Show>
+            </ul>
+            <Show
+              when={gameEditorOpen()}
+              fallback={
+                <button
+                  type="button"
+                  class="link-button"
+                  disabled={gamePresets().length >= GAME_PRESETS_CAP}
+                  onClick={() => openGameEditor()}
+                >
+                  + New game
+                </button>
+              }
+            >
+              <div class="meeting-prep-inline">
+                <label class="toggle-row toggle-row--full">
+                  <span>Format</span>
+                  <select
+                    value={gameFormFormat()}
+                    onChange={(e) => setGameFormFormat(e.currentTarget.value as GameFormat)}
+                  >
+                    <For each={GAME_FORMATS}>
+                      {(fmt) => <option value={fmt}>{gameFormatLabel(fmt)}</option>}
+                    </For>
+                  </select>
+                </label>
+                <label class="toggle-row toggle-row--full">
+                  <span>Topic</span>
+                  <input
+                    type="text"
+                    value={gameFormTopic()}
+                    placeholder="e.g. World War II"
+                    maxLength={200}
+                    onInput={(e) => setGameFormTopic(e.currentTarget.value)}
+                  />
+                </label>
+                <label class="toggle-row toggle-row--full">
+                  <span style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span>Difficulty</span>
+                    <span style="display: inline-block; min-width: 4.5rem; text-align: left; opacity: 0.8;">
+                      {gameDifficultyLabel(gameFormDifficulty())}
+                    </span>
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="2"
+                    step="1"
+                    value={difficultyIndex(gameFormDifficulty())}
+                    onInput={(e) => setGameFormDifficulty(GAME_DIFFICULTIES[Number(e.currentTarget.value)] ?? 'medium')}
+                  />
+                </label>
+                <label class="toggle-row toggle-row--full">
+                  <input
+                    type="checkbox"
+                    checked={gameFormSaveToHistory()}
+                    onChange={(e) => setGameFormSaveToHistory(e.currentTarget.checked)}
+                  />
+                  <span>Save completed sessions to history</span>
+                </label>
+                <Show when={gameFormError()}>
+                  <p class="muted" style="color: var(--color-warning, #c33);">{gameFormError()}</p>
+                </Show>
+                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+                  <button type="button" class="primary" onClick={() => void submitGamePreset()}>
+                    {gameEditingId() ? 'Save changes' : 'Add game'}
+                  </button>
+                  <button type="button" class="secondary" onClick={closeGameEditor}>
+                    Reset
+                  </button>
+                </div>
+              </div>
+            </Show>
+          </section>
         </>
       </Show>
 
@@ -1533,6 +1836,80 @@ export const SettingsView: Component = () => {
                   lighter one (e.g. flash-lite) to stay under per-model rate limits.
                 </span>
               </label>
+            </Show>
+
+            <Show when={draftProvider() === 'claude'}>
+              <label class="field">
+                <span class="field-label">API key</span>
+                <input
+                  type="password"
+                  autocomplete="off"
+                  spellcheck={false}
+                  placeholder="sk-ant-…"
+                  classList={{ 'input-error': keyError() !== null }}
+                  value={draftClaudeKey()}
+                  onInput={(e) => { setDraftClaudeKey(e.currentTarget.value); clearStatuses(); }}
+                />
+                <Show when={keyError()}>
+                  <span class="field-error">{keyError()}</span>
+                </Show>
+                <span class="field-hint">
+                  Stored only on this device. Get one at{' '}
+                  <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">
+                    console.anthropic.com/settings/keys
+                  </a>.
+                </span>
+              </label>
+
+              <label class="field">
+                <span class="field-label">Model</span>
+                <select
+                  value={draftClaudeModel()}
+                  disabled={draftClaudeKey().trim().length < 10}
+                  onChange={(e) => { setDraftClaudeModel(e.currentTarget.value as ClaudeModel); clearStatuses(); }}
+                >
+                  <For each={claudeModels()}>{(m) => <option value={m}>{m}</option>}</For>
+                </select>
+                <Show when={draftClaudeKey().trim().length < 10}>
+                  <span class="field-hint">Enter an API key above to enable the model picker.</span>
+                </Show>
+                <Show when={claudeFetchState() === 'fail'}>
+                  <span class="field-error">Could not load models — check the API key.</span>
+                </Show>
+              </label>
+
+              <div class="field">
+                <span class="field-label">Transcription host (Whisper)</span>
+                <span class="field-hint">
+                  Claude is text-only; the runtime first transcribes your audio
+                  on a Whisper host. Pick which one (and a model) below — same
+                  routing as DeepSeek and Perplexity. The transcription host's
+                  API key is taken from its OpenAI-compatible slot.
+                </span>
+                <select
+                  value={draftSttHost()}
+                  onChange={(e) => { setDraftSttHost(e.currentTarget.value as SttHost); clearStatuses(); }}
+                >
+                  <For each={STT_HOSTS}>{(host) => (
+                    <option value={host}>{openaiHostLabel(host)}</option>
+                  )}</For>
+                </select>
+                <span class="field-hint" style="margin-top: 0.5rem;">STT model on {openaiHostLabel(draftSttHost())}:</span>
+                <select
+                  value={draftSttModel() || STT_MODELS_BY_HOST[draftSttHost()][0]}
+                  onChange={(e) => { setDraftSttModel(e.currentTarget.value); clearStatuses(); }}
+                >
+                  <For each={STT_MODELS_BY_HOST[draftSttHost()]}>{(m) => (
+                    <option value={m}>{m}</option>
+                  )}</For>
+                </select>
+                <Show when={!(settings().openaiApiKeys[draftSttHost()] ?? '').trim()}>
+                  <span class="field-error">
+                    Add a {openaiHostLabel(draftSttHost())} API key in its provider tab so
+                    transcription can run before each Anthropic call.
+                  </span>
+                </Show>
+              </div>
             </Show>
 
             <Show when={draftProvider() === 'openai-compatible'}>
@@ -1762,6 +2139,53 @@ export const SettingsView: Component = () => {
             </div>
 
             <div class="field">
+              <span class="field-label">Auto mode</span>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftAutoMode()}
+                  onChange={(e) => setDraftAutoMode(e.currentTarget.checked)}
+                />
+                <span>Auto-analyze when you finish speaking</span>
+              </label>
+              <Show when={draftAutoMode()}>
+                <div class="slider-row" style={{ 'margin-top': '0.5rem' }}>
+                  <input
+                    type="range"
+                    min={AUTO_MODE_START_MS_MIN}
+                    max={AUTO_MODE_START_MS_MAX}
+                    step={AUTO_MODE_STEP_MS}
+                    value={draftAutoModeStart()}
+                    onInput={(e) => setDraftAutoModeStart(Number(e.currentTarget.value))}
+                  />
+                  <span class="slider-value">
+                    Min voice {(draftAutoModeStart() / 1000).toFixed(2)} s
+                  </span>
+                </div>
+                <div class="slider-row">
+                  <input
+                    type="range"
+                    min={AUTO_MODE_SILENCE_MS_MIN}
+                    max={AUTO_MODE_SILENCE_MS_MAX}
+                    step={AUTO_MODE_STEP_MS}
+                    value={draftAutoModeSilence()}
+                    onInput={(e) => setDraftAutoModeSilence(Number(e.currentTarget.value))}
+                  />
+                  <span class="slider-value">
+                    Trailing silence {(draftAutoModeSilence() / 1000).toFixed(2)} s
+                  </span>
+                </div>
+              </Show>
+              <span class="field-hint">
+                Watches the mic for voice activity. After you speak for at least the <strong>min
+                voice</strong> duration and then go silent for the <strong>trailing silence</strong>
+                duration, an analysis fires automatically — no tap required. Short mid-sentence
+                pauses don't trigger. The HUD shows <strong>AUTO</strong> in the corner while
+                this is active. Uses the same voice-detection sensitivity setting above.
+              </span>
+            </div>
+
+            <div class="field">
               <span class="field-label">Trim non-speech audio</span>
               <label class="toggle-row">
                 <input
@@ -1809,6 +2233,40 @@ export const SettingsView: Component = () => {
                   ⚠ Sends a provider request periodically while listening (silent ticks skipped).
                 </span>
               </Show>
+              <Show when={draftAutoEnabled()}>
+                <label class="toggle-row" style="margin-top: 8px;">
+                  <input
+                    type="checkbox"
+                    checked={draftCrossSessionRecall()}
+                    onChange={(e) => setDraftCrossSessionRecall(e.currentTarget.checked)}
+                  />
+                  <span>Carry summaries across sessions</span>
+                </label>
+                <Show when={draftCrossSessionRecall()}>
+                  <span class="field-hint warning">
+                    Seeds each new session with short summaries of your last 2 sessions, so the
+                    LLM keeps long-running context across reloads.
+                    ⚠ Past-session summaries are sent to your provider in every prompt.
+                  </span>
+                </Show>
+              </Show>
+            </div>
+
+            <div class="field">
+              <span class="field-label">HUD status indicators</span>
+              <span class="field-hint">
+                What the glyphs in the glasses' top-right corner mean:
+              </span>
+              <ul class="status-legend">
+                <li><code>OK</code> — idle, ready for a tap</li>
+                <li><code>(dot)</code> — listening</li>
+                <li><code>|</code> <code>/</code> <code>-</code> <code>\</code> — request in flight (spinner)</li>
+                <li><code>...</code> — thinking</li>
+                <li><code>R1/3</code>…<code>R3/3</code> — retrying after a transient error</li>
+                <li><code>ERR</code> — provider error (auto-clears in 5 s)</li>
+                <li><code>T/O</code> — request stalled past its deadline; try again or shrink the buffer</li>
+                <li><code>○</code> / <code>~</code> — no speech / too noisy in the buffer</li>
+              </ul>
             </div>
 
           <footer class="privacy">

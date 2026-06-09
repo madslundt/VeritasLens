@@ -2,21 +2,22 @@
   "package_id": "com.veritaslens.app",
   "edition": "202601",
   "name": "VeritasLens",
-  "version": "0.11.3",
+  "version": "0.13.0",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "network",
-      "desc": "VeritasLens sends a short audio snippet to your chosen LLM provider (Gemini direct, OpenAI/Groq Whisper-then-chat, OpenRouter inline audio, or DeepSeek/Perplexity using Whisper on a separate host for transcription). Your API key and audio leave the device only as part of that request.",
+      "desc": "VeritasLens sends a short audio snippet to your chosen LLM provider (Gemini, OpenAI, Groq, OpenRouter, Anthropic Claude, DeepSeek, or Perplexity; some hosts use Whisper for transcription first). Your API key and audio leave the device only as part of that request.",
       "whitelist": [
         "https://generativelanguage.googleapis.com",
         "https://api.openai.com",
         "https://api.groq.com",
         "https://openrouter.ai",
         "https://api.deepseek.com",
-        "https://api.perplexity.ai"
+        "https://api.perplexity.ai",
+        "https://api.anthropic.com"
       ]
     },
     {

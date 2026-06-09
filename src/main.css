@@ -217,6 +217,25 @@ a {
   word-break: break-word;
 }
 
+.status-legend {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+  list-style: disc;
+  font-size: 0.78rem;
+  color: var(--muted);
+  display: grid;
+  gap: 0.2rem;
+}
+
+.status-legend code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  background: var(--surface-strong, rgba(255, 255, 255, 0.06));
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  color: var(--text);
+}
+
 .field-test {
   font-size: 0.78rem;
   display: inline-flex;

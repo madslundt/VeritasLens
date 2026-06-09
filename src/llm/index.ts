@@ -25,12 +25,19 @@ import {
   callOpenAiLens,
   fetchOpenAiModels,
   runSelfTest as runOpenAiSelfTest,
+  transcribeAudio,
 } from './openai';
+import {
+  callLens as callClaudeLens,
+  fetchAvailableModels as fetchClaudeModels,
+  runSelfTest as runClaudeSelfTest,
+} from './claude';
 import {
   OPENAI_CHAT_ONLY_HOSTS,
   OPENAI_TRANSCRIBE_MODELS,
   STT_MODELS_BY_HOST,
   openaiHostLabel,
+  type ClaudeModel,
   type GeminiModel,
   type LlmProvider,
   type OpenAiBaseUrl,
@@ -38,6 +45,8 @@ import {
 } from '@/types';
 
 export { MAX_RETRIES, parseRetryAfterMs, parseGoogleRetryDelayMs };
+export { callGame } from './gameClient';
+export type { CallGameOptions } from './gameClient';
 
 /**
  * Provider-agnostic call shape used by the runtime. Re-uses the Gemini
@@ -93,6 +102,36 @@ function resolveStt(chatHost: OpenAiBaseUrl): {
  */
 export async function callLens(opts: CallLensOptions): Promise<string> {
   const s = settings();
+  if (s.provider === 'claude') {
+    // Claude has no audio modality on this API. Transcribe via the same
+    // sttHost path the chat-only OpenAI hosts use (Groq/OpenAI Whisper), then
+    // pass the transcript to Anthropic. Fail fast with a clear error if the
+    // STT key is missing — surfaces in Settings rather than at /v1/messages.
+    const sttHost: SttHost = s.sttHost;
+    const sttApiKey = s.openaiApiKeys[sttHost] ?? '';
+    if (!sttApiKey) {
+      throw new Error(
+        `Add a ${openaiHostLabel(sttHost)} API key for transcription before using Anthropic.`,
+      );
+    }
+    const sttModel = s.sttModel || STT_MODELS_BY_HOST[sttHost][0];
+    const transcript = await transcribeAudio({
+      apiKey: sttApiKey,
+      baseUrl: sttHost,
+      model: sttModel,
+      wav: opts.wav,
+      signal: opts.signal,
+    });
+    return callClaudeLens({
+      apiKey: opts.apiKey ?? s.claudeApiKey,
+      model: (opts.model as ClaudeModel | undefined) ?? s.claudeModel,
+      transcript,
+      prompt: opts.prompt,
+      schema: opts.schema,
+      signal: opts.signal,
+      onRetry: opts.onRetry,
+    });
+  }
   if (s.provider === 'openai-compatible') {
     const chatHost = s.openaiBaseUrl;
     const stt = resolveStt(chatHost);
@@ -135,6 +174,9 @@ export async function fetchAvailableModels(
   signal?: AbortSignal,
 ): Promise<string[]> {
   const s = settings();
+  if (s.provider === 'claude') {
+    return fetchClaudeModels(apiKey, signal);
+  }
   if (s.provider === 'openai-compatible') {
     return fetchOpenAiModels(apiKey, s.openaiBaseUrl, signal);
   }
@@ -179,6 +221,9 @@ export async function runSelfTest(
     return runGeminiSelfTest(apiKey, model as GeminiModel | undefined, {
       lightweight: overrides?.lightweight,
     });
+  }
+  if (provider === 'claude') {
+    return runClaudeSelfTest(apiKey, model as ClaudeModel | undefined);
   }
   if (OPENAI_CHAT_ONLY_HOSTS.has(baseUrl)) {
     const sttHost: SttHost = overrides?.sttHost ?? s.sttHost;

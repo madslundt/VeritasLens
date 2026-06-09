@@ -65,10 +65,88 @@ export type LensResult = (
   | { type: 'devils-advocate'; claims: DevilsAdvocateClaim[] }
   | { type: 'key-questions'; claims: KeyQuestionClaim[] }
   | { type: 'sentiment'; claims: SentimentClaim[] }
+  | {
+      type: 'game';
+      preset: GamePreset;
+      questions: GameQuestion[];
+      /** User's selected option per question; null for skipped riddle. */
+      answers: (number | null)[];
+      /** Correct-answer count. Always 0 for riddle (unscored). */
+      score: number;
+    }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
   autoSelected?: boolean;
 };
+
+// ---------- Game mode ----------
+
+/** Game format the preset will run. Each maps to a distinct prompt builder. */
+export type GameFormat = 'quiz-mc' | 'true-false' | 'riddle';
+
+/** Coarse difficulty knob translated into a prompt instruction per format. */
+export type GameDifficulty = 'easy' | 'medium' | 'hard';
+
+/** Fixed session length. Each completed session asks exactly this many questions. */
+export const GAME_LENGTH = 10;
+
+/** Human-readable label for a format. Shared by Settings UI and HUD. */
+export function gameFormatLabel(format: GameFormat): string {
+  switch (format) {
+    case 'quiz-mc': return 'Quiz';
+    case 'true-false': return 'True / False';
+    case 'riddle': return 'Riddle';
+  }
+}
+
+/** Human-readable label for a difficulty. Shared by Settings UI and HUD. */
+export function gameDifficultyLabel(difficulty: GameDifficulty): string {
+  switch (difficulty) {
+    case 'easy': return 'Easy';
+    case 'medium': return 'Medium';
+    case 'hard': return 'Hard';
+  }
+}
+
+/** Saved preset created on the phone. Random is a runtime sentinel — never persisted. */
+export interface GamePreset {
+  id: string;
+  format: GameFormat;
+  /** Free-form topic — also doubles as the user-visible label. Empty only when the preset is the runtime-only Random sentinel. */
+  topic: string;
+  difficulty: GameDifficulty;
+  /** When true, the completed session is appended to history (with the score + recap). */
+  saveToHistory: boolean;
+}
+
+/**
+ * One question in a generated game session. `options` length is format-bound:
+ *   - quiz-mc: 4 options, `correctIndex` ∈ [0, 4)
+ *   - true-false: 2 options, `correctIndex` ∈ [0, 2)
+ *   - riddle: 0 options, `correctIndex` is null (no scoring)
+ * `reveal` is the per-question explanation (or the riddle answer).
+ */
+export interface GameQuestion {
+  text: string;
+  options: string[];
+  correctIndex: number | null;
+  reveal: string;
+}
+
+/** Live game state. Never persisted; abandoning a game discards it. */
+export interface GameSession {
+  /** Resolved preset. For Random, this is the materialized concrete preset. */
+  preset: GamePreset;
+  questions: GameQuestion[];
+  /** 0-based index of the current question. */
+  index: number;
+  /** User's selected option per question; null for skipped riddle. */
+  answers: (number | null)[];
+  phase: 'loading' | 'question' | 'feedback' | 'end';
+}
+
+/** Sentinel preset id used by the runtime Random entry. Never persisted. */
+export const RANDOM_GAME_PRESET_ID = '__random__';
 
 /**
  * One labeled context block the user prepared before a meeting, e.g. pasted
@@ -137,9 +215,26 @@ export const DEFAULT_GEMINI_AUTO_MODEL: GeminiModel | null = null;
  * `openai-compatible` covers OpenAI plus OpenAI-API-compatible hosts (OpenRouter,
  * Groq, …) — these accept text only, so the runtime transcribes the audio via
  * the provider's own STT endpoint before sending it to chat completions.
+ * `claude` is text-only and reuses the chat-only cross-host STT path: the
+ * runtime transcribes on `sttHost` (Groq/OpenAI Whisper) then sends the
+ * transcript to Anthropic.
  */
-export type LlmProvider = 'gemini' | 'openai-compatible';
+export type LlmProvider = 'gemini' | 'openai-compatible' | 'claude';
 export const DEFAULT_LLM_PROVIDER: LlmProvider = 'gemini';
+
+/**
+ * Default Claude model. Sonnet-4.6 is the production sweet-spot — faster
+ * than Opus at comparable quality on short structured-output tasks, and
+ * Anthropic guarantees parity on tool-use shaping. Users can switch to
+ * Haiku-4.5 for cost or Opus-4.7 for highest reasoning quality from the UI.
+ */
+export const CLAUDE_MODELS = [
+  'claude-sonnet-4-6',
+  'claude-opus-4-7',
+  'claude-haiku-4-5-20251001',
+] as const;
+export type ClaudeModel = (typeof CLAUDE_MODELS)[number];
+export const DEFAULT_CLAUDE_MODEL: ClaudeModel = 'claude-sonnet-4-6';
 
 /**
  * OpenAI-compatible base URLs that ship in the packaged whitelist. Free-text
@@ -275,6 +370,15 @@ export interface Settings {
 
   geminiApiKey: string;
   geminiModel: GeminiModel;
+
+  /**
+   * Anthropic API key for the Claude provider. Claude is text-only — the
+   * runtime transcribes via the same `sttHost` path the chat-only OpenAI
+   * providers (DeepSeek, Perplexity) use, then sends the transcript to
+   * Anthropic. The STT key is read from `openaiApiKeys[sttHost]`.
+   */
+  claudeApiKey: string;
+  claudeModel: ClaudeModel;
   /**
    * Optional override model for the Auto lens classifier. `null` means the
    * classifier call reuses the main `geminiModel` — no separate model is
@@ -321,6 +425,14 @@ export interface Settings {
   bufferDuration: BufferDuration;
   autoSummaryEnabled: boolean;
   /**
+   * When true, the next session starts with the most-recent summaries from
+   * persisted history seeded into the recall-context block. Lets the LLM
+   * keep track of long-running topics across power-cycles or short breaks.
+   * Off by default — summaries of past sessions are sent to the provider as
+   * part of every prompt, so this is a privacy-affecting toggle.
+   */
+  crossSessionRecallEnabled: boolean;
+  /**
    * When true, the active HUD hides the REC indicator and affordance hint and
    * shows only a small recording dot until the user double-taps for an
    * analysis. Results stay on screen until explicitly dismissed via the menu's
@@ -352,7 +464,31 @@ export interface Settings {
    * under `veritaslens.autoDisabledLenses`.
    */
   autoDisabledLenses: string[];
+  /**
+   * Auto mode: when true, the runtime watches the live mic for voice
+   * activity and auto-triggers an analysis once the wearer has spoken for
+   * at least `autoModeStartMs` and then been silent for at least
+   * `autoModeSilenceMs`. Mid-utterance pauses shorter than the silence
+   * threshold do not fire. Reuses `voiceGateRmsFloor` as the VAD threshold
+   * so the user has a single sensitivity knob.
+   */
+  autoModeEnabled: boolean;
+  /** Continuous voice duration (ms) required before the watcher arms. */
+  autoModeStartMs: number;
+  /** Trailing silence (ms) after the watcher is armed that triggers analysis. */
+  autoModeSilenceMs: number;
 }
+
+/** Defaults for the auto-mode thresholds. Used as initial values and as
+ *  the fallback when coercing an unparseable / out-of-range persisted entry. */
+export const DEFAULT_AUTO_MODE_START_MS = 1500;
+export const DEFAULT_AUTO_MODE_SILENCE_MS = 2000;
+/** Slider clamps for the Settings UI. */
+export const AUTO_MODE_START_MS_MIN = 500;
+export const AUTO_MODE_START_MS_MAX = 5000;
+export const AUTO_MODE_SILENCE_MS_MIN = 500;
+export const AUTO_MODE_SILENCE_MS_MAX = 5000;
+export const AUTO_MODE_STEP_MS = 250;
 
 /** Runtime app state. */
 export type AppPhase =

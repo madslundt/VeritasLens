@@ -3,7 +3,16 @@ import { getBridge } from './bridge';
 import { PcmRingBuffer, encodePcmToWav, trimPcmToSegments } from './audioBuffer';
 import { analyzeBufferForVoice, extractSpeechSegments, resetVADAvailability, warmupVAD } from './vad';
 import { getSileroVAD } from './vad/silero';
-import { buildRecallContextLines, RECALL_CONTEXT_DIRECTIVE } from './recallContext';
+import {
+  isAutoModeWatcherRunning,
+  startAutoModeWatcher,
+  stopAutoModeWatcher,
+} from './autoMode';
+import {
+  buildRecallContextLines,
+  extractPriorSessionSummaries,
+  RECALL_CONTEXT_DIRECTIVE,
+} from './recallContext';
 import {
   ACTIVE_HINT_ANALYZING,
   ACTIVE_HINT_DEFAULT,
@@ -14,11 +23,12 @@ import {
   flashActiveHint,
   flashMenuHint,
   flashPickerHint,
+  gamesPickerEntryAtIndex,
   getActiveLayout,
   hasPendingActiveResult,
   markActiveHidden,
   menuOptionAtIndex,
-  personaAtIndex,
+  pickerEntryAtIndex,
   resetHudSessionState,
   restoreActivePage,
   restoreHistoryListPage,
@@ -26,6 +36,7 @@ import {
   scrollHistoryDetail,
   setActiveHint,
   setActiveLayout,
+  setAutoModeIndicator,
   setLensResult,
   setMenuSpinner,
   setStatus,
@@ -40,6 +51,17 @@ import {
   showUnconfiguredPage,
   type MenuItem,
 } from './hud';
+import {
+  cancelGame,
+  getLastGameOptionIndex,
+  materializeRandomPreset,
+  openGamesPicker,
+  selectAnswer as gameSelectAnswer,
+  setLastGameOptionIndex,
+  startGame,
+  advance as gameAdvance,
+  teardownGame,
+} from './game';
 import { callLens, MAX_RETRIES } from '@/llm';
 import { formatRelativeTime } from '@/personas/_utils';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
@@ -270,6 +292,11 @@ export async function stopHudRuntime(): Promise<void> {
   inflight?.abort();
   inflight = null;
   analyzing = false;
+  stopAutoModeWatcher();
+  void setAutoModeIndicator(false);
+  // Drop any in-flight game session along with its abort controller so the
+  // next HUD start sees a clean slate.
+  teardownGame();
   if (noVoiceStatusTimer) {
     clearTimeout(noVoiceStatusTimer);
     noVoiceStatusTimer = null;
@@ -402,6 +429,24 @@ function handleEvent(event: EvenHubEvent): void {
       requestHostExitConfirm().catch((err) => logDispatchError('host-exit-fail', err));
       return;
     }
+    if (page === 'games-picker') {
+      // From the games sub-picker, double-tap returns to the main picker —
+      // not host exit, since the wearer is one level down.
+      lastGamesPickerIndex = 0;
+      showPickerPage().catch((err) => logDispatchError('games-back-fail', err));
+      return;
+    }
+    if (
+      page === 'game-loading'
+      || page === 'game-question'
+      || page === 'game-feedback'
+      || page === 'game-end'
+    ) {
+      // Cancel in-flight generation OR exit mid-game. cancelGame routes the
+      // wearer back to the games sub-picker so they can start something else.
+      cancelGame().catch((err) => logDispatchError('cancel-game-fail', err));
+      return;
+    }
     if (analyzing) {
       // Cancel the in-flight analysis. Null `inflight` right here (in addition
       // to the controller-identity check in runAnalysis's finally) so the
@@ -424,13 +469,22 @@ function handleEvent(event: EvenHubEvent): void {
   else if (page === 'history-list') handleHistoryListGesture(gesture).catch((err) => logDispatchError('history-list-fail', err));
   else if (page === 'history-detail') handleHistoryDetailGesture(gesture).catch((err) => logDispatchError('history-detail-fail', err));
   else if (page === 'mid-summary') handleMidSummaryGesture(gesture).catch((err) => logDispatchError('mid-summary-fail', err));
+  else if (page === 'games-picker') handleGamesPickerEvent(gesture).catch((err) => logDispatchError('games-picker-fail', err));
+  else if (page === 'game-question') handleGameQuestionEvent(gesture).catch((err) => logDispatchError('game-question-fail', err));
+  else if (page === 'game-feedback') handleGameFeedbackEvent(gesture).catch((err) => logDispatchError('game-feedback-fail', err));
+  else if (page === 'game-end') handleGameEndEvent(gesture).catch((err) => logDispatchError('game-end-fail', err));
+  // game-loading absorbs single-tap gestures — only double-tap (cancel) acts.
 }
 
 async function handlePickerEvent(g: Gesture): Promise<void> {
   if (typeof g.itemIndex === 'number') lastPickerIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    const persona = personaAtIndex(lastPickerIndex);
-    if (!persona) return;
+    const entry = pickerEntryAtIndex(lastPickerIndex);
+    if (entry.kind === 'games') {
+      await openGamesPicker();
+      return;
+    }
+    const persona = entry.persona;
     // Block entry into Meeting Prep when no context exists — opening a
     // session would needlessly power the mic and allocate the ring buffer
     // for a lens that can't produce anything useful. Flash a hint on the
@@ -440,6 +494,45 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
       return;
     }
     await enterActiveSession(persona.id);
+  }
+}
+
+let lastGamesPickerIndex = 0;
+
+async function handleGamesPickerEvent(g: Gesture): Promise<void> {
+  if (typeof g.itemIndex === 'number') lastGamesPickerIndex = g.itemIndex;
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    const entry = gamesPickerEntryAtIndex(lastGamesPickerIndex);
+    if (!entry || entry.kind === 'back') {
+      lastGamesPickerIndex = 0;
+      await showPickerPage();
+      return;
+    }
+    if (entry.kind === 'random') {
+      await startGame(materializeRandomPreset());
+      return;
+    }
+    await startGame(entry.preset);
+  }
+}
+
+async function handleGameQuestionEvent(g: Gesture): Promise<void> {
+  if (typeof g.itemIndex === 'number') setLastGameOptionIndex(g.itemIndex);
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    await gameSelectAnswer(getLastGameOptionIndex());
+  }
+}
+
+async function handleGameFeedbackEvent(g: Gesture): Promise<void> {
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    await gameAdvance();
+  }
+}
+
+async function handleGameEndEvent(g: Gesture): Promise<void> {
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    // advance() on phase 'end' returns to the games sub-picker.
+    await gameAdvance();
   }
 }
 
@@ -571,7 +664,14 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   setActivePersona(personaId);
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   sessionStartTime = Date.now();
-  intermediateSummaries = [];
+  // Seed cross-session recall when the user has opted in AND auto-summary is
+  // also on — the recall builder gates on `autoSummaryEnabled`, so seeding
+  // without it would silently no-op. Pulls the most-recent N session
+  // summaries from persisted history into the same shape auto-summary
+  // ticks populate during the live session.
+  intermediateSummaries = settings().crossSessionRecallEnabled && settings().autoSummaryEnabled
+    ? extractPriorSessionSummaries(sessionHistory())
+    : [];
   lastAnalysisByteOffset = 0;
   lastAutoWinnerInSession = null;
   lastMenuIndex = 0;
@@ -586,7 +686,39 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
     return;
   }
   startAutoSummaryTimer();
+  syncAutoModeWatcher();
   setAppPhase('listening');
+}
+
+/**
+ * Start or stop the VAD-driven auto-analysis watcher to match the current
+ * settings + session state. Idempotent and safe to call from a reactive
+ * effect (no work done when the desired state already matches reality).
+ *
+ * The watcher only runs while we have a live PCM buffer (mic open). Outside
+ * an active session this is a no-op — the createEffect below covers the
+ * case where the user toggles the setting while the mic is hot.
+ */
+function syncAutoModeWatcher(): void {
+  const wantOn = settings().autoModeEnabled && buffer !== null;
+  if (wantOn && !isAutoModeWatcherRunning()) {
+    startAutoModeWatcher(buffer!, {
+      getStartMs: () => settings().autoModeStartMs,
+      getSilenceMs: () => settings().autoModeSilenceMs,
+      getRmsFloor: () => settings().voiceGateRmsFloor,
+      isAnalyzing: () => analyzing,
+      trigger: () => {
+        // Same entry point as a double-tap. Errors land in the debug ring
+        // via logDispatchError so a transient API failure can't crash the
+        // watcher's setInterval callback chain.
+        runAnalysis().catch((err) => logDispatchError('auto-mode-trigger-fail', err));
+      },
+    });
+    void setAutoModeIndicator(true);
+  } else if (!wantOn && isAutoModeWatcherRunning()) {
+    stopAutoModeWatcher();
+    void setAutoModeIndicator(false);
+  }
 }
 
 // Re-entrancy guard so cascading store-driven events can't double-fire the
@@ -613,6 +745,8 @@ async function leaveActiveSession(): Promise<void> {
       clearTimeout(errClearTimer);
       errClearTimer = null;
     }
+    stopAutoModeWatcher();
+    void setAutoModeIndicator(false);
     stopSpinner();
     // Abort any auto-summary tick already in flight, then stop the periodic
     // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
@@ -1241,7 +1375,13 @@ async function runAnalysis(): Promise<void> {
       return;
     }
     setErrorMessage(err instanceof Error ? err.message : String(err));
-    await setStatus('error');
+    // UploadTimeoutError gets its own `T/O` glyph so the wearer can
+    // distinguish a stalled upload (often "try again on better signal" or
+    // "shrink the buffer") from a generic provider error. Same auto-clear
+    // timer as ERR — the recovery path is identical. 3 chars (matching ERR's
+    // shape) keeps it inside the 55px status slot — `TIMEOUT` would overflow.
+    const isTimeout = (err as Error)?.name === 'UploadTimeoutError';
+    await setStatus(isTimeout ? 'T/O' : 'error');
     await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('error');
     // Schedule the ERR glyph auto-clear so the wearer isn't stuck staring at
@@ -1327,6 +1467,16 @@ function startSettingsWatcher(): void {
       if (!buffer || leavingActiveSession) return;
       void leaveActiveSession();
     }));
+    // Toggle the auto-mode VAD watcher live whenever the user flips the
+    // Settings switch — no session restart required. Threshold changes
+    // (start/silence ms) don't need their own effect because the watcher
+    // re-reads `settings().autoModeStartMs` / `autoModeSilenceMs` on every
+    // tick via the `get*` callbacks it was started with.
+    createEffect(() => {
+      // Read the signal so Solid tracks the dependency.
+      settings().autoModeEnabled;
+      syncAutoModeWatcher();
+    });
   });
 }
 
@@ -1905,6 +2055,10 @@ export function extractTags(result: LensResult): string[] {
         for (const t of keywordize(c.explanation, 3)) raw.push(t);
       }
       break;
+    case 'game':
+      raw.push(result.preset.format, result.preset.difficulty);
+      for (const t of keywordize(result.preset.topic, 3)) raw.push(t);
+      break;
   }
   return normalizeTags(raw);
 }
@@ -1925,6 +2079,10 @@ function extractQuestion(result: LensResult): string {
     case 'devils-advocate': return (result.claims[0]?.counterpoint ?? '').slice(0, 60);
     case 'key-questions': return (result.claims[0]?.question ?? '').slice(0, 60);
     case 'sentiment': return (result.claims[0]?.explanation ?? '').slice(0, 60);
+    case 'game': {
+      const topic = result.preset.topic || 'Random topic';
+      return topic.slice(0, 80);
+    }
   }
 }
 
@@ -1947,6 +2105,10 @@ function extractBadge(result: LensResult): string {
     case 'devils-advocate': return 'COUNTER';
     case 'key-questions': return 'Q1';
     case 'sentiment': return result.claims[0]?.tone ?? 'NEUTRAL';
+    case 'game': {
+      const scored = result.questions.some((q) => q.correctIndex !== null);
+      return scored ? `${result.score}/${result.questions.length}` : 'GAME';
+    }
   }
 }
 
@@ -2003,6 +2165,8 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
       return [result];
     case 'sentiment':
       return [result];
+    case 'game':
+      return [result];
   }
 }
 
@@ -2037,6 +2201,8 @@ export function extractQuote(result: LensResult): string {
       return '';
     case 'sentiment':
       return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
+    case 'game':
+      return '';
   }
 }
 

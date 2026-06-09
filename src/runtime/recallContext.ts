@@ -62,3 +62,49 @@ export function buildRecallContextLines(
   }
   return lines;
 }
+
+/**
+ * Minimal shape needed by `extractPriorSessionSummaries`. The store's
+ * `HistoryEntry` carries far more, but this helper only cares about the
+ * `session-summary` rows so the import surface stays narrow (and the unit
+ * test doesn't have to reconstruct the full HistoryEntry type).
+ */
+export interface PriorHistoryEntry {
+  sessionId: string;
+  result: { type: string; title?: string; summary?: string };
+}
+
+/**
+ * Pull the most-recent N session summaries from persisted history so the
+ * next session can be seeded with cross-session recall context. Only
+ * `session-summary` rows count (auto-summaries land in history under the
+ * same lens id) and we dedupe by `sessionId` to avoid double-counting the
+ * final-summary + auto-summary pair from the same session. Walks the
+ * history newest-first so the most recent two sessions win when capped.
+ *
+ * Returns oldest-first so the caller can append to `intermediateSummaries`
+ * directly without re-ordering — the recall-context builder also reads
+ * newest-from-the-tail when budgeting.
+ */
+export function extractPriorSessionSummaries(
+  history: ReadonlyArray<PriorHistoryEntry>,
+  max: number = RECALL_CONTEXT_MAX_ENTRIES,
+): RecallSummary[] {
+  if (max <= 0 || history.length === 0) return [];
+  const seenSessions = new Set<string>();
+  const collected: RecallSummary[] = [];
+  for (let i = history.length - 1; i >= 0 && collected.length < max; i--) {
+    const entry = history[i]!;
+    if (entry.result.type !== 'session-summary') continue;
+    const sid = entry.sessionId;
+    if (sid && seenSessions.has(sid)) continue;
+    const body = (entry.result.summary ?? '').trim();
+    if (!body) continue;
+    if (sid) seenSessions.add(sid);
+    collected.push({
+      title: entry.result.title?.trim() || undefined,
+      summary: body,
+    });
+  }
+  return collected.reverse();
+}

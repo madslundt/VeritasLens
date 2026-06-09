@@ -5,6 +5,7 @@ import {
   GEMINI_MODEL_PATTERN,
   type GeminiModel,
 } from '@/types';
+import { withFetchTimeout } from './fetchTimeout';
 
 /**
  * Validate the model name we interpolate into the endpoint URL. Defense in
@@ -330,32 +331,6 @@ const RETRY_DELAY_PATTERN = /^(\d+(?:\.\d+)?)s$/;
 function jitter(ms: number): number {
   const factor = 0.75 + Math.random() * 0.5;
   return Math.min(Math.max(Math.round(ms * factor), 250), MAX_RETRY_DELAY_MS);
-}
-
-/**
- * Combine the caller's AbortSignal with a per-attempt timeout. The returned
- * signal aborts on either source, but the caller still inspects opts.signal
- * directly to decide whether an abort is propagable (outer) or retryable
- * (timeout). `cleanup()` must be called after the fetch settles to clear the
- * timer and detach the listener — without it, MAX_RETRIES stale listeners
- * accumulate on opts.signal across a long session.
- */
-function withFetchTimeout(
-  outer: AbortSignal | undefined,
-  timeoutMs: number,
-): { signal: AbortSignal; cleanup: () => void } {
-  const ctrl = new AbortController();
-  if (outer?.aborted) ctrl.abort();
-  const onOuterAbort = (): void => ctrl.abort();
-  outer?.addEventListener('abort', onOuterAbort, { once: true });
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  return {
-    signal: ctrl.signal,
-    cleanup: (): void => {
-      clearTimeout(timer);
-      outer?.removeEventListener('abort', onOuterAbort);
-    },
-  };
 }
 
 /** Parse an HTTP Retry-After header (seconds only — Gemini does not emit HTTP-date here). */
