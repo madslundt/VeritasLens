@@ -311,7 +311,12 @@ export async function cancelGame(): Promise<void> {
   inflight?.abort();
   inflight = null;
   const current = currentGameSession();
-  if (current && hasAnyAnswer(current)) {
+  // Skip the partial-persist write when the wearer is on the end page or
+  // the random save-prompt — advance() already wrote a history entry when
+  // it transitioned the session into phase 'end', so re-persisting here
+  // would duplicate the row. Mid-game cancels (phase 'question'/'feedback')
+  // are the only ones that need to flush.
+  if (current && current.phase !== 'end' && hasAnyAnswer(current)) {
     await persistGameIfRequested(current);
   }
   setSession(null);
