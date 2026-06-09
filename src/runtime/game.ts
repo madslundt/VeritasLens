@@ -24,14 +24,24 @@ import {
   buildGameResult,
   buildGamePrompt,
   parseGameResponse,
+  shuffleQuizOptions,
 } from '@/personas/game';
-import { gamePresets, pushDebugEvent, pushHistoryEntry, settings } from '@/state/store';
+import {
+  GAME_PRESETS_CAP,
+  gamePresets,
+  newGamePresetId,
+  pushDebugEvent,
+  pushHistoryEntry,
+  saveGamePresets,
+  settings,
+} from '@/state/store';
 import { getBridge } from './bridge';
 import {
   showGameEndPage,
   showGameFeedbackPage,
   showGameLoadingPage,
   showGameQuestionPage,
+  showGameSavePromptPage,
   showGamesPickerPage,
 } from './hud';
 
@@ -120,7 +130,9 @@ export async function startGame(preset: GamePreset): Promise<void> {
   setSession(session);
   await showGameLoadingPage(preset, retryLabel);
 
-  const lang = settings().responseLanguage;
+  // Per-preset override wins; null/undefined falls back to the global
+  // setting so legacy presets keep working without a migration step.
+  const lang = preset.language ?? settings().responseLanguage;
   const prompt = buildGamePrompt(preset.format, preset.topic, preset.difficulty, lang);
 
   try {
@@ -136,6 +148,10 @@ export async function startGame(preset: GamePreset): Promise<void> {
       },
     });
     const parsed = parseGameResponse(rawText, preset.format);
+    // Shuffle multi-choice option order so the LLM's bias toward
+    // correctIndex=0 doesn't make the quiz a tap-the-top game. No-op for
+    // true-false (positional semantics) and riddles.
+    const questions = shuffleQuizOptions(parsed.questions);
     // For Random presets, fold the chosen topic into the live session so it
     // appears on the end-page summary and history entry. Saved presets keep
     // their explicit topic.
@@ -145,9 +161,9 @@ export async function startGame(preset: GamePreset): Promise<void> {
         : preset;
     const nextSession: GameSession = {
       preset: effectivePreset,
-      questions: parsed.questions,
+      questions,
       index: 0,
-      answers: Array(parsed.questions.length).fill(null),
+      answers: Array(questions.length).fill(null),
       phase: 'question',
     };
     setSession(nextSession);
@@ -221,22 +237,91 @@ export async function advance(): Promise<void> {
     return;
   }
   if (session.phase === 'end') {
-    // Tap on end-page returns to the games sub-picker.
+    // For Random presets, the topic was chosen by the LLM at runtime — give
+    // the wearer one tap to save it as a reusable preset before tearing the
+    // session down. Saved presets just go back to the picker.
+    if (session.preset.id === RANDOM_GAME_PRESET_ID) {
+      await showGameSavePromptPage(session);
+      return;
+    }
     setSession(null);
     await openGamesPicker();
   }
 }
 
 /**
+ * Tap-on-Back from the random save-prompt page: discard the prompt and
+ * return to the games sub-picker without persisting a preset.
+ */
+export async function dismissRandomSavePrompt(): Promise<void> {
+  setSession(null);
+  await openGamesPicker();
+}
+
+/**
+ * Tap-on-Save: persist the random session's chosen topic + format +
+ * difficulty as a fresh `GamePreset` so the wearer can replay it directly.
+ * No-ops gracefully when the preset cap is already reached (we surface
+ * "cap reached" via the games-picker error flash on return). Always lands
+ * back on the games sub-picker afterwards.
+ */
+export async function saveCurrentRandomAsPreset(): Promise<void> {
+  const session = sessionSignal();
+  if (!session) {
+    await openGamesPicker();
+    return;
+  }
+  const topic = session.preset.topic.trim();
+  const list = [...gamePresets()];
+  let error = '';
+  if (!topic) {
+    error = 'Random session had no topic to save';
+  } else if (list.length >= GAME_PRESETS_CAP) {
+    error = `Preset cap reached (${GAME_PRESETS_CAP})`;
+  } else {
+    list.push({
+      id: newGamePresetId(),
+      format: session.preset.format,
+      topic,
+      difficulty: session.preset.difficulty,
+      // Default new presets to history-on — the wearer just chose to keep
+      // this topic, so it should behave like any other manually-created
+      // preset would.
+      saveToHistory: true,
+    });
+    const ok = await saveGamePresets((k, v) => getBridge().setLocalStorage(k, v), list);
+    if (!ok) error = 'Could not save preset';
+  }
+  setSession(null);
+  await showGamesPickerPage(gamePresets(), error ? { errorMessage: error } : {});
+}
+
+/**
  * Cancel the in-flight LLM call and clear the session. Routed from a
  * double-tap on any game-* page. Lands the wearer back on the games sub-
  * picker so they can start something else.
+ *
+ * When the wearer has answered at least one question, persist the partial
+ * session to history (subject to the preset's `saveToHistory` flag) so a
+ * mid-game exit doesn't quietly erase the progress they already made. A
+ * pure-cancel (no answers yet — e.g. they double-tapped during the loading
+ * page) is dropped without a write, since there's nothing to record.
  */
 export async function cancelGame(): Promise<void> {
   inflight?.abort();
   inflight = null;
+  const current = currentGameSession();
+  if (current && hasAnyAnswer(current)) {
+    await persistGameIfRequested(current);
+  }
   setSession(null);
   await openGamesPicker();
+}
+
+/** True iff the wearer has resolved at least one question — either picked
+ *  an option (number) or, for riddles, tapped through to reveal. */
+function hasAnyAnswer(session: GameSession): boolean {
+  return session.answers.some((a) => a !== null);
 }
 
 /**

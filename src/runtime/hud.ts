@@ -127,6 +127,7 @@ export type HudPage =
   | 'game-question'
   | 'game-feedback'
   | 'game-end'
+  | 'game-save-prompt'
   | 'none';
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
@@ -1009,8 +1010,18 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       const topic = result.preset.topic || 'Random';
       const formatLabel = gameFormatLabel(result.preset.format);
       const scored = result.questions.some((q) => q.correctIndex !== null);
+      // Count unanswered slots — a mid-game exit (cancelGame) persists
+      // partial sessions, so the wearer needs to see at a glance how much
+      // of the game they actually played vs. skipped.
+      const unanswered = result.answers.reduce<number>(
+        (acc, a) => (a === null ? acc + 1 : acc), 0,
+      );
       const middle = scored ? `${result.score} / ${result.questions.length}` : '';
-      const summary = `${formatLabel} · ${gameDifficultyLabel(result.preset.difficulty)}`;
+      const unanswerLine = unanswered > 0 ? `${unanswered} unanswered` : '';
+      const summary = [
+        `${formatLabel} · ${gameDifficultyLabel(result.preset.difficulty)}`,
+        unanswerLine,
+      ].filter(Boolean).join(' · ');
       return { top: clip(topic, 140), middle, bottom: summary };
     }
   }
@@ -1466,7 +1477,10 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
  * scroll-down away. The lifecycle's `pickerEntryAtIndex` keeps this offset
  * in sync — if you reorder here, update that too.
  */
-const PICKER_GAMES_LABEL = 'Games';
+// Chevron suffix telegraphs that tapping this row opens a sub-picker
+// rather than starting a session — mirrors the platform UI convention
+// for "this leads elsewhere".
+const PICKER_GAMES_LABEL = 'Games ›';
 function buildPickerItemNames(): string[] {
   return [...getPickerPersonas().map((p) => p.name), PICKER_GAMES_LABEL];
 }
@@ -1933,9 +1947,12 @@ function buildGameQuestionPage(session: GameSession): RebuildPageContainer {
   const questionText = clip(`Q${session.index + 1}. ${q?.text ?? ''}`, 240);
   // Question text occupies the top half; options in the middle as a list;
   // progress bar pinned to the bottom.
+  // Title height trimmed from 80→60 px and the list pulled up to y=68 so
+  // the 4-option quiz layout fits all four rows with ~44 px per item —
+  // previously the 4th option clipped against the progress bar at y=252.
   const title = new TextContainerProperty({
     containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
-    xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 80,
+    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: 60,
     borderWidth: 0, paddingLength: 4, content: questionText, isEventCapture: 0,
   });
   const isRiddle = !q || q.options.length === 0;
@@ -1944,7 +1961,7 @@ function buildGameQuestionPage(session: GameSession): RebuildPageContainer {
     : (q!.options.map((o) => clip(o, 60)));
   const list = new ListContainerProperty({
     containerID: CONTAINER.gameList, containerName: NAME.gameList,
-    xPosition: 16, yPosition: 92, width: SCREEN_W - 32, height: 152,
+    xPosition: 16, yPosition: 68, width: SCREEN_W - 32, height: 176,
     borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: optionNames.length, itemWidth: SCREEN_W - 48,
@@ -2000,7 +2017,7 @@ function buildGameFeedbackPage(session: GameSession): RebuildPageContainer {
   const body = new TextContainerProperty({
     containerID: CONTAINER.gameBody, containerName: NAME.gameBody,
     xPosition: 16, yPosition: 52, width: SCREEN_W - 32, height: 192,
-    borderWidth: 0, paddingLength: 4, content: clip(detail, 320), isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: clip(detail, 480), isEventCapture: 0,
   });
   const progress = new TextContainerProperty({
     containerID: CONTAINER.gameProgress, containerName: NAME.gameProgress,
@@ -2031,6 +2048,76 @@ export async function showGameEndPage(session: GameSession): Promise<void> {
   const ok = await getBridge().rebuildPageContainer(buildGameEndPage(session));
   if (!ok) throw new Error('rebuildPageContainer (game-end) failed.');
   currentPage = 'game-end';
+}
+
+// ---------- Random-game save prompt ----------
+
+/** Sentinel kinds for the save-prompt list. Back is always index 0. */
+const SAVE_PROMPT_BACK_KIND = 'back' as const;
+const SAVE_PROMPT_SAVE_KIND = 'save' as const;
+export type GameSavePromptEntry =
+  | { kind: typeof SAVE_PROMPT_BACK_KIND }
+  | { kind: typeof SAVE_PROMPT_SAVE_KIND };
+
+let cachedSavePromptEntries: GameSavePromptEntry[] = [];
+
+export function gameSavePromptEntryAtIndex(
+  idx: number | undefined | null,
+): GameSavePromptEntry | null {
+  const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
+  return cachedSavePromptEntries[safe] ?? null;
+}
+
+export async function showGameSavePromptPage(session: GameSession): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameSavePromptPage().');
+  cachedSavePromptEntries = [
+    { kind: SAVE_PROMPT_BACK_KIND },
+    { kind: SAVE_PROMPT_SAVE_KIND },
+  ];
+  const ok = await getBridge().rebuildPageContainer(buildGameSavePromptPage(session));
+  if (!ok) throw new Error('rebuildPageContainer (game-save-prompt) failed.');
+  currentPage = 'game-save-prompt';
+}
+
+function buildGameSavePromptPage(session: GameSession): RebuildPageContainer {
+  const topic = (session.preset.topic || 'Random').trim();
+  const fmt = gameFormatLabel(session.preset.format);
+  const headlineText = `Topic: ${topic}`;
+  const subText = `${fmt} · ${gameDifficultyLabel(session.preset.difficulty)}`;
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
+    xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 56,
+    borderWidth: 0, paddingLength: 4, content: clip(headlineText, 80), isEventCapture: 0,
+  });
+  const sub = new TextContainerProperty({
+    containerID: CONTAINER.gameBody, containerName: NAME.gameBody,
+    xPosition: 16, yPosition: 68, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4, content: clip(subText, 100), isEventCapture: 0,
+  });
+  // Back is the first option so an accidental tap lands on the safe choice
+  // rather than persisting a preset the wearer didn't intend.
+  const itemNames = ['← Back', 'Save as game'];
+  const list = new ListContainerProperty({
+    containerID: CONTAINER.gameList, containerName: NAME.gameList,
+    xPosition: 16, yPosition: 104, width: SCREEN_W - 32, height: 116,
+    borderWidth: 0, paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: itemNames,
+    }),
+    isEventCapture: 1,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.gameHint, containerName: NAME.gameHint,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4,
+    content: 'Save the random topic as a reusable preset?', isEventCapture: 0,
+  });
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers([list], [title, sub, hint]),
+    listObject: [list],
+    textObject: [title, sub, hint],
+  });
 }
 
 function buildGameEndPage(session: GameSession): RebuildPageContainer {

@@ -476,6 +476,37 @@ button:disabled {
   background: #0f1217;
   border: 1px solid var(--border);
   border-radius: 0.45rem;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+/* Visual highlight for the preset row whose editor is currently open. The
+   row switches to a stacked layout so the editor expands DIRECTLY below
+   the row that was tapped — no more guessing which preset the form at the
+   bottom of the list belongs to. */
+.lens-row--editing {
+  flex-direction: column;
+  align-items: stretch;
+  background: #11151a;
+  border-color: #2f3a4a;
+}
+
+/* Top row (preset info + delete) stays a horizontal flex layout regardless
+   of whether the parent .lens-row is collapsed or expanded. */
+.game-row-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+/* The inline editor block is also used by the meeting-prep editor where its
+   top border visually separates a header row from the form. Inside the game
+   preset row the header IS the row itself, so the divider becomes noise —
+   drop it (and its top padding) when nested here. */
+.lens-row--editing > .meeting-prep-inline {
+  border-top: 0;
+  padding-top: 0;
 }
 
 .lens-info {
@@ -483,6 +514,29 @@ button:disabled {
   flex-direction: column;
   gap: 0.1rem;
   min-width: 0;
+}
+
+/* Click-to-edit variant: a <button> styled to look like the plain .lens-info
+   text block, but with a hover/focus affordance so it telegraphs that the
+   whole row is the edit trigger. */
+button.lens-info--clickable {
+  flex: 1 1 auto;
+  align-items: flex-start;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-radius: 0.3rem;
+}
+
+button.lens-info--clickable:hover,
+button.lens-info--clickable:focus-visible {
+  background: rgba(255, 255, 255, 0.04);
+  outline: none;
 }
 
 .lens-info strong {

@@ -23,6 +23,7 @@ import {
   flashActiveHint,
   flashMenuHint,
   flashPickerHint,
+  gameSavePromptEntryAtIndex,
   gamesPickerEntryAtIndex,
   getActiveLayout,
   hasPendingActiveResult,
@@ -53,6 +54,8 @@ import {
 } from './hud';
 import {
   cancelGame,
+  dismissRandomSavePrompt,
+  saveCurrentRandomAsPreset,
   getLastGameOptionIndex,
   materializeRandomPreset,
   openGamesPicker,
@@ -441,6 +444,7 @@ function handleEvent(event: EvenHubEvent): void {
       || page === 'game-question'
       || page === 'game-feedback'
       || page === 'game-end'
+      || page === 'game-save-prompt'
     ) {
       // Cancel in-flight generation OR exit mid-game. cancelGame routes the
       // wearer back to the games sub-picker so they can start something else.
@@ -473,6 +477,7 @@ function handleEvent(event: EvenHubEvent): void {
   else if (page === 'game-question') handleGameQuestionEvent(gesture).catch((err) => logDispatchError('game-question-fail', err));
   else if (page === 'game-feedback') handleGameFeedbackEvent(gesture).catch((err) => logDispatchError('game-feedback-fail', err));
   else if (page === 'game-end') handleGameEndEvent(gesture).catch((err) => logDispatchError('game-end-fail', err));
+  else if (page === 'game-save-prompt') handleGameSavePromptEvent(gesture).catch((err) => logDispatchError('game-save-prompt-fail', err));
   // game-loading absorbs single-tap gestures — only double-tap (cancel) acts.
 }
 
@@ -526,6 +531,22 @@ async function handleGameQuestionEvent(g: Gesture): Promise<void> {
 async function handleGameFeedbackEvent(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     await gameAdvance();
+  }
+}
+
+/** Mirror of `lastPickerIndex` for the 2-item save-prompt list. */
+let lastSavePromptIndex = 0;
+
+async function handleGameSavePromptEvent(g: Gesture): Promise<void> {
+  if (typeof g.itemIndex === 'number') lastSavePromptIndex = g.itemIndex;
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    const entry = gameSavePromptEntryAtIndex(lastSavePromptIndex);
+    if (!entry || entry.kind === 'back') {
+      lastSavePromptIndex = 0;
+      await dismissRandomSavePrompt();
+      return;
+    }
+    await saveCurrentRandomAsPreset();
   }
 }
 

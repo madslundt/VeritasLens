@@ -117,6 +117,15 @@ export interface GamePreset {
   difficulty: GameDifficulty;
   /** When true, the completed session is appended to history (with the score + recap). */
   saveToHistory: boolean;
+  /**
+   * Per-preset response-language override. `null` (or missing on legacy
+   * persisted presets) means "use `settings.responseLanguage`" — the global
+   * default. Set to a concrete code (e.g. `'da'`) to force this game to a
+   * specific language regardless of the app-wide preference, so a Danish
+   * history quiz can sit alongside an English science quiz without the
+   * wearer toggling the global language each time.
+   */
+  language?: LanguageCode | null;
 }
 
 /**

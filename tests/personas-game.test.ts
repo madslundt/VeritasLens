@@ -12,6 +12,7 @@ import {
   buildGamePrompt,
   buildGameResult,
   parseGameResponse,
+  shuffleQuizOptions,
 } from '../src/personas/game';
 import { GAME_LENGTH, type GameFormat, type GamePreset, type GameQuestion } from '../src/types';
 
@@ -208,5 +209,74 @@ describe('GAME_RESPONSE_SCHEMA', () => {
 
   it('marks the top-level questions field as required', () => {
     expect(GAME_RESPONSE_SCHEMA.required).toContain('questions');
+  });
+});
+
+describe('shuffleQuizOptions', () => {
+  /** Deterministic "rng" that walks through a fixed array, looping if needed.
+   *  Lets each test pin the shuffle outcome without depending on Math.random. */
+  function fixedRng(values: number[]): () => number {
+    let i = 0;
+    return () => values[i++ % values.length]!;
+  }
+
+  it('reorders 4-option quiz items and remaps correctIndex to the same answer text', () => {
+    const q: GameQuestion = {
+      text: 'Q',
+      options: ['A', 'B', 'C', 'D'],
+      correctIndex: 0, // correct = 'A'
+      reveal: '',
+    };
+    // Fisher-Yates loops i=3..1; rng values pick j each iteration. With
+    // 0.99/0/0 we force swaps so the order ends up non-trivial.
+    const [shuffled] = shuffleQuizOptions([q], fixedRng([0.99, 0.0, 0.0]));
+    expect(shuffled!.options).toHaveLength(4);
+    // Same set of options, same correct answer text — only positions changed.
+    expect([...shuffled!.options].sort()).toEqual(['A', 'B', 'C', 'D']);
+    expect(shuffled!.options[shuffled!.correctIndex!]).toBe('A');
+  });
+
+  it('leaves the 2-option true-false case untouched (positional semantics)', () => {
+    const q: GameQuestion = {
+      text: 'S',
+      options: ['True', 'False'],
+      correctIndex: 1,
+      reveal: '',
+    };
+    const [shuffled] = shuffleQuizOptions([q], fixedRng([0.99]));
+    expect(shuffled!.options).toEqual(['True', 'False']);
+    expect(shuffled!.correctIndex).toBe(1);
+  });
+
+  it('leaves riddles untouched (no options, correctIndex null)', () => {
+    const q: GameQuestion = {
+      text: 'R',
+      options: [],
+      correctIndex: null,
+      reveal: 'ans',
+    };
+    const [shuffled] = shuffleQuizOptions([q], fixedRng([0.5]));
+    expect(shuffled).toEqual(q);
+  });
+
+  it('maps every original correctIndex slot to its post-shuffle home across a 10-question set', () => {
+    // Build 10 questions with correctIndex 0..3 cycling; verify each one's
+    // post-shuffle options[correctIndex] still equals the original
+    // options[origCorrect]. Doubles as a regression guard for any future
+    // off-by-one in the remap.
+    const questions: GameQuestion[] = Array.from({ length: 10 }, (_, i) => ({
+      text: `Q${i}`,
+      options: [`A${i}`, `B${i}`, `C${i}`, `D${i}`],
+      correctIndex: i % 4,
+      reveal: '',
+    }));
+    const out = shuffleQuizOptions(questions);
+    for (let i = 0; i < questions.length; i++) {
+      const before = questions[i]!;
+      const after = out[i]!;
+      expect(after.options).toHaveLength(4);
+      expect([...after.options].sort()).toEqual([...before.options].sort());
+      expect(after.options[after.correctIndex!]).toBe(before.options[before.correctIndex!]);
+    }
   });
 });

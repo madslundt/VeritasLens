@@ -773,7 +773,14 @@ function normalizeGamePreset(raw: unknown): GamePreset | null {
     ? (r['difficulty'] as GameDifficulty)
     : 'medium';
   const saveToHistory = r['saveToHistory'] !== false;
-  return { id, format, topic, difficulty, saveToHistory };
+  // Per-preset language override; missing / unknown codes fall back to
+  // `null` so the runtime resolves to `settings.responseLanguage`.
+  const rawLang = r['language'];
+  const language: LanguageCode | null =
+    typeof rawLang === 'string' && rawLang in LANGUAGES
+      ? (rawLang as LanguageCode)
+      : null;
+  return { id, format, topic, difficulty, saveToHistory, language };
 }
 
 export function newGamePresetId(): string {

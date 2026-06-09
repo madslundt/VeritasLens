@@ -57,7 +57,7 @@ export function buildQuizPrompt(topic: string, difficulty: GameDifficulty, lang:
     '- `text`: the question itself, short enough to read on a small display (≤140 chars).',
     '- `options`: exactly 4 answer choices, each ≤60 chars. One must be correct, the other three plausible distractors.',
     '- `correctIndex`: 0-based index of the correct option inside `options`.',
-    '- `reveal`: a one-sentence explanation of why the correct answer is correct (≤180 chars).',
+    '- `reveal`: a thorough 2-4 sentence explanation (≤340 chars). Say WHY the correct answer is right AND, where useful, why the closest distractor is wrong, plus one concrete supporting fact (date, name, mechanism, number) so the wearer learns something each round — not just "yes/no".',
     '',
     COMMON_OUTPUT_RULES,
     '',
@@ -77,7 +77,7 @@ export function buildTrueFalsePrompt(topic: string, difficulty: GameDifficulty, 
     '- `text`: a single factual statement, ≤140 chars. Half should be true, half false.',
     '- `options`: exactly 2 entries — the localized words for "True" and "False" in this order.',
     '- `correctIndex`: 0 if the statement is true, 1 if it is false.',
-    '- `reveal`: a one-sentence explanation grounding the verdict in fact (≤180 chars).',
+    '- `reveal`: a 2-4 sentence explanation grounding the verdict in fact (≤340 chars). Name the specific evidence or counter-evidence (date, named source, mechanism) — avoid generic "yes/no" answers so the wearer learns the supporting detail.',
     '',
     COMMON_OUTPUT_RULES,
     '',
@@ -97,7 +97,7 @@ export function buildRiddlePrompt(topic: string, difficulty: GameDifficulty, lan
     '- `text`: the riddle itself, ≤180 chars, ending with a single question mark.',
     '- `options`: an empty array `[]`.',
     '- `correctIndex`: the literal value `-1` (riddles are unscored).',
-    '- `reveal`: the answer plus a one-line explanation of the trick / logic (≤200 chars).',
+    '- `reveal`: the answer followed by a 2-3 sentence walkthrough of the trick / logic and the key clue in the riddle (≤340 chars). Aim for "ah-ha"-level clarity, not just the bare answer.',
     '',
     COMMON_OUTPUT_RULES,
     '',
@@ -216,6 +216,43 @@ export function parseGameResponse(text: string, format: GameFormat): ParsedGameR
   });
   const chosenTopic = typeof raw['chosenTopic'] === 'string' ? raw['chosenTopic'].trim() : '';
   return { questions, chosenTopic };
+}
+
+/**
+ * Randomize the option order for each multi-choice question, remapping
+ * `correctIndex` so it still points at the same answer text. Gemini (and
+ * most chat LLMs) bias correctIndex toward 0 — without this shuffle the
+ * "correct" option lands first ~70 %+ of the time, which the wearer
+ * notices within a session or two and the quiz turns into a tap-the-top
+ * game. True-False is left alone (the options carry semantic position:
+ * idx 0 = True, idx 1 = False) and riddles have no options to shuffle.
+ *
+ * `rng` is injectable so tests can pin the order; the runtime call site
+ * uses `Math.random` directly.
+ */
+export function shuffleQuizOptions(
+  questions: GameQuestion[],
+  rng: () => number = Math.random,
+): GameQuestion[] {
+  return questions.map((q) => {
+    // Skip when shuffling would change meaning (true-false: positional)
+    // or wouldn't do anything (riddle / single option). The 3-option case
+    // is included so any future custom quiz format with 3 distractors
+    // shuffles too.
+    if (q.correctIndex === null || q.options.length < 3) return q;
+    const indices = q.options.map((_, i) => i);
+    // Fisher-Yates over the index array, then materialize the new
+    // options[] and find the new home of `correctIndex` in one pass.
+    for (let i = indices.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = indices[i]!;
+      indices[i] = indices[j]!;
+      indices[j] = tmp;
+    }
+    const options = indices.map((origIdx) => q.options[origIdx]!);
+    const correctIndex = indices.indexOf(q.correctIndex);
+    return { ...q, options, correctIndex };
+  });
 }
 
 /**

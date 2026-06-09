@@ -460,6 +460,9 @@ export const SettingsView: Component = () => {
   const [gameFormTopic, setGameFormTopic] = createSignal('');
   const [gameFormDifficulty, setGameFormDifficulty] = createSignal<GameDifficulty>('medium');
   const [gameFormSaveToHistory, setGameFormSaveToHistory] = createSignal(true);
+  // Per-preset language override. `null` = "use Settings → Response
+  // language", any LanguageCode pins the game regardless of the global.
+  const [gameFormLanguage, setGameFormLanguage] = createSignal<LanguageCode | null>(null);
   const [gameFormError, setGameFormError] = createSignal('');
   const GAME_FORMATS: readonly GameFormat[] = ['quiz-mc', 'true-false', 'riddle'];
   const GAME_DIFFICULTIES: readonly GameDifficulty[] = ['easy', 'medium', 'hard'];
@@ -470,15 +473,25 @@ export const SettingsView: Component = () => {
     setGameFormTopic('');
     setGameFormDifficulty('medium');
     setGameFormSaveToHistory(true);
+    setGameFormLanguage(null);
     setGameFormError('');
   };
   const openGameEditor = (preset?: GamePreset): void => {
+    // Tap-to-toggle: if the row that's already open is tapped again, close
+    // the editor instead of redundantly re-seeding the form with its own
+    // values. Tapping a different preset still swaps the form to that
+    // preset's values (it's a fresh "edit", not a "toggle").
+    if (preset && gameEditorOpen() && gameEditingId() === preset.id) {
+      closeGameEditor();
+      return;
+    }
     if (preset) {
       setGameEditingId(preset.id);
       setGameFormFormat(preset.format);
       setGameFormTopic(preset.topic);
       setGameFormDifficulty(preset.difficulty);
       setGameFormSaveToHistory(preset.saveToHistory);
+      setGameFormLanguage(preset.language ?? null);
     } else {
       resetGameForm();
     }
@@ -500,6 +513,7 @@ export const SettingsView: Component = () => {
       topic,
       difficulty: gameFormDifficulty(),
       saveToHistory: gameFormSaveToHistory(),
+      language: gameFormLanguage(),
     };
     if (editingId) {
       const idx = list.findIndex((p) => p.id === editingId);
@@ -523,6 +537,85 @@ export const SettingsView: Component = () => {
     if (gameEditingId() === id) closeGameEditor();
     await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
   };
+
+  /**
+   * The Games editor form. Extracted so it can be rendered either inline
+   * inside the preset's `<li>` when editing an existing preset (so it's
+   * visually clear which row the form belongs to) or once below the list
+   * for the "create new" flow.
+   */
+  const renderGameEditor = () => (
+    <div class="meeting-prep-inline">
+      <label class="toggle-row toggle-row--full">
+        <span>Format</span>
+        <select
+          value={gameFormFormat()}
+          onChange={(e) => setGameFormFormat(e.currentTarget.value as GameFormat)}
+        >
+          <For each={GAME_FORMATS}>
+            {(fmt) => <option value={fmt}>{gameFormatLabel(fmt)}</option>}
+          </For>
+        </select>
+      </label>
+      <label class="toggle-row toggle-row--full">
+        <span>Topic</span>
+        <input
+          type="text"
+          value={gameFormTopic()}
+          placeholder="e.g. World War II"
+          maxLength={200}
+          onInput={(e) => setGameFormTopic(e.currentTarget.value)}
+        />
+      </label>
+      <label class="toggle-row toggle-row--full">
+        <span style="display: flex; align-items: center; gap: 0.5rem;">
+          <span>Difficulty</span>
+          <span style="display: inline-block; min-width: 4.5rem; text-align: left; opacity: 0.8;">
+            {gameDifficultyLabel(gameFormDifficulty())}
+          </span>
+        </span>
+        <input
+          type="range"
+          min="0"
+          max="2"
+          step="1"
+          value={difficultyIndex(gameFormDifficulty())}
+          onInput={(e) => setGameFormDifficulty(GAME_DIFFICULTIES[Number(e.currentTarget.value)] ?? 'medium')}
+        />
+      </label>
+      <label class="toggle-row toggle-row--full">
+        <span>Language</span>
+        <select
+          value={gameFormLanguage() ?? ''}
+          onChange={(e) => {
+            const v = e.currentTarget.value;
+            setGameFormLanguage(v === '' ? null : (v as LanguageCode));
+          }}
+        >
+          <option value="">Use default language</option>
+          <For each={Object.entries(LANGUAGES)}>
+            {([code, name]) => <option value={code}>{name}</option>}
+          </For>
+        </select>
+      </label>
+      <label class="toggle-row toggle-row--full">
+        <input
+          type="checkbox"
+          checked={gameFormSaveToHistory()}
+          onChange={(e) => setGameFormSaveToHistory(e.currentTarget.checked)}
+        />
+        <span>Save completed sessions to history</span>
+      </label>
+      <Show when={gameFormError()}>
+        <p class="muted" style="color: var(--color-warning, #c33);">{gameFormError()}</p>
+      </Show>
+      <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
+        <button type="button" class="primary" onClick={() => void submitGamePreset()}>
+          {gameEditingId() ? 'Save changes' : 'Add game'}
+        </button>
+      </div>
+    </div>
+  );
 
   type SaveState = 'idle' | 'saving' | 'saved' | 'error';
   const [saveState, setSaveState] = createSignal<SaveState>('idle');
@@ -1595,30 +1688,64 @@ export const SettingsView: Component = () => {
             <ul class="lens-list">
               <For each={gamePresets()}>
                 {(preset) => (
-                  <li class="lens-row">
-                    <div class="lens-info">
-                      <strong>{preset.topic}</strong>
-                      <span class="lens-desc">
-                        {gameFormatLabel(preset.format)} · {gameDifficultyLabel(preset.difficulty)}
-                        {preset.saveToHistory ? '' : ' · history off'}
-                      </span>
-                    </div>
-                    <div style="display: flex; gap: 0.5rem;">
+                  <li
+                    class="lens-row"
+                    classList={{
+                      'lens-row--editing': gameEditorOpen() && gameEditingId() === preset.id,
+                    }}
+                  >
+                    <div class="game-row-head">
                       <button
                         type="button"
-                        class="link-button"
+                        class="lens-info lens-info--clickable"
                         onClick={() => openGameEditor(preset)}
+                        aria-label={`Edit ${preset.topic}`}
                       >
-                        Edit
+                        <strong>{preset.topic}</strong>
+                        <span class="lens-desc">
+                          {gameFormatLabel(preset.format)} · {gameDifficultyLabel(preset.difficulty)}
+                          {preset.saveToHistory ? '' : ' · history off'}
+                        </span>
                       </button>
-                      <button
-                        type="button"
-                        class="link-button"
-                        onClick={() => void deleteGamePreset(preset.id)}
+                      <Show
+                        when={pendingDeleteId() === preset.id}
+                        fallback={
+                          <button
+                            type="button"
+                            class="secondary"
+                            onClick={() => armDelete(preset.id)}
+                            aria-label={`Delete ${preset.topic}`}
+                          >
+                            Delete
+                          </button>
+                        }
                       >
-                        Delete
-                      </button>
+                        <div style="display: flex; gap: 0.4rem;">
+                          <button
+                            type="button"
+                            class="primary"
+                            onClick={() => {
+                              cancelDelete();
+                              void deleteGamePreset(preset.id);
+                            }}
+                            aria-label={`Confirm delete ${preset.topic}`}
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            class="secondary"
+                            onClick={cancelDelete}
+                            aria-label="Cancel delete"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </Show>
                     </div>
+                    <Show when={gameEditorOpen() && gameEditingId() === preset.id}>
+                      {renderGameEditor()}
+                    </Show>
                   </li>
                 )}
               </For>
@@ -1628,77 +1755,24 @@ export const SettingsView: Component = () => {
                 </li>
               </Show>
             </ul>
+            {/* "Create new" path: editor renders below the list. Edit-existing
+                paths render the same form inline within the preset's <li>. */}
             <Show
-              when={gameEditorOpen()}
+              when={gameEditorOpen() && gameEditingId() === null}
               fallback={
-                <button
-                  type="button"
-                  class="link-button"
-                  disabled={gamePresets().length >= GAME_PRESETS_CAP}
-                  onClick={() => openGameEditor()}
-                >
-                  + New game
-                </button>
+                <Show when={!gameEditorOpen()}>
+                  <button
+                    type="button"
+                    class="primary"
+                    disabled={gamePresets().length >= GAME_PRESETS_CAP}
+                    onClick={() => openGameEditor()}
+                  >
+                    + New game
+                  </button>
+                </Show>
               }
             >
-              <div class="meeting-prep-inline">
-                <label class="toggle-row toggle-row--full">
-                  <span>Format</span>
-                  <select
-                    value={gameFormFormat()}
-                    onChange={(e) => setGameFormFormat(e.currentTarget.value as GameFormat)}
-                  >
-                    <For each={GAME_FORMATS}>
-                      {(fmt) => <option value={fmt}>{gameFormatLabel(fmt)}</option>}
-                    </For>
-                  </select>
-                </label>
-                <label class="toggle-row toggle-row--full">
-                  <span>Topic</span>
-                  <input
-                    type="text"
-                    value={gameFormTopic()}
-                    placeholder="e.g. World War II"
-                    maxLength={200}
-                    onInput={(e) => setGameFormTopic(e.currentTarget.value)}
-                  />
-                </label>
-                <label class="toggle-row toggle-row--full">
-                  <span style="display: flex; align-items: center; gap: 0.5rem;">
-                    <span>Difficulty</span>
-                    <span style="display: inline-block; min-width: 4.5rem; text-align: left; opacity: 0.8;">
-                      {gameDifficultyLabel(gameFormDifficulty())}
-                    </span>
-                  </span>
-                  <input
-                    type="range"
-                    min="0"
-                    max="2"
-                    step="1"
-                    value={difficultyIndex(gameFormDifficulty())}
-                    onInput={(e) => setGameFormDifficulty(GAME_DIFFICULTIES[Number(e.currentTarget.value)] ?? 'medium')}
-                  />
-                </label>
-                <label class="toggle-row toggle-row--full">
-                  <input
-                    type="checkbox"
-                    checked={gameFormSaveToHistory()}
-                    onChange={(e) => setGameFormSaveToHistory(e.currentTarget.checked)}
-                  />
-                  <span>Save completed sessions to history</span>
-                </label>
-                <Show when={gameFormError()}>
-                  <p class="muted" style="color: var(--color-warning, #c33);">{gameFormError()}</p>
-                </Show>
-                <div style="display: flex; gap: 0.5rem; margin-top: 0.5rem;">
-                  <button type="button" class="primary" onClick={() => void submitGamePreset()}>
-                    {gameEditingId() ? 'Save changes' : 'Add game'}
-                  </button>
-                  <button type="button" class="secondary" onClick={closeGameEditor}>
-                    Reset
-                  </button>
-                </div>
-              </div>
+              {renderGameEditor()}
             </Show>
           </section>
         </>
@@ -2242,10 +2316,13 @@ export const SettingsView: Component = () => {
                   />
                   <span>Carry summaries across sessions</span>
                 </label>
+                <span class="field-hint">
+                  Seeds each new session with short summaries of your last 2 sessions, so the
+                  model keeps long-running context across reloads. Helpful for ongoing
+                  conversations; skip it for one-off lookups.
+                </span>
                 <Show when={draftCrossSessionRecall()}>
                   <span class="field-hint warning">
-                    Seeds each new session with short summaries of your last 2 sessions, so the
-                    LLM keeps long-running context across reloads.
                     ⚠ Past-session summaries are sent to your provider in every prompt.
                   </span>
                 </Show>
