@@ -27,15 +27,23 @@ function languageDirective(lang: LanguageCode): string {
   return `LANGUAGE: Write every \`text\`, \`options\`, and \`reveal\` field in ${langName}.`;
 }
 
-/** Topic clause. Random presets pass empty topic — the LLM picks. */
-function topicClause(topic: string): string {
+/** Topic clause. Random presets pass empty topic — the LLM picks. When
+ *  `recentRandomTopics` is non-empty the clause appends an explicit
+ *  avoid-list so back-to-back Random plays don't all default to "space /
+ *  Apollo" (the observed LLM bias when given a wide-open choice). */
+function topicClause(topic: string, recentRandomTopics: readonly string[] = []): string {
   const trimmed = topic.trim();
   if (trimmed.length > 0) return `Topic: ${trimmed}.`;
-  return [
-    'Topic: Pick a single specific, interesting topic yourself (history, science, geography, pop culture, sports, etc.).',
+  const base = [
+    'Topic: Pick a single specific, interesting topic yourself. Range WIDELY across plays — history, science, geography, pop culture, sports, food, literature, mythology, technology, music, art, architecture, biology, languages, board games, cinema, etc.',
+    'Resist the strong default to space exploration / Apollo / astronomy unless that is what the random roll genuinely surfaces this time — picking it every play is the failure mode we are guarding against.',
+    'Lean toward concrete sub-domains rather than broad fields (e.g. "Renaissance painters" instead of "art", "Formula 1 history" instead of "sports", "Cold War cinema" instead of "movies").',
     'Once chosen, every question must be on that same topic.',
     'Echo the chosen topic in the `chosenTopic` field of the response so it can be displayed back to the user.',
   ].join(' ');
+  if (recentRandomTopics.length === 0) return base;
+  const bullets = recentRandomTopics.map((t) => `- ${t}`).join('\n');
+  return `${base}\n\nAVOID these recent Random picks (choose a clearly different domain, not a sibling of any of these):\n${bullets}`;
 }
 
 const COMMON_OUTPUT_RULES = [
@@ -72,12 +80,13 @@ export function buildQuizPrompt(
   difficulty: GameDifficulty,
   lang: LanguageCode,
   recentQuestions?: readonly string[],
+  recentRandomTopics?: readonly string[],
 ): string {
   const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a quiz master generating a multiple-choice quiz for a smart-glasses HUD.',
     '',
-    topicClause(topic),
+    topicClause(topic, recentRandomTopics),
     difficultyDirective(difficulty),
     '',
     'For each question, output:',
@@ -99,12 +108,13 @@ export function buildTrueFalsePrompt(
   difficulty: GameDifficulty,
   lang: LanguageCode,
   recentQuestions?: readonly string[],
+  recentRandomTopics?: readonly string[],
 ): string {
   const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a quiz master generating a TRUE / FALSE quiz for a smart-glasses HUD.',
     '',
-    topicClause(topic),
+    topicClause(topic, recentRandomTopics),
     difficultyDirective(difficulty),
     '',
     'For each question, output:',
@@ -126,12 +136,13 @@ export function buildRiddlePrompt(
   difficulty: GameDifficulty,
   lang: LanguageCode,
   recentQuestions?: readonly string[],
+  recentRandomTopics?: readonly string[],
 ): string {
   const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a riddle master generating tap-to-reveal riddles for a smart-glasses HUD.',
     '',
-    topicClause(topic),
+    topicClause(topic, recentRandomTopics),
     difficultyDirective(difficulty),
     '',
     'For each riddle, output:',
@@ -154,11 +165,12 @@ export function buildGamePrompt(
   difficulty: GameDifficulty,
   lang: LanguageCode,
   recentQuestions?: readonly string[],
+  recentRandomTopics?: readonly string[],
 ): string {
   switch (format) {
-    case 'quiz-mc': return buildQuizPrompt(topic, difficulty, lang, recentQuestions);
-    case 'true-false': return buildTrueFalsePrompt(topic, difficulty, lang, recentQuestions);
-    case 'riddle': return buildRiddlePrompt(topic, difficulty, lang, recentQuestions);
+    case 'quiz-mc': return buildQuizPrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics);
+    case 'true-false': return buildTrueFalsePrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics);
+    case 'riddle': return buildRiddlePrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics);
   }
 }
 

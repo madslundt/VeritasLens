@@ -29,6 +29,12 @@ export const MAX_RECENT_GAME_QUESTIONS = 20;
  *  question texts are much shorter than session summaries. */
 export const MAX_RECENT_GAME_QUESTIONS_CHARS = 1500;
 
+/** Number of prior Random-session topics to include in the topic-clause
+ *  avoid list. ~5 is enough to break the "always space" failure mode
+ *  without bloating the prompt — the model just needs a few concrete
+ *  domains to steer away from. */
+export const MAX_RECENT_RANDOM_TOPICS = 5;
+
 /**
  * Walk `history` newest-first, pulling question texts from entries that
  * match the active preset. Verbatim duplicates are dropped on insert
@@ -89,6 +95,47 @@ export function extractRecentGameQuestions(
       charsUsed = projected;
       if (out.length >= maxCount) return out;
     }
+  }
+  return out;
+}
+
+/**
+ * For Random presets only: collect the topics the LLM has picked in the
+ * recent past (the `result.preset.topic` field carries the chosen topic
+ * the runtime folded into the session after parsing). Used by the
+ * topic-clause avoid-list so the LLM stops defaulting to the same broad
+ * subject ("space / Apollo") every Random roll.
+ *
+ * Match rule: `lensId === 'game'` AND tags include the active
+ * `preset.format` AND `preset.difficulty` — same shape as the question
+ * extractor but ignoring the topic tag (since for Random we explicitly
+ * want cross-topic history). Walks newest-first, deduplicates case-
+ * insensitively so "Space" and "SPACE" count once, and caps at
+ * `maxCount`.
+ */
+export function extractRecentRandomTopics(
+  history: ReadonlyArray<HistoryEntry>,
+  preset: GamePreset,
+  maxCount: number = MAX_RECENT_RANDOM_TOPICS,
+): string[] {
+  if (history.length === 0 || maxCount <= 0) return [];
+  if (preset.id !== RANDOM_GAME_PRESET_ID) return [];
+
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = history.length - 1; i >= 0; i--) {
+    const entry = history[i]!;
+    if (entry.lensId !== 'game') continue;
+    if (!entry.tags || !entry.tags.includes(preset.format)) continue;
+    if (!entry.tags.includes(preset.difficulty)) continue;
+    if (entry.result.type !== 'game') continue;
+    const topic = entry.result.preset.topic.trim();
+    if (topic.length === 0) continue;
+    const key = topic.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(topic);
+    if (out.length >= maxCount) return out;
   }
   return out;
 }

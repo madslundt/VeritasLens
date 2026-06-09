@@ -323,4 +323,33 @@ describe('buildGamePrompt avoid-list', () => {
     expect(prompt).toContain(AVOID_LIST_HEADER);
     expect(prompt).toContain('- What has hands but cannot clap?');
   });
+
+  it('Random topic clause warns against the space-default and embeds recent topics when provided', () => {
+    // Empty topic + non-empty recentRandomTopics → topic clause gains a
+    // bulleted AVOID list for past chosen topics. The variety + anti-space
+    // wording is always present when topic is empty.
+    const prompt = buildGamePrompt(
+      'quiz-mc', '', 'medium', 'en',
+      undefined,
+      ['Space exploration', 'Apollo missions'],
+    );
+    expect(prompt).toContain('Resist the strong default to space');
+    expect(prompt).toContain('AVOID these recent Random picks');
+    expect(prompt).toContain('- Space exploration');
+    expect(prompt).toContain('- Apollo missions');
+  });
+
+  it('Random topic clause includes the variety guidance even with no recent topics', () => {
+    const prompt = buildGamePrompt('quiz-mc', '', 'medium', 'en');
+    expect(prompt).toContain('Resist the strong default to space');
+    expect(prompt).not.toContain('AVOID these recent Random picks');
+  });
+
+  it('Non-empty topic skips the Random variety + recent-topic blocks entirely', () => {
+    const prompt = buildGamePrompt('quiz-mc', 'World War II', 'medium', 'en',
+      undefined, ['Space exploration']);
+    expect(prompt).toContain('Topic: World War II.');
+    expect(prompt).not.toContain('Resist the strong default to space');
+    expect(prompt).not.toContain('AVOID these recent Random picks');
+  });
 });

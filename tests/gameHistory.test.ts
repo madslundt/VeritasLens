@@ -3,7 +3,9 @@ import { describe, it, expect } from 'vitest';
 import {
   MAX_RECENT_GAME_QUESTIONS,
   MAX_RECENT_GAME_QUESTIONS_CHARS,
+  MAX_RECENT_RANDOM_TOPICS,
   extractRecentGameQuestions,
+  extractRecentRandomTopics,
 } from '../src/runtime/gameHistory';
 import { RANDOM_GAME_PRESET_ID } from '../src/types';
 import type { GamePreset, GameQuestion, HistoryEntry, LensResult } from '../src/types';
@@ -208,5 +210,55 @@ describe('extractRecentGameQuestions', () => {
       questionTexts: ['   ', 'Real Q'],
     });
     expect(extractRecentGameQuestions([entry], savedPreset)).toEqual(['Real Q']);
+  });
+});
+
+describe('extractRecentRandomTopics', () => {
+  it('returns [] for a saved preset (only Random has chosen-topic history to dedup)', () => {
+    const entry = makeGameEntry({
+      format: 'quiz-mc', difficulty: 'medium', topic: 'Space exploration',
+      questionTexts: ['Q'],
+    });
+    expect(extractRecentRandomTopics([entry], savedPreset)).toEqual([]);
+  });
+
+  it('returns the past Random topics newest-first for Random preset matching format+difficulty', () => {
+    const older = makeGameEntry({
+      format: 'quiz-mc', difficulty: 'medium', topic: 'Renaissance art',
+      questionTexts: ['Q1'],
+    });
+    const newer = makeGameEntry({
+      format: 'quiz-mc', difficulty: 'medium', topic: 'Space exploration',
+      questionTexts: ['Q2'],
+    });
+    expect(extractRecentRandomTopics([older, newer], randomPreset))
+      .toEqual(['Space exploration', 'Renaissance art']);
+  });
+
+  it('case-insensitive dedup so "Space" / "SPACE" / "space" count once', () => {
+    const a = makeGameEntry({ format: 'quiz-mc', difficulty: 'medium', topic: 'Space', questionTexts: ['Q'] });
+    const b = makeGameEntry({ format: 'quiz-mc', difficulty: 'medium', topic: 'SPACE', questionTexts: ['Q'] });
+    const c = makeGameEntry({ format: 'quiz-mc', difficulty: 'medium', topic: 'space', questionTexts: ['Q'] });
+    const out = extractRecentRandomTopics([a, b, c], randomPreset);
+    expect(out).toHaveLength(1);
+  });
+
+  it('skips entries whose format or difficulty does not match', () => {
+    const wrongDiff = makeGameEntry({ format: 'quiz-mc', difficulty: 'hard', topic: 'Sports', questionTexts: ['Q'] });
+    const wrongFmt = makeGameEntry({ format: 'true-false', difficulty: 'medium', topic: 'Cinema', questionTexts: ['Q'] });
+    const right = makeGameEntry({ format: 'quiz-mc', difficulty: 'medium', topic: 'Music', questionTexts: ['Q'] });
+    expect(extractRecentRandomTopics([wrongDiff, wrongFmt, right], randomPreset)).toEqual(['Music']);
+  });
+
+  it('honors the count cap', () => {
+    const entries = Array.from({ length: 10 }, (_, i) =>
+      makeGameEntry({ format: 'quiz-mc', difficulty: 'medium', topic: `Topic ${i}`, questionTexts: ['Q'] }),
+    );
+    const out = extractRecentRandomTopics(entries, randomPreset, 3);
+    expect(out).toHaveLength(3);
+  });
+
+  it('exports a sane MAX_RECENT_RANDOM_TOPICS constant', () => {
+    expect(MAX_RECENT_RANDOM_TOPICS).toBeGreaterThan(0);
   });
 });

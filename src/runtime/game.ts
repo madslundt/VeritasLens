@@ -37,7 +37,7 @@ import {
   settings,
 } from '@/state/store';
 import { getBridge } from './bridge';
-import { extractRecentGameQuestions } from './gameHistory';
+import { extractRecentGameQuestions, extractRecentRandomTopics } from './gameHistory';
 import {
   showGameEndPage,
   showGameFeedbackPage,
@@ -141,12 +141,19 @@ export async function startGame(preset: GamePreset): Promise<void> {
   // repeat these" section so the wearer doesn't get the same opener
   // trivia three replays in a row.
   const recentQuestions = extractRecentGameQuestions(sessionHistory(), preset);
+  // For Random presets, also pull the chosen-topics from prior Random
+  // plays so the topic-clause can tell the LLM "don't pick any of these
+  // again." Without this nudge the model defaults to space/Apollo most
+  // rolls. No-op for saved presets (the extractor returns [] when the
+  // preset id isn't the Random sentinel).
+  const recentRandomTopics = extractRecentRandomTopics(sessionHistory(), preset);
   const prompt = buildGamePrompt(
     preset.format,
     preset.topic,
     preset.difficulty,
     lang,
     recentQuestions,
+    recentRandomTopics,
   );
 
   try {
