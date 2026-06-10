@@ -46,6 +46,8 @@ import {
   saveSttHost,
   saveSttModel,
   saveResponseLanguage,
+  saveTranslationMode,
+  saveTranslationSourceLanguages,
   sessionHistory,
   setAvailableModels,
   setModelsLoading,
@@ -425,6 +427,31 @@ export const SettingsView: Component = () => {
   const [draftAutoMode, setDraftAutoMode] = createSignal(settings().autoModeEnabled);
   const [draftAutoModeStart, setDraftAutoModeStart] = createSignal(settings().autoModeStartMs);
   const [draftAutoModeSilence, setDraftAutoModeSilence] = createSignal(settings().autoModeSilenceMs);
+  const [draftTranslationMode, setDraftTranslationMode] =
+    createSignal<'converse' | 'listen-in'>(settings().translationMode);
+  // Source-language hint persisted as either 'auto' (literal) or an array of
+  // codes. The UI splits this into two state slots — an auto toggle + an
+  // explicit allow-list — so the form can express "auto-detect" without
+  // throwing away the previously-selected allow-list when the user toggles
+  // back to manual.
+  const initialSourceLangs = settings().translationSourceLanguages;
+  const [draftTranslationAuto, setDraftTranslationAuto] = createSignal(
+    initialSourceLangs === 'auto' || initialSourceLangs.length === 0,
+  );
+  const [draftTranslationSourceLangs, setDraftTranslationSourceLangs] =
+    createSignal<LanguageCode[]>(
+      initialSourceLangs === 'auto' ? [] : initialSourceLangs,
+    );
+  const toggleTranslationSourceLang = (code: LanguageCode): void => {
+    setDraftTranslationSourceLangs((prev) =>
+      prev.includes(code) ? prev.filter((x) => x !== code) : [...prev, code],
+    );
+  };
+  // Resolve the auto-toggle + array into the persisted shape on save.
+  const resolveTranslationSourceLangs = (): LanguageCode[] | 'auto' =>
+    draftTranslationAuto() || draftTranslationSourceLangs().length === 0
+      ? 'auto'
+      : draftTranslationSourceLangs();
   // Local draft of meeting-prep sections. Mirrors the persisted store value but
   // always carries at least one row so the editor never collapses to nothing.
   // Autosaves on debounce; cap violations surface inline in `prepError`.
@@ -993,6 +1020,8 @@ export const SettingsView: Component = () => {
         autoModeStart,
         autoModeSilence,
         autoDisabled,
+        translationMode,
+        translationSourceLangs,
         prepResult,
       ] = await Promise.all([
         saveProvider(setLs, draftProvider()),
@@ -1022,6 +1051,8 @@ export const SettingsView: Component = () => {
         saveAutoModeStartMs(setLs, draftAutoModeStart()),
         saveAutoModeSilenceMs(setLs, draftAutoModeSilence()),
         saveAutoDisabledLenses(setLs, draftAutoDisabledLenses()),
+        saveTranslationMode(setLs, draftTranslationMode()),
+        saveTranslationSourceLanguages(setLs, resolveTranslationSourceLangs()),
         saveMeetingPrepSections(setLs, prepDraft()),
       ]);
       if (prepResult.ok) setPrepError('');
@@ -1030,7 +1061,8 @@ export const SettingsView: Component = () => {
         provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
         language, buffer, autoSummary, crossSessionRecall, discreet, voiceGate, voiceTrim,
-        autoMode, autoModeStart, autoModeSilence, autoDisabled,
+        autoMode, autoModeStart, autoModeSilence, autoDisabled, translationMode,
+        translationSourceLangs,
       ].every(Boolean) && prepResult.ok;
       if (allOk) {
         // Re-seed the draft signals from the persisted store. The store may
@@ -1098,6 +1130,17 @@ export const SettingsView: Component = () => {
   });
   const appDirty = createMemo(() => {
     const s = settings();
+    // Translation source-langs are a union ('auto' | LanguageCode[]); compare
+    // shape-first so a toggle between 'auto' and an empty array (which the
+    // resolver collapses to 'auto') doesn't read as dirty.
+    const persistedSrc = s.translationSourceLanguages;
+    const draftSrc = resolveTranslationSourceLangs();
+    const srcDirty =
+      Array.isArray(persistedSrc) !== Array.isArray(draftSrc)
+      || (Array.isArray(persistedSrc) && Array.isArray(draftSrc) && (
+        persistedSrc.length !== draftSrc.length
+        || !persistedSrc.every((c) => draftSrc.includes(c))
+      ));
     return (
       draftLanguage() !== s.responseLanguage
       || draftBuffer() !== s.bufferDuration
@@ -1109,6 +1152,8 @@ export const SettingsView: Component = () => {
       || draftAutoMode() !== s.autoModeEnabled
       || draftAutoModeStart() !== s.autoModeStartMs
       || draftAutoModeSilence() !== s.autoModeSilenceMs
+      || draftTranslationMode() !== s.translationMode
+      || srcDirty
     );
   });
   /**
@@ -2339,6 +2384,68 @@ export const SettingsView: Component = () => {
                   </span>
                 </Show>
               </Show>
+            </div>
+
+            <div class="field">
+              <span class="field-label">Translate lens</span>
+              <span class="field-hint">
+                Two modes for the Translate lens. <strong>Converse</strong> generates 3 short reply
+                starters in both languages so you can hold up your end of a conversation;
+                <strong> Listen-in</strong> drops the starters so you just see what's being said
+                (cheaper request and a less crowded HUD). Tip: enable Auto mode above for hands-free
+                continuous translation either way.
+              </span>
+              <label class="toggle-row" style="margin-top: 8px;">
+                <input
+                  type="radio"
+                  name="translation-mode"
+                  checked={draftTranslationMode() === 'converse'}
+                  onChange={() => setDraftTranslationMode('converse')}
+                />
+                <span>Converse — show 3 reply starters</span>
+              </label>
+              <label class="toggle-row">
+                <input
+                  type="radio"
+                  name="translation-mode"
+                  checked={draftTranslationMode() === 'listen-in'}
+                  onChange={() => setDraftTranslationMode('listen-in')}
+                />
+                <span>Listen-in — transcript &amp; translation only</span>
+              </label>
+
+              <div style="margin-top: 12px;">
+                <span class="field-label">Source language</span>
+                <label class="toggle-row">
+                  <input
+                    type="checkbox"
+                    checked={draftTranslationAuto()}
+                    onChange={(e) => setDraftTranslationAuto(e.currentTarget.checked)}
+                  />
+                  <span>Auto-detect what the other person is speaking</span>
+                </label>
+                <Show when={!draftTranslationAuto()}>
+                  <span class="field-hint">
+                    Restrict to one or more languages. The lens marks the audio as "no speech"
+                    when the speaker isn't using any of these — useful when stray English at a
+                    Spanish café shouldn't fire the lens.
+                  </span>
+                  <div class="lens-list" style="margin-top: 8px;">
+                    <For each={Object.entries(LANGUAGES)}>
+                      {([code, name]) => (
+                        <label class="lens-row">
+                          <input
+                            type="checkbox"
+                            checked={draftTranslationSourceLangs().includes(code as LanguageCode)}
+                            onChange={() => toggleTranslationSourceLang(code as LanguageCode)}
+                          />
+                          <span>{name}</span>
+                        </label>
+                      )}
+                    </For>
+                  </div>
+                </Show>
+              </div>
             </div>
 
             <div class="field">

@@ -49,6 +49,15 @@ import {
   showMidSummaryPage,
   showPickerPage,
   showUnconfiguredPage,
+  showTranslationPickerPage,
+  showTranslationTeleprompterPage,
+  updateTranslationTeleprompterExtended,
+  getLastTranslationResult,
+  hasCachedTranslationResult,
+  hasActiveTranslationStarter,
+  getActiveTranslationStarter,
+  getLastTranslationStarterIndex,
+  setLastTranslationStarterIndex,
   type MenuItem,
 } from './hud';
 import {
@@ -86,6 +95,11 @@ import {
   buildMeetingPrepSchema,
   parseMeetingPrepResponse,
 } from '@/personas/meetingPrep';
+import {
+  SAY_MORE_SCHEMA,
+  buildSayMorePrompt,
+  parseSayMoreResponse,
+} from '@/personas/translation';
 import {
   activePersona,
   appPhase,
@@ -478,6 +492,8 @@ function handleEvent(event: EvenHubEvent): void {
   else if (page === 'game-feedback') handleGameFeedbackEvent(gesture).catch((err) => logDispatchError('game-feedback-fail', err));
   else if (page === 'game-end') handleGameEndEvent(gesture).catch((err) => logDispatchError('game-end-fail', err));
   else if (page === 'game-save-prompt') handleGameSavePromptEvent(gesture).catch((err) => logDispatchError('game-save-prompt-fail', err));
+  else if (page === 'translation-picker') handleTranslationPickerGesture(gesture).catch((err) => logDispatchError('translation-picker-fail', err));
+  else if (page === 'translation-teleprompter') handleTranslationTeleprompterGesture(gesture).catch((err) => logDispatchError('translation-teleprompter-fail', err));
   // game-loading absorbs single-tap gestures — only double-tap (cancel) acts.
 }
 
@@ -565,10 +581,7 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
   // now). scrollActiveReason swaps claims when multi-claim, otherwise
   // paginates a long reason.
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    await showMenuPage({
-      exitGeneratesSummary: canGenerateFinalSummary(),
-      dynamicItems: buildMidSummaryMenuItems(),
-    });
+    await openMenuForCurrentContext();
     return;
   }
   if (g.type === OsEventTypeList.SCROLL_TOP_EVENT) {
@@ -576,6 +589,91 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
   } else if (g.type === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
     await handleActiveScroll(1);
   }
+}
+
+/** Centralised menu-open helper. Lets the active page, the picker page, and
+ *  the teleprompter page all reach the same menu with context-aware dynamic
+ *  items (Reply… when a translation result is cached, Say more → when the
+ *  wearer is on the teleprompter, mid-summary items as before). */
+async function openMenuForCurrentContext(): Promise<void> {
+  await showMenuPage({
+    exitGeneratesSummary: canGenerateFinalSummary(),
+    dynamicItems: [
+      ...buildMidSummaryMenuItems(),
+      ...buildTranslateMenuItems(),
+    ],
+  });
+}
+
+/** Dynamic menu items contributed by the Translate lens. Returns an empty
+ *  list when no relevant context exists so other lenses' menus stay clean.
+ *
+ *  - On the teleprompter page: emit "Say more →" (extends the chosen
+ *    starter into a 1-3 sentence reply).
+ *  - On the active page (or any page) when a translation result is cached
+ *    AND the wearer is on the Translate lens: emit "Reply…" (opens the
+ *    picker).
+ *
+ *  Order matters — Reply… surfaces before Say more → so a wearer who
+ *  hasn't picked yet sees the entry-point item first. */
+function buildTranslateMenuItems(): MenuItem[] {
+  const items: MenuItem[] = [];
+  const page = currentHudPage();
+  const isTranslate = activePersona() === 'translation';
+  // Reply… is only meaningful when there IS a cached translation result AND
+  // the wearer hasn't already drilled into the teleprompter (where they'd
+  // have used Say more → instead). Don't show it on the picker either —
+  // they're already there.
+  if (isTranslate
+    && hasCachedTranslationResult()
+    && page !== 'translation-picker'
+    && page !== 'translation-teleprompter'
+  ) {
+    items.push({ id: 'translation-reply', label: 'Reply…' });
+  }
+  if (page === 'translation-teleprompter' && hasActiveTranslationStarter()) {
+    items.push({ id: 'translation-say-more', label: 'Say more →' });
+  }
+  return items;
+}
+
+async function handleTranslationPickerGesture(g: Gesture): Promise<void> {
+  // Mirror the SDK-side highlight so an index-less click sysEvent still
+  // resolves the row the wearer's looking at (same quirk fix as the main
+  // picker page uses with `lastPickerIndex`).
+  if (typeof g.itemIndex === 'number') setLastTranslationStarterIndex(g.itemIndex);
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    const result = getLastTranslationResult();
+    if (!result) {
+      // Cache was cleared (e.g. session reset between picker show and tap).
+      // Fall back to the active page so the wearer isn't stuck.
+      await restoreActivePage();
+      return;
+    }
+    const idx = getLastTranslationStarterIndex();
+    const starter = result.replyStarters[idx];
+    if (!starter) {
+      // Out-of-range index (stale from a prior translation with more
+      // starters). Clamp to 0 and re-render the picker so the wearer can
+      // try again instead of silently no-op'ing.
+      setLastTranslationStarterIndex(0);
+      await showTranslationPickerPage(result);
+      return;
+    }
+    await showTranslationTeleprompterPage(starter);
+  }
+}
+
+async function handleTranslationTeleprompterGesture(g: Gesture): Promise<void> {
+  // Single-tap opens the menu (universal); the menu's dynamic items include
+  // Say more → because of the teleprompter context.
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    await openMenuForCurrentContext();
+  }
+  // Scroll events on the teleprompter are no-ops in v2 — there's no second
+  // page to scroll to, and inheriting the session-walk semantics would
+  // require a separate scroll implementation. The wearer can double-tap to
+  // re-analyze if they want a new utterance.
 }
 
 /**
@@ -613,6 +711,15 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
       case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
       case 'exit': await leaveActiveSession(); break;
+      case 'translation-reply': {
+        const result = getLastTranslationResult();
+        if (result) await showTranslationPickerPage(result);
+        break;
+      }
+      case 'translation-say-more': {
+        await runSayMore();
+        break;
+      }
     }
   }
 }
@@ -1551,6 +1658,115 @@ async function runAnalysis(): Promise<void> {
   }
 }
 
+/**
+ * "Say more →" — extend the chosen reply starter into a 1-3 sentence reply
+ * using recent session translations as soft context. Called from the menu
+ * while the wearer is on the teleprompter page. Reuses the same inflight /
+ * analyzing gates as `runAnalysis` so the autoMode VAD watcher (and the
+ * universal double-tap-as-cancel) treat it like any other analysis call.
+ *
+ * Audio is forwarded as context (the LLM gets to hear the conversation if it
+ * wants) but the prompt explicitly tells the model to extend the starter,
+ * not to retranscribe — gemini handles this fine. We don't try to short-cut
+ * to a text-only API since that would mean threading a text-only path through
+ * each provider, which isn't worth the v2 scope.
+ */
+async function runSayMore(): Promise<void> {
+  const starter = getActiveTranslationStarter();
+  if (!starter) {
+    // No starter cached — the wearer reached this code without picking one
+    // (e.g. via a race with session reset). Silent no-op; the menu shouldn't
+    // have offered Say more in that state.
+    return;
+  }
+  if (!buffer || buffer.bytesBuffered === 0) {
+    // No audio buffer — degrade to a clear hint via the status slot rather
+    // than firing a no-audio call. Buffer is allocated at session start so
+    // this only happens before the first packet arrives.
+    return;
+  }
+  const s = settings();
+  if (!activeApiKey()) {
+    // Without a key the call would fail in callLens; surface the missing-key
+    // state through the existing setStatus error path instead of throwing.
+    await setStatus('error');
+    setErrorMessage(
+      s.provider === 'openai-compatible'
+        ? `No ${openaiHostLabel(s.openaiBaseUrl)} API key.`
+        : 'No Gemini API key.',
+    );
+    return;
+  }
+
+  // Cancel any in-flight analysis — Say more replaces it, same as a double-
+  // tap would. Identity is recorded so the finally only releases when our
+  // controller is still the active one.
+  inflight?.abort();
+  const controller = new AbortController();
+  inflight = controller;
+  analyzing = true;
+
+  // Recent translations from the session — pass the OTHER side's source-
+  // language text so the LLM has the conversation in the language it'll
+  // extend into. Up to 3 most recent translation entries.
+  const recentTranscripts = sessionHistory()
+    .filter((e) => e.sessionId === currentSessionId && e.lensId === 'translation')
+    .slice(-3)
+    .map((e) => (e.result.type === 'translation' ? e.result.sourceText : ''))
+    .filter((t) => t.length > 0);
+
+  // Resolve sourceLang from the cached result (if any) so the LLM knows
+  // which language to stay in. Fall back to 'unknown' — the prompt
+  // anchors on the starter's source text in that case.
+  const cached = getLastTranslationResult();
+  const sourceLang = cached?.sourceLanguage ?? 'unknown';
+
+  const prompt = buildSayMorePrompt({
+    starter,
+    targetLang: s.responseLanguage,
+    sourceLang,
+    recentTranscripts,
+  });
+
+  const wav = encodePcmToWav(buffer.toLinearPcm(), {
+    sampleRate: buffer.sampleRate,
+    bitsPerSample: buffer.bitsPerSample,
+    channels: buffer.channels,
+  });
+
+  try {
+    const rawText = await callLens({
+      wav,
+      prompt,
+      schema: SAY_MORE_SCHEMA,
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return;
+    const parsed = parseSayMoreResponse(rawText);
+    // Only push the update if the wearer hasn't navigated away from the
+    // teleprompter — they might have hit Back via menu before the response
+    // arrived. updateTranslationTeleprompterExtended is also a no-op when
+    // currentPage !== 'translation-teleprompter', so this is a belt-and-
+    // suspenders check that also catches "wearer picked a different starter".
+    if (currentHudPage() === 'translation-teleprompter') {
+      await updateTranslationTeleprompterExtended(
+        parsed.extendedSource || starter.source,
+        parsed.extendedTranslated || starter.translated,
+      );
+    }
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') return;
+    pushDebugEvent({
+      label: 'say-more-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    if (inflight === controller) {
+      analyzing = false;
+      inflight = null;
+    }
+  }
+}
 
 /** Auto-summary cadence — scales with bufferDuration so summaries fire roughly
  *  as the audio ring buffer rolls over (otherwise speech can scroll out of the

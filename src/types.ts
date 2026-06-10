@@ -533,6 +533,15 @@ export interface Settings {
    * lens to ignore stray English. Empty array is treated as `'auto'`.
    */
   translationSourceLanguages: LanguageCode[] | 'auto';
+  /**
+   * Translate lens mode. `'converse'` (default) generates 3 reply starters so
+   * the wearer can hold up their end of a conversation; `'listen-in'` skips
+   * the starters and is intended for passive listening (eavesdropping on a
+   * tour guide, sitting in a meeting in a foreign language). Listen-in mode
+   * pays fewer tokens per call AND keeps the result page clean — just
+   * transcript + translation, no numbered starter block.
+   */
+  translationMode: 'converse' | 'listen-in';
 }
 
 /** Defaults for the auto-mode thresholds. Used as initial values and as

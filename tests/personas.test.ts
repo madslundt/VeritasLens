@@ -2,7 +2,13 @@
 import { describe, it, expect } from 'vitest';
 import { trimTo, isRecord, parseJsonResponse, coerceQuote, readClaimsArray, MAX_QUOTE_CHARS, NoSpeechError } from '../src/personas/_utils';
 import { parseFactCheckerResponse, buildFactCheckerPrompt } from '../src/personas/factChecker';
-import { parseTranslationResponse, buildTranslationPrompt } from '../src/personas/translation';
+import {
+  parseTranslationResponse,
+  buildTranslationPrompt,
+  buildSayMorePrompt,
+  parseSayMoreResponse,
+  getTranslationSchema,
+} from '../src/personas/translation';
 import { toStrictSchema } from '../src/llm/openai';
 
 describe('_utils', () => {
@@ -1094,5 +1100,110 @@ describe('translation persona', () => {
     if (result.type === 'translation') {
       expect(result.sourceLanguage).toBe('es');
     }
+  });
+
+  // ---------- v2: converse / listen-in mode ----------
+
+  it('converse mode prompts the LLM for 3 reply starters', () => {
+    const prompt = buildTranslationPrompt('en', 'auto', 'converse');
+    expect(prompt).toContain('EXACTLY 3 short reply starters');
+    expect(prompt).toContain("each starter's `translated` field");
+  });
+
+  it('listen-in mode skips the reply-starter clause entirely', () => {
+    const prompt = buildTranslationPrompt('en', 'auto', 'listen-in');
+    expect(prompt).not.toContain('EXACTLY 3 short reply starters');
+    expect(prompt).toContain('LISTEN-IN mode');
+    expect(prompt).toContain('empty array');
+  });
+
+  it('mode defaults to converse when omitted (back-compat with v1 callers)', () => {
+    const omitted = buildTranslationPrompt('en', 'auto');
+    const explicit = buildTranslationPrompt('en', 'auto', 'converse');
+    expect(omitted).toBe(explicit);
+  });
+
+  it('getTranslationSchema(converse) requires 3 reply starters', () => {
+    const schema = getTranslationSchema('converse') as {
+      properties: { replyStarters: { minItems: number; maxItems: number } };
+    };
+    expect(schema.properties.replyStarters.minItems).toBe(3);
+    expect(schema.properties.replyStarters.maxItems).toBe(3);
+  });
+
+  it('getTranslationSchema(listen-in) forbids reply starters', () => {
+    const schema = getTranslationSchema('listen-in') as {
+      properties: { replyStarters: { minItems: number; maxItems: number } };
+    };
+    expect(schema.properties.replyStarters.minItems).toBe(0);
+    expect(schema.properties.replyStarters.maxItems).toBe(0);
+  });
+});
+
+describe('say-more expansion', () => {
+  it('buildSayMorePrompt embeds the chosen starter verbatim', () => {
+    const prompt = buildSayMorePrompt({
+      starter: { source: 'Un café, por favor.', translated: 'A coffee, please.' },
+      targetLang: 'en',
+      sourceLang: 'es',
+      recentTranscripts: [],
+    });
+    expect(prompt).toContain('Un café, por favor.');
+    expect(prompt).toContain('A coffee, please.');
+    expect(prompt).toContain('Source language: es');
+  });
+
+  it('buildSayMorePrompt anchors on the starter language when sourceLang is unknown', () => {
+    const prompt = buildSayMorePrompt({
+      starter: { source: 'Hola', translated: 'Hi' },
+      targetLang: 'en',
+      sourceLang: 'unknown',
+      recentTranscripts: [],
+    });
+    expect(prompt).toContain('same language as the chosen starter');
+    expect(prompt).not.toContain('Source language: unknown');
+  });
+
+  it('buildSayMorePrompt embeds up to 3 recent transcripts in order, latest last', () => {
+    const prompt = buildSayMorePrompt({
+      starter: { source: 'X', translated: 'X' },
+      targetLang: 'en',
+      sourceLang: 'es',
+      recentTranscripts: ['first thing', 'second thing', 'third thing', 'fourth thing'],
+    });
+    expect(prompt).toContain('RECENT CONVERSATION');
+    expect(prompt).not.toContain('first thing'); // trimmed (capped at 3)
+    expect(prompt).toContain('second thing');
+    expect(prompt).toContain('third thing');
+    expect(prompt).toContain('fourth thing');
+    // Latest last → fourth appears after second in the prompt
+    const second = prompt.indexOf('second thing');
+    const fourth = prompt.indexOf('fourth thing');
+    expect(fourth).toBeGreaterThan(second);
+  });
+
+  it('buildSayMorePrompt omits the recent-conversation block when empty', () => {
+    const prompt = buildSayMorePrompt({
+      starter: { source: 'X', translated: 'X' },
+      targetLang: 'en',
+      sourceLang: 'es',
+      recentTranscripts: [],
+    });
+    expect(prompt).not.toContain('RECENT CONVERSATION');
+  });
+
+  it('parseSayMoreResponse extracts both fields', () => {
+    const parsed = parseSayMoreResponse(JSON.stringify({
+      extendedSource: 'Un café americano, por favor, sin azúcar.',
+      extendedTranslated: 'An americano, please, no sugar.',
+    }));
+    expect(parsed.extendedSource).toContain('americano');
+    expect(parsed.extendedTranslated).toContain('americano');
+  });
+
+  it('parseSayMoreResponse defaults missing fields to empty strings', () => {
+    const parsed = parseSayMoreResponse(JSON.stringify({}));
+    expect(parsed.extendedSource).toBe('');
+    expect(parsed.extendedTranslated).toBe('');
   });
 });

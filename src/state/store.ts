@@ -86,6 +86,7 @@ const SETTINGS_KEY_AUTO_MODE_ENABLED = 'veritaslens.autoModeEnabled';
 const SETTINGS_KEY_AUTO_MODE_START_MS = 'veritaslens.autoModeStartMs';
 const SETTINGS_KEY_AUTO_MODE_SILENCE_MS = 'veritaslens.autoModeSilenceMs';
 const SETTINGS_KEY_TRANSLATION_SOURCE_LANGS = 'veritaslens.translationSourceLanguages';
+const SETTINGS_KEY_TRANSLATION_MODE = 'veritaslens.translationMode';
 /** Default RMS floor when neither the new nor legacy key is set. */
 const DEFAULT_VOICE_GATE_RMS_FLOOR = 200;
 /** Slider granularity exposed in the Settings UI. */
@@ -190,6 +191,10 @@ const [settings, setSettings] = createSignal<Settings>({
   // Default to auto-detect so the Translate lens works for any conversation
   // without configuration; the user can pin a subset from Settings later.
   translationSourceLanguages: 'auto',
+  // Default to converse mode so picking the lens for the first time gives the
+  // full UX (reply starters); the wearer can switch to listen-in from the
+  // Settings → Translate section when they want passive eavesdropping.
+  translationMode: 'converse',
 });
 export { settings };
 
@@ -231,6 +236,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_AUTO_MODE_START_MS),
       safeGet(SETTINGS_KEY_AUTO_MODE_SILENCE_MS),
       safeGet(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS),
+      safeGet(SETTINGS_KEY_TRANSLATION_MODE),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -260,6 +266,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoModeStartMs,
     rawAutoModeSilenceMs,
     rawTranslationSourceLangs,
+    rawTranslationMode,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -313,7 +320,14 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       AUTO_MODE_SILENCE_MS_MAX,
     ),
     translationSourceLanguages: coerceTranslationSourceLanguages(rawTranslationSourceLangs),
+    translationMode: coerceTranslationMode(rawTranslationMode),
   });
+}
+
+function coerceTranslationMode(raw: string): 'converse' | 'listen-in' {
+  // Conservative default: anything we don't recognise becomes 'converse' so a
+  // corrupt KV blob never silently strips reply starters out of the lens.
+  return raw === 'listen-in' ? 'listen-in' : 'converse';
 }
 
 function coerceTranslationSourceLanguages(raw: string): LanguageCode[] | 'auto' {
@@ -340,6 +354,15 @@ export async function saveTranslationSourceLanguages(
   const serialized = value === 'auto' ? 'auto' : JSON.stringify(value);
   const ok = await setLs(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS, serialized);
   if (ok) setSettings({ ...settings(), translationSourceLanguages: value });
+  return ok;
+}
+
+export async function saveTranslationMode(
+  setLs: SetLs,
+  value: 'converse' | 'listen-in',
+): Promise<boolean> {
+  const ok = await setLs(SETTINGS_KEY_TRANSLATION_MODE, value);
+  if (ok) setSettings({ ...settings(), translationMode: value });
   return ok;
 }
 

@@ -128,7 +128,15 @@ export type HudPage =
   | 'game-feedback'
   | 'game-end'
   | 'game-save-prompt'
+  | 'translation-picker'
+  | 'translation-teleprompter'
   | 'none';
+
+/** Cached starter the wearer most recently picked on the translation-picker
+ *  page. Read by buildTranslationTeleprompterPage so a Say-more retry can
+ *  identify which starter to extend. Replaced atomically when a new picker
+ *  selection happens. */
+export type TranslationStarter = { source: string; translated: string };
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
@@ -218,6 +226,21 @@ let historyDetailIndex = -1;
 // active page is next rebuilt, so the answer they were waiting for is
 // surfaced on return instead of being silently dropped.
 let pendingActiveResult: LensResult | null = null;
+// Most recent Translate result for this session. Cached separately from
+// `sessionEntries` so the menu's "Reply…" item can resolve a picker page
+// without having to walk the entry list and find the latest translation —
+// and so a Translate result that the wearer hasn't yet landed on the active
+// page for (because they opened the menu mid-analysis) is still reachable.
+// Cleared on session reset and whenever `setLensResult(null)` fires.
+let lastTranslationResult: Extract<LensResult, { type: 'translation' }> | null = null;
+// Index of the starter currently highlighted on the translation-picker page.
+// Mirrored from `listEvent.currentSelectItemIndex` because index-less click
+// sysEvents on this hardware don't re-emit the highlight position.
+let lastTranslationStarterIndex = 0;
+// The starter the wearer most recently picked on the picker page. Read by
+// the teleprompter page builder and by Say-more so a retry expands the same
+// chosen line, not a stale one.
+let activeTranslationStarter: TranslationStarter | null = null;
 // Last menu-spinner frame written by setMenuSpinner. Used to seed
 // buildMenuPage so the spinner is visible immediately when the user opens the
 // menu mid-analysis (rather than waiting up to one ticker interval).
@@ -569,6 +592,15 @@ function splitForSynthesis(result: LensResult): LensResult[] {
 }
 
 export async function setLensResult(result: LensResult | null, context?: SetLensResultContext): Promise<void> {
+  // Cache the latest Translate result regardless of which page we're on so
+  // the menu's "Reply…" item can resolve a picker even when the result
+  // landed while the wearer was off the active page. NOT cleared on null —
+  // null is a transient dismiss (Back from menu) and the wearer might still
+  // want to reach the picker via menu without re-translating; the cache is
+  // bound to the session via resetHudSessionState.
+  if (result && result.type === 'translation') {
+    lastTranslationResult = result;
+  }
   if (currentPage !== 'active' && currentPage !== 'history-detail') {
     // User is off the active page (typically on the menu after opening it
     // mid-analysis). Stash the answer so the next showActivePage replays it.
@@ -2197,6 +2229,9 @@ export function resetHudSessionState(): void {
   latestAnalysisRange = null;
   activeLayout = 'baseline';
   pendingActiveResult = null;
+  lastTranslationResult = null;
+  lastTranslationStarterIndex = 0;
+  activeTranslationStarter = null;
   pendingMenuSpinnerFrame = '';
   pendingStatusFrame = '';
   recordingDotEligible = true;
@@ -2219,6 +2254,177 @@ export function resetHudSessionState(): void {
   }
   builtMenuItems = MENU_OPTIONS.map((o) => ({ id: o.id, label: o.label }));
   cachedGamesEntries = [];
+}
+
+// ============================================================================
+// Translate lens sub-pages
+//
+// Reply… (from the menu) opens `translation-picker`: a ListContainer with one
+// row per reply starter (translated text on each row, so the wearer reads in
+// THEIR language to pick). Click on a row pushes `translation-teleprompter`:
+// the chosen starter rendered large for reading aloud, with the translation
+// underneath. Say more → (from the teleprompter's menu) issues a second LLM
+// call that extends the starter into 1-3 sentences; `updateTranslationTeleprompterExtended`
+// pushes the new text via upgradeText so the wearer doesn't see a page rebuild
+// flash.
+// ============================================================================
+
+/** True when there's a cached translation result the menu can offer Reply… for. */
+export function hasCachedTranslationResult(): boolean {
+  return lastTranslationResult !== null;
+}
+
+/** Read-only accessor for the most recent translation result. Lifecycle uses
+ *  this to build the picker page on demand. */
+export function getLastTranslationResult():
+  | Extract<LensResult, { type: 'translation' }>
+  | null {
+  return lastTranslationResult;
+}
+
+/** True when the wearer has chosen a starter and is on (or returning to) the
+ *  teleprompter page — drives whether the menu offers Say more →. */
+export function hasActiveTranslationStarter(): boolean {
+  return activeTranslationStarter !== null;
+}
+
+/** Current highlighted index in the translation-picker list. Lifecycle reads
+ *  it on click so the SDK's index-less click sysEvent (the double-tap quirk
+ *  CLAUDE.md describes) still resolves to the right starter. */
+export function getLastTranslationStarterIndex(): number {
+  return lastTranslationStarterIndex;
+}
+
+/** Lifecycle calls this from the picker's list event so the JS-side mirror
+ *  stays in sync with the SDK's highlight. */
+export function setLastTranslationStarterIndex(idx: number): void {
+  lastTranslationStarterIndex = Math.max(0, idx);
+}
+
+function buildTranslationPickerPage(
+  result: Extract<LensResult, { type: 'translation' }>,
+): RebuildPageContainer {
+  // Each row is the TRANSLATED line — the wearer reads in their display
+  // language to decide what to say. Pre-clipped to a single visible line per
+  // row; the source-language version waits on the teleprompter page.
+  const itemNames = result.replyStarters.map((s, i) => {
+    const text = s.translated || s.source || '(empty)';
+    return `${i + 1}. ${clip(text, 56)}`;
+  });
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
+    width: SCREEN_W - 32, height: 36, borderWidth: 0, paddingLength: 4,
+    content: 'Pick a reply', isEventCapture: 0,
+  });
+  const list = new ListContainerProperty({
+    containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 48,
+    width: SCREEN_W - 32, height: 200, borderWidth: 0, paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: itemNames,
+    }),
+    isEventCapture: 1,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
+    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
+    content: 'Swipe ⇅ · Tap: pick · Double-tap: cancel',
+    isEventCapture: 0,
+  });
+  const listObject = [list];
+  const textObject = [title, hint];
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers(listObject, textObject),
+    listObject,
+    textObject,
+  });
+}
+
+export async function showTranslationPickerPage(
+  result: Extract<LensResult, { type: 'translation' }>,
+): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showTranslationPickerPage().');
+  // Cache the source result so the click handler can resolve a starter — the
+  // lifecycle path passes the result through too, but a re-render path (e.g.
+  // a future "back to picker" gesture) needs the cache.
+  lastTranslationResult = result;
+  // Clamp the carried index so a stale value from a prior translation (with
+  // a different starter count, e.g. listen-in mode → 0) can't read off the
+  // end of the new list.
+  if (lastTranslationStarterIndex >= result.replyStarters.length) {
+    lastTranslationStarterIndex = 0;
+  }
+  // Leaving the active page suppresses the recording dot the next active-page
+  // rebuild would otherwise re-introduce. Same pattern as showMenuPage.
+  recordingDotEligible = true;
+  const ok = await getBridge().rebuildPageContainer(buildTranslationPickerPage(result));
+  if (!ok) throw new Error('rebuildPageContainer (translation-picker) failed.');
+  currentPage = 'translation-picker';
+}
+
+function buildTranslationTeleprompterPage(
+  starter: TranslationStarter,
+  extended: { source: string; translated: string } | null,
+): RebuildPageContainer {
+  // Source on top in a tall body (what the wearer will read aloud); the
+  // wearer-language translation sits at the bottom as a smaller reference.
+  // Source font is the same as everywhere else on this hardware — there's no
+  // size knob exposed by the SDK; we get "larger" via more vertical space
+  // and the natural readability of foreground vs subordinate text.
+  const sourceText = extended?.source || starter.source || '(empty)';
+  const translatedText = extended?.translated || starter.translated || '';
+  const body = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 4,
+    width: SCREEN_W - 32, height: 180, borderWidth: 0, paddingLength: 4,
+    content: sourceText, isEventCapture: 1,
+  });
+  const translation = new TextContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 188,
+    width: SCREEN_W - 32, height: 68, borderWidth: 0, paddingLength: 4,
+    content: translatedText, isEventCapture: 0,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.activeHint, containerName: NAME.activeHint, xPosition: 16, yPosition: 260,
+    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
+    content: 'Tap: menu · Double-tap: re-analyze',
+    isEventCapture: 0,
+  });
+  const listObject: ListContainerProperty[] = [];
+  const textObject = [body, translation, hint];
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers(listObject, textObject),
+    listObject,
+    textObject,
+  });
+}
+
+export async function showTranslationTeleprompterPage(
+  starter: TranslationStarter,
+): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showTranslationTeleprompterPage().');
+  activeTranslationStarter = starter;
+  recordingDotEligible = true;
+  const ok = await getBridge().rebuildPageContainer(buildTranslationTeleprompterPage(starter, null));
+  if (!ok) throw new Error('rebuildPageContainer (translation-teleprompter) failed.');
+  currentPage = 'translation-teleprompter';
+}
+
+/** Push extended Say-more text onto the teleprompter in place — no full
+ *  rebuild, so the wearer doesn't see a flash. */
+export async function updateTranslationTeleprompterExtended(
+  extendedSource: string,
+  extendedTranslated: string,
+): Promise<void> {
+  if (currentPage !== 'translation-teleprompter') return;
+  if (!activeTranslationStarter) return;
+  await upgradeText(CONTAINER.reason, NAME.reason, extendedSource);
+  await upgradeText(CONTAINER.activeList, NAME.activeList, extendedTranslated);
+}
+
+/** Read the currently-active starter (the one the wearer picked + landed on
+ *  the teleprompter for). Lifecycle reads this to build the Say-more prompt. */
+export function getActiveTranslationStarter(): TranslationStarter | null {
+  return activeTranslationStarter;
 }
 
 export function _resetHudBootstrapForTesting(): void {

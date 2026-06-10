@@ -17,7 +17,7 @@ import {
   parseMeetingPrepResponseStub,
 } from './meetingPrep';
 import {
-  TRANSLATION_SCHEMA,
+  getTranslationSchema,
   buildTranslationPrompt,
   parseTranslationResponse,
 } from './translation';
@@ -154,15 +154,23 @@ const BUILTINS: Persona[] = [
     id: 'translation',
     name: 'Translate',
     description:
-      'Listens to someone else speak in a foreign language, shows their words plus a translation, and suggests 3 reply starters you could say back.',
+      'Listens to someone else speak in a foreign language and shows their words plus a translation. In Converse mode (default) also suggests 3 reply starters you can say back. Tip: enable Auto mode in Settings for hands-free continuous translation.',
     hint: 'Tap to translate',
     // The translation persona needs to read the wearer's source-language hint
-    // (auto vs a fixed allow-list) at prompt-build time, so we close over the
-    // store inside the wrapper instead of plumbing a second arg through the
-    // Persona.buildPrompt signature (which would change every other lens'
-    // declaration for no benefit).
-    buildPrompt: (lang) => buildTranslationPrompt(lang, settings().translationSourceLanguages),
-    schema: TRANSLATION_SCHEMA,
+    // (auto vs a fixed allow-list) AND the mode (converse vs listen-in) at
+    // call time, so we close over the store inside the wrapper. The schema
+    // also branches on mode (listen-in declares `replyStarters` as an empty
+    // array in the schema so the LLM doesn't generate them), so it's exposed
+    // as a getter rather than a static value. Object-spread captures the
+    // getter's current value (lifecycle.ts:1312 does `{...persona, ...}`),
+    // which is the snapshot we want.
+    buildPrompt: (lang) =>
+      buildTranslationPrompt(
+        lang,
+        settings().translationSourceLanguages,
+        settings().translationMode,
+      ),
+    get schema() { return getTranslationSchema(settings().translationMode); },
     parse: parseTranslationResponse,
     builtin: true,
   },
