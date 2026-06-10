@@ -1207,7 +1207,9 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   // about the other person speaking — surfacing the wearer's prior fact-check
   // headlines would mislead the model into translating around them.
   const memory = persona.id === 'translation' ? [] : buildRecentMemoryLines();
-  const transcript = formatTranscriptForPrompt({ maxSegments: TRANSCRIPT_PROMPT_MAX_SEGMENTS });
+  const transcript = settings().transcriptEnabled
+    ? formatTranscriptForPrompt({ maxSegments: TRANSCRIPT_PROMPT_MAX_SEGMENTS })
+    : '';
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
@@ -1720,6 +1722,7 @@ async function runAnalysis(): Promise<void> {
       // (wearer-speak has its own runWearerSpeakAnalyze entry that wires
       // speaker='wearer'), so the speaker tag is 'other'.
       const captureTranscript = (text: string): void => {
+        if (!settings().transcriptEnabled) return;
         const trimmed = text.trim();
         if (!trimmed) return;
         const now = Date.now();
@@ -2145,6 +2148,7 @@ async function runWearerSpeakAnalyze(): Promise<void> {
       // compatible STT paths; Gemini + OpenRouter rely on the whisper-sidecar
       // fired immediately above for the same outcome.
       onTranscript: (text) => {
+        if (!settings().transcriptEnabled) return;
         const trimmed = text.trim();
         if (!trimmed) return;
         const now = Date.now();

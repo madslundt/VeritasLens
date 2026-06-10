@@ -44,6 +44,7 @@ function settingsFor(overrides: Record<string, unknown> = {}): void {
     openaiApiKeys: { 'https://api.groq.com/openai/v1': 'sk-stt' },
     sttModel: 'whisper-large-v3',
     openaiBaseUrl: 'https://api.openai.com/v1',
+    transcriptEnabled: true,
     ...overrides,
   });
 }
@@ -71,6 +72,11 @@ describe('shouldRunWhisperSidecar', () => {
 
   it('returns false for Groq chat host (transcribe-then-chat path)', () => {
     settingsFor({ provider: 'openai-compatible', openaiBaseUrl: 'https://api.groq.com/openai/v1' });
+    expect(shouldRunWhisperSidecar()).toBe(false);
+  });
+
+  it('returns false when the transcript master switch is off, even on Gemini', () => {
+    settingsFor({ provider: 'gemini', transcriptEnabled: false });
     expect(shouldRunWhisperSidecar()).toBe(false);
   });
 });

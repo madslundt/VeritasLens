@@ -482,6 +482,20 @@ export interface Settings {
    */
   crossSessionRecallEnabled: boolean;
   /**
+   * Master switch for the rolling tagged transcript (Layer B). When ON
+   * (default), every lens call's STT result is appended as a tagged
+   * `[wearer]` / `[other]` segment and the recent window is injected into the
+   * prompt context so the model attributes claims correctly across turns.
+   * Gemini + OpenRouter additionally fire a parallel whisper-sidecar call so
+   * those providers also get tagged segments without an inline-audio STT path.
+   *
+   * Off skips both the prompt injection AND the sidecar — privacy- and
+   * cost-conscious users who don't want STT results forwarded to their LLM
+   * provider's prompt or burning a Whisper call per analysis can disable
+   * here. Lens results themselves are unchanged either way.
+   */
+  transcriptEnabled: boolean;
+  /**
    * When true, the active HUD hides the REC indicator and affordance hint and
    * shows only a small recording dot until the user double-taps for an
    * analysis. Results stay on screen until explicitly dismissed via the menu's

@@ -76,6 +76,7 @@ const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_CROSS_SESSION_RECALL = 'veritaslens.crossSessionRecallEnabled';
+const SETTINGS_KEY_TRANSCRIPT_ENABLED = 'veritaslens.transcriptEnabled';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
@@ -173,6 +174,7 @@ const [settings, setSettings] = createSignal<Settings>({
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
   crossSessionRecallEnabled: false,
+  transcriptEnabled: true,
   discreet: false,
   // VAD gate defaults to the historical RMS floor (200 int16 units). 0
   // disables the gate entirely; lower values are more permissive. Exposed
@@ -237,6 +239,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_AUTO_MODE_SILENCE_MS),
       safeGet(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS),
       safeGet(SETTINGS_KEY_TRANSLATION_MODE),
+      safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -267,6 +270,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoModeSilenceMs,
     rawTranslationSourceLangs,
     rawTranslationMode,
+    rawTranscriptEnabled,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -302,6 +306,10 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
     crossSessionRecallEnabled: rawCrossSessionRecall === 'true',
+    // Default ON — unwritten storage returns '', which lands here as true so
+    // existing installs get the transcript feature on their next reload. The
+    // user explicitly opts out by saving 'false'.
+    transcriptEnabled: rawTranscriptEnabled !== 'false',
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
@@ -462,6 +470,9 @@ export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<
 
 export const saveCrossSessionRecallEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_CROSS_SESSION_RECALL, 'crossSessionRecallEnabled', enabled);
+
+export const saveTranscriptEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_TRANSCRIPT_ENABLED, 'transcriptEnabled', enabled);
 
 export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promise<boolean> {
   // Snap + clamp before persisting so we never write a value the UI couldn't
