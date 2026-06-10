@@ -626,21 +626,6 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
   // now). scrollActiveReason swaps claims when multi-claim, otherwise
   // paginates a long reason.
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
-    // Translate-lens shortcut: when a translation result is on screen AND the
-    // wearer is in converse mode (replyStarters non-empty), single-tap goes
-    // straight to the picker instead of through menu → Reply…. Saves three
-    // taps per reply during live conversation. Listen-in mode's starters are
-    // always empty, so the guard falls through to the menu — which is the
-    // right behaviour because listen-in wearers aren't trying to pick a
-    // reply. The menu is still reachable from the picker's own single-tap so
-    // History / Exit / Back / Translate stay one tap away.
-    if (activePersona() === 'translation' && hasCachedTranslationResult()) {
-      const r = getLastTranslationResult();
-      if (r && r.replyStarters.length > 0) {
-        await showTranslationPickerPage(r);
-        return;
-      }
-    }
     await openMenuForCurrentContext();
     return;
   }
@@ -1718,14 +1703,21 @@ async function runAnalysis(): Promise<void> {
             autoSelected: partialAutoSelected,
             claims: partialClaims.slice(),
           });
+          // Personas with `streamHeading` opt-in (Translate, Trivia) own the
+          // partial-render path via the heading streamer above — synthesizing
+          // a `{claims:[…]}` parse for them would clobber the in-flight
+          // heading text because their parsers tolerate missing fields and
+          // return an empty-shaped result instead of throwing. Skip the
+          // claim-partial render for those lenses; the heading partial keeps
+          // updating until the final result commits.
+          if (analysisPersona.streamHeading) return;
           // Render a synthetic partial on the HUD so the wearer sees claim 1
           // the moment it parses. Lens.parse() of `{claims:[…]}` produces the
           // same shape the final-result path renders; the spinner stays up
           // (lifecycle stops it only after the final result lands) so the
           // wearer can see more is still arriving. Lenses that don't follow
-          // the `{ claims: [...] }` shape (translation, etc.) throw inside
-          // parse() — we swallow that and skip the preview rather than fail
-          // the analyze.
+          // the `{ claims: [...] }` shape throw inside parse() — we swallow
+          // that and skip the preview rather than fail the analyze.
           const snapshot = partialClaims.slice();
           renderQueue = renderQueue.then(async () => {
             try {
