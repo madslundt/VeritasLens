@@ -38,16 +38,22 @@ export const TRANSCRIPT_MAX_SEGMENTS = 60;
 interface SessionState {
   sessionId: string;
   segments: TranscriptSegment[];
-  subscribers: Set<(segments: readonly TranscriptSegment[]) => void>;
 }
 
 let state: SessionState | null = null;
+/**
+ * Subscribers live at module scope, not inside `state`, so callers can hook in
+ * before the first session starts — `bootstrapHud` subscribes during HUD
+ * bootstrap, which happens long before `enterActiveSession` calls
+ * `resetTranscript`. Keeping subscribers separate also means `resetTranscript`
+ * doesn't have to re-thread them between session-state objects.
+ */
+const subscribers = new Set<(segments: readonly TranscriptSegment[]) => void>();
 
 /** Re-initialize the transcript for a fresh session. Drops any prior segments
  *  and notifies subscribers with an empty list so the HUD widget clears. */
 export function resetTranscript(sessionId: string): void {
-  const subs = state?.subscribers ?? new Set();
-  state = { sessionId, segments: [], subscribers: subs };
+  state = { sessionId, segments: [] };
   notify();
 }
 
@@ -112,41 +118,50 @@ export function formatForPrompt(opts: { maxSegments?: number } = {}): string {
 }
 
 /** Subscribe to transcript updates. Returns an unsubscribe function. The
- *  subscriber is called immediately with the current snapshot so HUD widgets
- *  can seed themselves without a separate getter call. */
+ *  subscriber is called immediately with the current snapshot (empty when no
+ *  session is active) so HUD widgets can seed themselves without a separate
+ *  getter call. Subscribers survive `resetTranscript` — they get an empty
+ *  notify right after the new session starts. */
 export function subscribe(fn: (segments: readonly TranscriptSegment[]) => void): () => void {
-  if (!state) return () => undefined;
-  state.subscribers.add(fn);
+  subscribers.add(fn);
   try {
-    fn(state.segments.slice());
+    fn(state?.segments.slice() ?? []);
   } catch {
     /* subscriber errors must not break the producer */
   }
   return () => {
-    state?.subscribers.delete(fn);
+    subscribers.delete(fn);
   };
 }
 
-/** Test-only: tear down all state so test order doesn't bleed. */
+/** Test-only: tear down all state AND subscribers so test order doesn't bleed. */
 export function _resetTranscriptForTesting(): void {
   state = null;
+  subscribers.clear();
 }
 
 function evictOldSegments(now: number): void {
   if (!state) return;
   const minStart = now - TRANSCRIPT_MAX_AGE_MS;
-  while (state.segments.length > 0 && state.segments[0]!.endedAt < minStart) {
-    state.segments.shift();
+  const segments = state.segments;
+  // Find the first surviving index in one pass, then drop the prefix with a
+  // single slice. Sequential `shift()` calls were O(n) each (memmove of all
+  // remaining elements), so back-to-back evictions degraded to O(n²) in the
+  // segment count.
+  let dropAge = 0;
+  while (dropAge < segments.length && segments[dropAge]!.endedAt < minStart) {
+    dropAge++;
   }
-  while (state.segments.length > TRANSCRIPT_MAX_SEGMENTS) {
-    state.segments.shift();
+  const overflow = Math.max(0, segments.length - dropAge - TRANSCRIPT_MAX_SEGMENTS);
+  const dropTotal = dropAge + overflow;
+  if (dropTotal > 0) {
+    state.segments = segments.slice(dropTotal);
   }
 }
 
 function notify(): void {
-  if (!state) return;
-  const snapshot = state.segments.slice();
-  for (const fn of state.subscribers) {
+  const snapshot = state?.segments.slice() ?? [];
+  for (const fn of subscribers) {
     try {
       fn(snapshot);
     } catch {

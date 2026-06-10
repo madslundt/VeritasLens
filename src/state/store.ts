@@ -77,6 +77,7 @@ const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_CROSS_SESSION_RECALL = 'veritaslens.crossSessionRecallEnabled';
 const SETTINGS_KEY_TRANSCRIPT_ENABLED = 'veritaslens.transcriptEnabled';
+const SETTINGS_KEY_TRANSCRIPT_WIDGET_ENABLED = 'veritaslens.transcriptWidgetEnabled';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
@@ -175,6 +176,7 @@ const [settings, setSettings] = createSignal<Settings>({
   autoSummaryEnabled: false,
   crossSessionRecallEnabled: false,
   transcriptEnabled: true,
+  transcriptWidgetEnabled: false,
   discreet: false,
   // VAD gate defaults to the historical RMS floor (200 int16 units). 0
   // disables the gate entirely; lower values are more permissive. Exposed
@@ -240,6 +242,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS),
       safeGet(SETTINGS_KEY_TRANSLATION_MODE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED),
+      safeGet(SETTINGS_KEY_TRANSCRIPT_WIDGET_ENABLED),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -271,6 +274,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawTranslationSourceLangs,
     rawTranslationMode,
     rawTranscriptEnabled,
+    rawTranscriptWidgetEnabled,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -310,6 +314,10 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     // existing installs get the transcript feature on their next reload. The
     // user explicitly opts out by saving 'false'.
     transcriptEnabled: rawTranscriptEnabled !== 'false',
+    // Opt-in verification affordance — defaults OFF so existing installs
+    // never see an unexpected flash. User explicitly enables to confirm
+    // captures during testing.
+    transcriptWidgetEnabled: rawTranscriptWidgetEnabled === 'true',
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
@@ -473,6 +481,9 @@ export const saveCrossSessionRecallEnabled = (setLs: SetLs, enabled: boolean): P
 
 export const saveTranscriptEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_TRANSCRIPT_ENABLED, 'transcriptEnabled', enabled);
+
+export const saveTranscriptWidgetEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_TRANSCRIPT_WIDGET_ENABLED, 'transcriptWidgetEnabled', enabled);
 
 export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promise<boolean> {
   // Snap + clamp before persisting so we never write a value the UI couldn't

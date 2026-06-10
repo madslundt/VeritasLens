@@ -78,7 +78,8 @@ import {
   showPickerPage,
   showUnconfiguredPage,
 } from '../src/runtime/hud';
-import { saveAutoSummaryEnabled, saveDiscreet, setLensResult as setStateLensResult, settings } from '../src/state/store';
+import { saveAutoSummaryEnabled, saveDiscreet, saveTranscriptWidgetEnabled, setLensResult as setStateLensResult, settings } from '../src/state/store';
+import { _resetTranscriptForTesting, appendSegment, resetTranscript } from '../src/runtime/transcript';
 import { getPersona, getPickerPersonas } from '../src/personas';
 import type { HistoryEntry, LensResult } from '../src/types';
 
@@ -2137,5 +2138,126 @@ describe('blankActiveForThinking', () => {
 
     expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
     expect(isActiveHidden()).toBe(true);
+  });
+});
+
+describe('transcript-flash widget', () => {
+  type TextBag = { payload: { containerName: string; content: string } };
+  function hintWrites(): string[] {
+    return (bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>)
+      .filter((c) => c[0].payload.containerName === 'vl-act-hint')
+      .map((c) => c[0].payload.content);
+  }
+
+  beforeEach(() => {
+    // Both reset hooks must run together: the flash subscriber lives in
+    // hud.ts's module state, the transcript subscribers Set lives in
+    // transcript.ts's module state. Without both, a stale subscription from
+    // a previous test would either fire twice or never re-attach.
+    _resetHudBootstrapForTesting();
+    _resetTranscriptForTesting();
+  });
+
+  it('flashes a new segment in the hint slot when widget is enabled, then reverts after 3s', async () => {
+    vi.useFakeTimers();
+    try {
+      await saveTranscriptWidgetEnabled(fakeSetLs, true);
+      await bootstrapHud('picker');
+      await showActivePage(getPersona('fact-checker')!);
+      resetTranscript('sess');
+
+      bridge.textContainerUpgrade.mockClear();
+      appendSegment({ speaker: 'other', text: 'hello world', startedAt: 0, endedAt: 1000 });
+      // Flash subscriber is synchronous; the upgrade call has been scheduled.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const before = hintWrites();
+      expect(before.some((c) => c.startsWith('[other]') && c.includes('hello world'))).toBe(true);
+
+      vi.advanceTimersByTime(3000);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const after = hintWrites();
+      // After the timer fires the canonical hint is restored.
+      expect(after[after.length - 1]).toBe('Tap: menu · Double-tap: check');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT flash when transcriptWidgetEnabled is off', async () => {
+    await saveTranscriptWidgetEnabled(fakeSetLs, false);
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    resetTranscript('sess');
+
+    bridge.textContainerUpgrade.mockClear();
+    appendSegment({ speaker: 'other', text: 'hello world', startedAt: 0, endedAt: 1000 });
+    await Promise.resolve();
+
+    expect(hintWrites().some((c) => c.includes('hello world'))).toBe(false);
+  });
+
+  it('truncates a long segment with an ellipsis so it fits the hint row', async () => {
+    vi.useFakeTimers();
+    try {
+      await saveTranscriptWidgetEnabled(fakeSetLs, true);
+      await bootstrapHud('picker');
+      await showActivePage(getPersona('fact-checker')!);
+      resetTranscript('sess');
+
+      bridge.textContainerUpgrade.mockClear();
+      const longText = 'this is a very long transcript line that should get truncated';
+      appendSegment({ speaker: 'other', text: longText, startedAt: 0, endedAt: 1000 });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const flashed = hintWrites().find((c) => c.startsWith('[other]'));
+      expect(flashed).toBeDefined();
+      // Display cap is 40 chars on the text payload — ellipsis closes the truncation.
+      expect(flashed!.endsWith('…')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not flash outside the active page (still appends to the transcript silently)', async () => {
+    await saveTranscriptWidgetEnabled(fakeSetLs, true);
+    await bootstrapHud('picker');
+    // Stay on picker — never showActivePage.
+    resetTranscript('sess');
+
+    bridge.textContainerUpgrade.mockClear();
+    appendSegment({ speaker: 'other', text: 'hello', startedAt: 0, endedAt: 1000 });
+    await Promise.resolve();
+
+    expect(hintWrites().some((c) => c.includes('hello'))).toBe(false);
+  });
+
+  it('replaces an in-flight flash when a second segment lands before the timer fires', async () => {
+    vi.useFakeTimers();
+    try {
+      await saveTranscriptWidgetEnabled(fakeSetLs, true);
+      await bootstrapHud('picker');
+      await showActivePage(getPersona('fact-checker')!);
+      resetTranscript('sess');
+
+      bridge.textContainerUpgrade.mockClear();
+      appendSegment({ speaker: 'other', text: 'first', startedAt: 0, endedAt: 1000 });
+      await Promise.resolve();
+      vi.advanceTimersByTime(1000);
+      appendSegment({ speaker: 'wearer', text: 'second', startedAt: 2000, endedAt: 3000 });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const flashes = hintWrites().filter((c) => c.startsWith('['));
+      expect(flashes.length).toBeGreaterThanOrEqual(2);
+      expect(flashes[flashes.length - 1]).toContain('[wearer]');
+      expect(flashes[flashes.length - 1]).toContain('second');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

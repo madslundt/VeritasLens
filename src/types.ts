@@ -496,6 +496,19 @@ export interface Settings {
    */
   transcriptEnabled: boolean;
   /**
+   * When true, every newly-appended transcript segment briefly flashes in the
+   * active page's bottom hint slot as `[wearer] …` / `[other] …` for a few
+   * seconds before reverting to the default hint. Lets wearers visually
+   * confirm what STT captured each time an analysis fires, without stealing
+   * pixels from the result body.
+   *
+   * Off by default — purely a verification affordance. Independent of
+   * `transcriptEnabled` (the flash is a no-op when transcripts aren't being
+   * captured anyway, so this setting has no effect when transcriptEnabled is
+   * off — the flash subscriber just sees no events).
+   */
+  transcriptWidgetEnabled: boolean;
+  /**
    * When true, the active HUD hides the REC indicator and affordance hint and
    * shows only a small recording dot until the user double-taps for an
    * analysis. Results stay on screen until explicitly dismissed via the menu's
