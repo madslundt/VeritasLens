@@ -214,3 +214,65 @@ export function parseSayMoreResponse(text: string): { extendedSource: string; ex
   const extendedTranslated = clipShort(raw['extendedTranslated'], 240);
   return { extendedSource, extendedTranslated };
 }
+
+// ---------- Wearer-speak (two-way) ----------
+
+/** Inputs for the wearer-speak prompt. The wearer speaks in their own
+ *  language; the LLM transcribes it and translates to the foreign side's
+ *  language so the wearer can read the translation aloud. */
+export interface WearerSpeakArgs {
+  /** The wearer's display language (what they speak in). */
+  wearerLang: LanguageCode;
+  /** Foreign-side BCP-47 short code, derived from the most recent listening
+   *  translation's `sourceLanguage`. Empty / 'unknown' is rejected upstream
+   *  before we get here — the lifecycle gates on having a known target. */
+  targetLangCode: string;
+}
+
+export const WEARER_SPEAK_SCHEMA = {
+  type: 'object',
+  properties: {
+    spoken: {
+      type: 'string',
+      description: "Verbatim transcript of what the wearer said, in the wearer's display language.",
+    },
+    translated: {
+      type: 'string',
+      description: 'Same utterance translated into the target (foreign-side) language.',
+    },
+  },
+  required: ['spoken', 'translated'],
+} as const;
+
+export function buildWearerSpeakPrompt(args: WearerSpeakArgs): string {
+  const wearerName = LANGUAGES[args.wearerLang] ?? 'English';
+  // We pass the code AND, when our LANGUAGES dictionary recognises it, the
+  // human name. When the model knows a code we don't (e.g. "tl" Tagalog),
+  // the code alone still gets the right output language — Gemini doesn't
+  // need our display name to identify a language by ISO code.
+  const knownTarget = (Object.keys(LANGUAGES) as LanguageCode[]).includes(
+    args.targetLangCode as LanguageCode,
+  );
+  const targetHint = knownTarget
+    ? `${args.targetLangCode} (${LANGUAGES[args.targetLangCode as LanguageCode]})`
+    : args.targetLangCode;
+  return (
+    `You are VeritasLens in TRANSLATE/WEARER-SPEAK mode for smart glasses.\n\n` +
+    `The wearer just spoke in ${wearerName}. From the audio, do TWO things:\n\n` +
+    `1. \`spoken\`: verbatim transcript of what the wearer said, in ${wearerName} (≤200 chars; take the latest complete thought if the audio is long).\n` +
+    `2. \`translated\`: \`spoken\` translated naturally into ${targetHint} so the wearer can read it aloud to the other person.\n\n` +
+    `Be conversational and natural — match the social register of the speech (formal / casual / friendly).\n\n` +
+    `Output strict JSON matching the provided schema. No prose outside JSON. ` +
+    `If no clear human speech is detected, set noSpeech=true and return empty strings.`
+  );
+}
+
+/** Parse a wearer-speak response. Defensive — both fields default to empty
+ *  strings on missing data, and the caller falls back to a generic
+ *  "no speech detected" message rather than rendering blank. */
+export function parseWearerSpeakResponse(text: string): { spoken: string; translated: string } {
+  const raw = parseJsonResponse(text);
+  const spoken = clipShort(raw['spoken'], 240);
+  const translated = clipShort(raw['translated'], 240);
+  return { spoken, translated };
+}

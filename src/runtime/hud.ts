@@ -130,6 +130,7 @@ export type HudPage =
   | 'game-save-prompt'
   | 'translation-picker'
   | 'translation-teleprompter'
+  | 'translation-wearer-speak'
   | 'none';
 
 /** Cached starter the wearer most recently picked on the translation-picker
@@ -2243,6 +2244,7 @@ export function resetHudSessionState(): void {
   lastTranslationResult = null;
   lastTranslationStarterIndex = 0;
   activeTranslationStarter = null;
+  wearerSpeakState = 'recording';
   pendingMenuSpinnerFrame = '';
   pendingStatusFrame = '';
   recordingDotEligible = true;
@@ -2436,6 +2438,89 @@ export async function updateTranslationTeleprompterExtended(
  *  the teleprompter for). Lifecycle reads this to build the Say-more prompt. */
 export function getActiveTranslationStarter(): TranslationStarter | null {
   return activeTranslationStarter;
+}
+
+// ============================================================================
+// Wearer-speak (two-way) sub-page
+//
+// The wearer-speak page has two render states, both share the same page id
+// (`'translation-wearer-speak'`) so dispatching stays simple. While
+// recording, the page shows "Speak now…" with a recording dot and a hint
+// telling the wearer how to send manually. After the lifecycle's Gemini
+// call returns, `updateTranslationWearerSpeakResult` swaps the body in
+// place via upgradeText so there's no flicker.
+// ============================================================================
+
+function buildTranslationWearerSpeakPage(
+  state: 'recording' | 'result',
+  result: { spoken: string; translated: string } | null,
+): RebuildPageContainer {
+  // Recording state: prominent "Speak now…" prompt; foreign-language line
+  // (the translation) lands here once the call returns.
+  const bodyText = state === 'recording'
+    ? 'Speak now…'
+    : (result?.translated || '(no speech detected)');
+  // Result state: the wearer's own utterance shows below as confirmation
+  // ("did I hear you right?"); empty during recording.
+  const echoText = state === 'recording'
+    ? ''
+    : (result?.spoken || '');
+  const body = new TextContainerProperty({
+    containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 4,
+    width: SCREEN_W - 32, height: 180, borderWidth: 0, paddingLength: 4,
+    content: bodyText, isEventCapture: 1,
+  });
+  const echo = new TextContainerProperty({
+    containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 188,
+    width: SCREEN_W - 32, height: 68, borderWidth: 0, paddingLength: 4,
+    content: echoText, isEventCapture: 0,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.activeHint, containerName: NAME.activeHint, xPosition: 16, yPosition: 260,
+    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
+    content: state === 'recording'
+      ? 'Double-tap: send · Tap: cancel'
+      : 'Tap: menu · Double-tap: speak again',
+    isEventCapture: 0,
+  });
+  const listObject: ListContainerProperty[] = [];
+  const textObject = [body, echo, hint];
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers(listObject, textObject),
+    listObject,
+    textObject,
+  });
+}
+
+let wearerSpeakState: 'recording' | 'result' = 'recording';
+
+/** Render state of the wearer-speak page. Lifecycle reads this to decide
+ *  whether a single-click should open the menu (result) or cancel (recording),
+ *  and whether a double-tap should send-now (recording) or re-record (result). */
+export function getWearerSpeakState(): 'recording' | 'result' {
+  return wearerSpeakState;
+}
+
+export async function showTranslationWearerSpeakPage(): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showTranslationWearerSpeakPage().');
+  wearerSpeakState = 'recording';
+  recordingDotEligible = true;
+  const ok = await getBridge().rebuildPageContainer(buildTranslationWearerSpeakPage('recording', null));
+  if (!ok) throw new Error('rebuildPageContainer (translation-wearer-speak) failed.');
+  currentPage = 'translation-wearer-speak';
+}
+
+/** Swap the wearer-speak page from recording state to result state via
+ *  in-place upgradeText calls. */
+export async function updateTranslationWearerSpeakResult(
+  spoken: string,
+  translated: string,
+): Promise<void> {
+  if (currentPage !== 'translation-wearer-speak') return;
+  wearerSpeakState = 'result';
+  await upgradeText(CONTAINER.reason, NAME.reason, translated || '(no speech detected)');
+  await upgradeText(CONTAINER.activeList, NAME.activeList, spoken || '');
+  await upgradeText(CONTAINER.activeHint, NAME.activeHint, 'Tap: menu · Double-tap: speak again');
 }
 
 export function _resetHudBootstrapForTesting(): void {

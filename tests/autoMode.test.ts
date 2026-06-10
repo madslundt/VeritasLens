@@ -122,21 +122,71 @@ describe('autoMode watcher', () => {
     expect(trigger).not.toHaveBeenCalled();
   });
 
-  it('skips firing while isAnalyzing is true and requires a fresh arm cycle afterwards', () => {
+  it('queues a single catch-up fire when an utterance ends while a prior analysis is in flight', () => {
+    // Replaces the v2 "skip + require fresh arm" semantics. v3 catch-up:
+    // when an utterance hits the silence threshold during an in-flight
+    // analysis, set pendingFire instead of dropping. As soon as the watcher
+    // observes `isAnalyzing` false, the next tick drains the pending fire.
+    // Critical for listen-in mode so back-to-back utterances aren't silently
+    // lost — the lifecycle's `lastAnalysisByteOffset` makes sure the
+    // catch-up payload covers the audio captured during the missed window.
     startAutoModeWatcher(buffer, defaultConfig());
     isAnalyzing = true;
     feedVoiceTicks(8);
-    feedSilenceTicks(10); // threshold met but analysis in flight → no fire
+    feedSilenceTicks(10); // threshold met but analysis in flight → defer
     expect(trigger).not.toHaveBeenCalled();
-    // After the analysis finishes, the state must have reset to idle — a
-    // burst of pure silence must NOT retroactively fire (that would be a
-    // false positive without any new utterance).
+    // Now the analysis releases. The very next tick should drain the
+    // pending fire — no new utterance required.
     isAnalyzing = false;
+    feedSilenceTicks(1);
+    expect(trigger).toHaveBeenCalledTimes(1);
+    // Subsequent silence must NOT fire again (only one catch-up per
+    // missed utterance — no double-fire on each idle tick).
     feedSilenceTicks(20);
-    expect(trigger).not.toHaveBeenCalled();
-    // A new utterance fires fresh.
+    expect(trigger).toHaveBeenCalledTimes(1);
+    // A fresh utterance after catch-up still fires normally.
     feedVoiceTicks(8);
     feedSilenceTicks(10);
+    expect(trigger).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces multiple in-flight utterances into a single catch-up fire', () => {
+    // If three utterances all complete while an analysis is in flight, the
+    // watcher must NOT fire three catch-ups when the analysis releases —
+    // it must coalesce them into one. The lifecycle's byte-offset cropping
+    // hands the one catch-up call all the audio captured during the missed
+    // window, which is the right behaviour.
+    startAutoModeWatcher(buffer, defaultConfig());
+    isAnalyzing = true;
+    // Utterance 1
+    feedVoiceTicks(8);
+    feedSilenceTicks(10);
+    // Utterance 2
+    feedVoiceTicks(8);
+    feedSilenceTicks(10);
+    // Utterance 3
+    feedVoiceTicks(8);
+    feedSilenceTicks(10);
+    expect(trigger).not.toHaveBeenCalled();
+    isAnalyzing = false;
+    feedSilenceTicks(1);
     expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears pending catch-up on stopAutoModeWatcher', () => {
+    // A pending fire must not survive a session tear-down: if the watcher
+    // is stopped (session exit, settings toggle), no spurious catch-up
+    // should fire when isAnalyzing flips false after restart.
+    startAutoModeWatcher(buffer, defaultConfig());
+    isAnalyzing = true;
+    feedVoiceTicks(8);
+    feedSilenceTicks(10); // pending fire queued
+    stopAutoModeWatcher();
+    isAnalyzing = false;
+    // Restart in a fresh session; first tick must not fire from the prior
+    // queued state.
+    startAutoModeWatcher(buffer, defaultConfig());
+    feedSilenceTicks(5);
+    expect(trigger).not.toHaveBeenCalled();
   });
 });

@@ -54,6 +54,9 @@ import {
   showTranslationPickerPage,
   showTranslationTeleprompterPage,
   updateTranslationTeleprompterExtended,
+  showTranslationWearerSpeakPage,
+  updateTranslationWearerSpeakResult,
+  getWearerSpeakState,
   getLastTranslationResult,
   hasCachedTranslationResult,
   hasActiveTranslationStarter,
@@ -99,8 +102,11 @@ import {
 } from '@/personas/meetingPrep';
 import {
   SAY_MORE_SCHEMA,
+  WEARER_SPEAK_SCHEMA,
   buildSayMorePrompt,
+  buildWearerSpeakPrompt,
   parseSayMoreResponse,
+  parseWearerSpeakResponse,
 } from '@/personas/translation';
 import {
   activePersona,
@@ -224,6 +230,25 @@ let lastAnalysisByteOffset = 0;
  * skips the speculative call to avoid spending tokens on a cold guess).
  */
 let lastAutoWinnerInSession: string | null = null;
+
+/**
+ * Wearer-speak (two-way) state. Set when the wearer enters the wearer-speak
+ * sub-page from the Translate menu; consumed by the autoMode trigger
+ * callback so the next speech→silence boundary fires the wearer-direction
+ * call instead of a listening-direction translation.
+ *
+ * `startByte` is the buffer's `bytesProduced` when the page opened — used
+ * to crop the audio to "what the wearer said since pressing Speak →" so
+ * pre-existing buffer content (the other person's prior utterances) isn't
+ * mis-attributed to the wearer.
+ *
+ * `timeoutTimer` is a 12-second safety net: if VAD doesn't detect end-of-
+ * utterance (e.g. wearer trailed off too gradually or the room is very
+ * noisy), force the fire anyway so the page can't hang forever.
+ */
+let wearerSpeakActive = false;
+let wearerSpeakStartByte = 0;
+let wearerSpeakTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function isHudRunning(): boolean { return running; }
 
@@ -467,6 +492,18 @@ function handleEvent(event: EvenHubEvent): void {
       cancelGame().catch((err) => logDispatchError('cancel-game-fail', err));
       return;
     }
+    if (page === 'translation-wearer-speak') {
+      // Recording: double-tap forces an immediate send (manual override for
+      // when VAD didn't trigger fast enough OR when the wearer is in a noisy
+      // environment and wants to skip the silence-wait). Result: double-tap
+      // re-records — same restart-the-session semantics as elsewhere.
+      if (getWearerSpeakState() === 'recording') {
+        runWearerSpeakAnalyze().catch((err) => logDispatchError('wearer-speak-manual-fail', err));
+      } else {
+        startWearerSpeak().catch((err) => logDispatchError('wearer-speak-restart-fail', err));
+      }
+      return;
+    }
     if (analyzing) {
       // Cancel the in-flight analysis. Null `inflight` right here (in addition
       // to the controller-identity check in runAnalysis's finally) so the
@@ -496,6 +533,7 @@ function handleEvent(event: EvenHubEvent): void {
   else if (page === 'game-save-prompt') handleGameSavePromptEvent(gesture).catch((err) => logDispatchError('game-save-prompt-fail', err));
   else if (page === 'translation-picker') handleTranslationPickerGesture(gesture).catch((err) => logDispatchError('translation-picker-fail', err));
   else if (page === 'translation-teleprompter') handleTranslationTeleprompterGesture(gesture).catch((err) => logDispatchError('translation-teleprompter-fail', err));
+  else if (page === 'translation-wearer-speak') handleTranslationWearerSpeakGesture(gesture).catch((err) => logDispatchError('translation-wearer-speak-fail', err));
   // game-loading absorbs single-tap gestures — only double-tap (cancel) acts.
 }
 
@@ -583,6 +621,21 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
   // now). scrollActiveReason swaps claims when multi-claim, otherwise
   // paginates a long reason.
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    // Translate-lens shortcut: when a translation result is on screen AND the
+    // wearer is in converse mode (replyStarters non-empty), single-tap goes
+    // straight to the picker instead of through menu → Reply…. Saves three
+    // taps per reply during live conversation. Listen-in mode's starters are
+    // always empty, so the guard falls through to the menu — which is the
+    // right behaviour because listen-in wearers aren't trying to pick a
+    // reply. The menu is still reachable from the picker's own single-tap so
+    // History / Exit / Back / Translate stay one tap away.
+    if (activePersona() === 'translation' && hasCachedTranslationResult()) {
+      const r = getLastTranslationResult();
+      if (r && r.replyStarters.length > 0) {
+        await showTranslationPickerPage(r);
+        return;
+      }
+    }
     await openMenuForCurrentContext();
     return;
   }
@@ -630,13 +683,47 @@ function buildTranslateMenuItems(): MenuItem[] {
     && hasCachedTranslationResult()
     && page !== 'translation-picker'
     && page !== 'translation-teleprompter'
+    && page !== 'translation-wearer-speak'
   ) {
     items.push({ id: 'translation-reply', label: 'Reply…' });
+  }
+  // Speak → enters wearer-direction mode. Requires a cached translation
+  // result so we know which foreign language to translate INTO. Hide on
+  // pages where the wearer is already inside the wearer-speak flow, and on
+  // the picker / teleprompter where the wearer's intent is clearly to use
+  // a starter rather than free-form speech.
+  if (isTranslate
+    && resolveWearerSpeakTarget() !== null
+    && page !== 'translation-picker'
+    && page !== 'translation-teleprompter'
+    && page !== 'translation-wearer-speak'
+  ) {
+    items.push({ id: 'translation-speak', label: 'Speak →' });
   }
   if (page === 'translation-teleprompter' && hasActiveTranslationStarter()) {
     items.push({ id: 'translation-say-more', label: 'Say more →' });
   }
+  // From the wearer-speak result page, offer a quick re-record path so the
+  // wearer can refine without backing out through the menu chain.
+  if (page === 'translation-wearer-speak' && getWearerSpeakState() === 'result') {
+    items.push({ id: 'translation-speak-again', label: 'Speak again →' });
+  }
   return items;
+}
+
+/** Resolve the foreign-side language code the wearer-direction call should
+ *  translate INTO. Prefers the most recent listening translation's detected
+ *  language; falls back to the first entry of the user's source-language
+ *  allow-list when that's not 'auto'. Returns null when no target can be
+ *  resolved — the menu uses this to hide Speak → in setup-incomplete states. */
+function resolveWearerSpeakTarget(): string | null {
+  const cached = getLastTranslationResult();
+  if (cached && cached.sourceLanguage && cached.sourceLanguage !== 'unknown') {
+    return cached.sourceLanguage;
+  }
+  const allow = settings().translationSourceLanguages;
+  if (Array.isArray(allow) && allow.length > 0 && allow[0]) return allow[0];
+  return null;
 }
 
 async function handleTranslationPickerGesture(g: Gesture): Promise<void> {
@@ -720,6 +807,11 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
       }
       case 'translation-say-more': {
         await runSayMore();
+        break;
+      }
+      case 'translation-speak':
+      case 'translation-speak-again': {
+        await startWearerSpeak();
         break;
       }
     }
@@ -838,10 +930,18 @@ function syncAutoModeWatcher(): void {
       getRmsFloor: () => settings().voiceGateRmsFloor,
       isAnalyzing: () => analyzing,
       trigger: () => {
-        // Same entry point as a double-tap. Errors land in the debug ring
-        // via logDispatchError so a transient API failure can't crash the
-        // watcher's setInterval callback chain.
-        runAnalysis().catch((err) => logDispatchError('auto-mode-trigger-fail', err));
+        // Branch on wearer-speak state. When the wearer is on the
+        // wearer-speak page in recording mode, the next speech-end boundary
+        // is THEIR utterance ending — fire the wearer-direction call
+        // instead of a listening translation. autoMode + Translate +
+        // wearer-speak naturally composes via this branch. Errors land in
+        // the debug ring via logDispatchError so a transient API failure
+        // can't crash the watcher's setInterval callback chain.
+        if (wearerSpeakActive) {
+          runWearerSpeakAnalyze().catch((err) => logDispatchError('wearer-speak-auto-fail', err));
+        } else {
+          runAnalysis().catch((err) => logDispatchError('auto-mode-trigger-fail', err));
+        }
       },
     });
     void setAutoModeIndicator(true);
@@ -1841,6 +1941,145 @@ async function runSayMore(): Promise<void> {
       analyzing = false;
       inflight = null;
     }
+  }
+}
+
+/** Single-tap handler for the wearer-speak page. Recording → cancel back to
+ *  the active page (matches "Tap: cancel" hint); Result → open the menu
+ *  (matches "Tap: menu", surfaces Speak again → / Back / etc.). */
+async function handleTranslationWearerSpeakGesture(g: Gesture): Promise<void> {
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    if (getWearerSpeakState() === 'recording') {
+      await cancelWearerSpeak();
+      await restoreActivePage();
+    } else {
+      await openMenuForCurrentContext();
+    }
+  }
+}
+
+/** Entry point for the Translate → Speak → menu item AND for double-tap on
+ *  the result state of the wearer-speak page. Opens the wearer-speak page
+ *  in recording mode, snapshots the buffer's monotonic cursor so the
+ *  subsequent call only sends audio captured AFTER the page opened, and
+ *  arms a 12 s safety timeout in case VAD never fires (very gradual trail-
+ *  off, noisy room). The actual fire happens via the autoMode trigger
+ *  branch above OR via manual double-tap on the recording page. */
+async function startWearerSpeak(): Promise<void> {
+  if (!buffer) return;
+  // Resolve target language up-front so we fail fast if the wearer somehow
+  // got to this entry without a cached translation result (defensive — the
+  // menu item gates on this too, but a race could let it slip).
+  const targetLangCode = resolveWearerSpeakTarget();
+  if (!targetLangCode) {
+    await flashMenuHint('Translate one phrase first', 3000);
+    return;
+  }
+  wearerSpeakActive = true;
+  wearerSpeakStartByte = buffer.bytesProduced;
+  if (wearerSpeakTimeoutTimer) clearTimeout(wearerSpeakTimeoutTimer);
+  wearerSpeakTimeoutTimer = setTimeout(() => {
+    if (wearerSpeakActive) {
+      void runWearerSpeakAnalyze().catch((err) =>
+        logDispatchError('wearer-speak-timeout-fail', err),
+      );
+    }
+  }, 12_000);
+  await showTranslationWearerSpeakPage();
+}
+
+/** Fire the wearer-direction Gemini call. Reads the audio captured since
+ *  `wearerSpeakStartByte` so pre-existing buffer content (the OTHER side's
+ *  prior speech) isn't mis-attributed to the wearer. Idempotent — if the
+ *  flag is already cleared (double-fire from VAD + timeout race) it's a
+ *  no-op. Uses the same `inflight` / `analyzing` gates as `runAnalysis` /
+ *  `runSayMore` so concurrent fires are coordinated through one path. */
+async function runWearerSpeakAnalyze(): Promise<void> {
+  if (!wearerSpeakActive) return;
+  if (!buffer) return;
+  wearerSpeakActive = false;
+  if (wearerSpeakTimeoutTimer) {
+    clearTimeout(wearerSpeakTimeoutTimer);
+    wearerSpeakTimeoutTimer = null;
+  }
+  const targetLangCode = resolveWearerSpeakTarget();
+  if (!targetLangCode) {
+    pushDebugEvent({
+      label: 'wearer-speak-fail',
+      detail: 'no target language resolved at fire time',
+    });
+    return;
+  }
+  const s = settings();
+  if (!activeApiKey()) {
+    pushDebugEvent({
+      label: 'wearer-speak-fail',
+      detail: 'no api key configured',
+    });
+    return;
+  }
+  // Crop the audio to "since the wearer pressed Speak →". This prevents the
+  // call from re-translating the other person's earlier utterances (which
+  // would happen if we sent the full ring buffer).
+  const linearPcm = buffer.linearPcmSince(wearerSpeakStartByte);
+  if (linearPcm.length < 2) {
+    // No audio captured — nothing to translate. Show an empty-state result
+    // so the wearer sees the page transitioned rather than appearing stuck.
+    await updateTranslationWearerSpeakResult('', '');
+    return;
+  }
+  const wav = encodePcmToWav(linearPcm, {
+    sampleRate: buffer.sampleRate,
+    bitsPerSample: buffer.bitsPerSample,
+    channels: buffer.channels,
+  });
+
+  inflight?.abort();
+  const controller = new AbortController();
+  inflight = controller;
+  analyzing = true;
+
+  const prompt = buildWearerSpeakPrompt({
+    wearerLang: s.responseLanguage,
+    targetLangCode,
+  });
+
+  try {
+    const rawText = await callLens({
+      wav,
+      prompt,
+      schema: WEARER_SPEAK_SCHEMA,
+      signal: controller.signal,
+    });
+    if (controller.signal.aborted) return;
+    const parsed = parseWearerSpeakResponse(rawText);
+    if (currentHudPage() === 'translation-wearer-speak') {
+      await updateTranslationWearerSpeakResult(parsed.spoken, parsed.translated);
+    }
+  } catch (err) {
+    if ((err as Error).name === 'AbortError') return;
+    pushDebugEvent({
+      label: 'wearer-speak-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+    if (currentHudPage() === 'translation-wearer-speak') {
+      await updateTranslationWearerSpeakResult('', '');
+    }
+  } finally {
+    if (inflight === controller) {
+      analyzing = false;
+      inflight = null;
+    }
+  }
+}
+
+/** Tear down a wearer-speak session that hasn't fired yet (e.g. wearer
+ *  single-tapped to cancel). Idempotent. */
+async function cancelWearerSpeak(): Promise<void> {
+  wearerSpeakActive = false;
+  if (wearerSpeakTimeoutTimer) {
+    clearTimeout(wearerSpeakTimeoutTimer);
+    wearerSpeakTimeoutTimer = null;
   }
 }
 

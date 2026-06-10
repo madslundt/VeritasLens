@@ -7,6 +7,8 @@ import {
   buildTranslationPrompt,
   buildSayMorePrompt,
   parseSayMoreResponse,
+  buildWearerSpeakPrompt,
+  parseWearerSpeakResponse,
   getTranslationSchema,
 } from '../src/personas/translation';
 import { toStrictSchema } from '../src/llm/openai';
@@ -1205,5 +1207,40 @@ describe('say-more expansion', () => {
     const parsed = parseSayMoreResponse(JSON.stringify({}));
     expect(parsed.extendedSource).toBe('');
     expect(parsed.extendedTranslated).toBe('');
+  });
+});
+
+describe('wearer-speak (two-way)', () => {
+  it('buildWearerSpeakPrompt embeds the wearer language name and the target code', () => {
+    const prompt = buildWearerSpeakPrompt({ wearerLang: 'en', targetLangCode: 'es' });
+    expect(prompt).toContain('English');
+    expect(prompt).toContain('es (Español)');
+  });
+
+  it('buildWearerSpeakPrompt uses the raw code when our LANGUAGES dict does not know it', () => {
+    // Tagalog is not in our LANGUAGES dict; Gemini still knows the code.
+    const prompt = buildWearerSpeakPrompt({ wearerLang: 'en', targetLangCode: 'tl' });
+    expect(prompt).toContain('tl');
+    expect(prompt).not.toContain('tl (');
+  });
+
+  it('buildWearerSpeakPrompt names a non-English wearer language too', () => {
+    const prompt = buildWearerSpeakPrompt({ wearerLang: 'da', targetLangCode: 'es' });
+    expect(prompt).toContain('Dansk');
+  });
+
+  it('parseWearerSpeakResponse extracts both fields', () => {
+    const parsed = parseWearerSpeakResponse(JSON.stringify({
+      spoken: 'Where is the bus stop?',
+      translated: '¿Dónde está la parada del autobús?',
+    }));
+    expect(parsed.spoken).toContain('bus stop');
+    expect(parsed.translated).toContain('autobús');
+  });
+
+  it('parseWearerSpeakResponse defaults missing fields to empty strings', () => {
+    const parsed = parseWearerSpeakResponse(JSON.stringify({}));
+    expect(parsed.spoken).toBe('');
+    expect(parsed.translated).toBe('');
   });
 });

@@ -56,6 +56,16 @@ let lastByteOffset = 0;
 let voicedMs = 0;
 let silenceMs = 0;
 let state: WatcherState = 'idle';
+/**
+ * When `true`, an utterance completed its silence threshold while a previous
+ * analysis was still in flight. Cleared and fired the next time `tick()`
+ * observes `isAnalyzing() === false`. Only one pending fire is held — if a
+ * third utterance arrives before the in-flight call returns it coalesces
+ * onto the existing pending fire rather than queueing N deep. The catch-up
+ * call uses `lastAnalysisByteOffset` on the lifecycle side, so the audio
+ * captured during the missed window is what gets sent.
+ */
+let pendingFire = false;
 
 /**
  * Begin polling. Idempotent — repeated calls with the same buffer reset the
@@ -75,6 +85,7 @@ export function startAutoModeWatcher(buffer: PcmRingBuffer, config: AutoModeConf
   voicedMs = 0;
   silenceMs = 0;
   state = 'idle';
+  pendingFire = false;
   timer = setInterval(tick, TICK_MS);
 }
 
@@ -88,6 +99,7 @@ export function stopAutoModeWatcher(): void {
   voicedMs = 0;
   silenceMs = 0;
   state = 'idle';
+  pendingFire = false;
 }
 
 /** True iff the watcher is currently polling. Exposed for the lifecycle's
@@ -108,6 +120,19 @@ function tick(): void {
   const buffer = activeBuffer;
   const config = activeConfig;
   if (!buffer || !config) return;
+
+  // Catch-up fire: if an utterance completed during a previous analysis,
+  // drain it as soon as `analyzing` flips false. Done BEFORE the new-bytes
+  // read so the catch-up always fires within one tick of the prior call
+  // releasing, not behind the next utterance's classification work. The
+  // lifecycle uses `lastAnalysisByteOffset` to crop the catch-up's audio
+  // to "everything captured since the previous call's snapshot", so the
+  // missed window is what gets sent.
+  if (pendingFire && !config.isAnalyzing()) {
+    pendingFire = false;
+    config.trigger();
+    return;
+  }
 
   const sincePcm = buffer.linearPcmSince(lastByteOffset);
   lastByteOffset = buffer.bytesProduced;
@@ -154,12 +179,22 @@ function onSilence(config: AutoModeConfig): void {
 
   // Threshold met. Reset the state machine BEFORE firing so the next
   // utterance must build up start+silence from scratch ("continuous
-  // re-arm"). If an analysis is already in flight, skip the fire — the
-  // wearer will get one analysis per utterance, not two for one.
+  // re-arm").
   state = 'idle';
   voicedMs = 0;
   silenceMs = 0;
-  if (config.isAnalyzing()) return;
+  // If an analysis is already in flight, queue exactly one catch-up fire
+  // instead of dropping. The next tick that observes `analyzing` false
+  // will drain it via the check at the top of `tick()`. Coalesces
+  // multiple missed utterances into a single catch-up — the lifecycle's
+  // `lastAnalysisByteOffset` ensures the catch-up payload covers the full
+  // missed window. Bounds queue depth at 1 so a stuck in-flight call
+  // can't snowball into a flood of catch-up fires when it finally
+  // resolves.
+  if (config.isAnalyzing()) {
+    pendingFire = true;
+    return;
+  }
   config.trigger();
 }
 
