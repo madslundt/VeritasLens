@@ -1,7 +1,7 @@
 // src/personas/trivia.ts
 import type { LensResult, LanguageCode, TriviaClaim } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
 
 const TRIVIA_BASE_PROMPT = `You are VeritasLens, a trivia assistant for smart glasses.
 
@@ -16,7 +16,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildTriviaPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${TRIVIA_BASE_PROMPT}\n\nLANGUAGE: Write each \`question\`, \`answer\`, and \`description\` in ${langName}. \`quote\` stays in the original spoken language.`;
+  return `${TRIVIA_BASE_PROMPT}\n\nLANGUAGE: Write each \`question\`, \`answer\`, and \`description\` in ${langName}. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -26,8 +26,9 @@ const ITEM_SCHEMA = {
     question: { type: 'string', description: 'The trivia question as asked (max 140 chars).' },
     answer: { type: 'string', description: 'The correct answer (max 60 chars).' },
     description: { type: 'string', description: 'One interesting supporting fact (max 180 chars).' },
+    confidence: CONFIDENCE_SCHEMA_PROP,
   },
-  required: ['quote', 'question', 'answer', 'description'],
+  required: ['quote', 'question', 'answer', 'description', 'confidence'],
 } as const;
 
 export const TRIVIA_SCHEMA = {
@@ -41,12 +42,17 @@ export const TRIVIA_SCHEMA = {
 export function parseTriviaResponse(text: string): LensResult {
   const raw = parseJsonResponse(text);
   const items = readClaimsArray(raw);
-  const claims: TriviaClaim[] = items.map((c) => ({
-    quote: coerceQuote(c['quote']),
-    question: trimTo(typeof c['question'] === 'string' ? c['question'] : '', 140),
-    answer: trimTo(typeof c['answer'] === 'string' ? c['answer'] : '', 60),
-    description: trimTo(typeof c['description'] === 'string' ? c['description'] : '', 180),
-  }));
+  const claims: TriviaClaim[] = items.map((c) => {
+    const confidence = coerceConfidence(c['confidence']);
+    const claim: TriviaClaim = {
+      quote: coerceQuote(c['quote']),
+      question: trimTo(typeof c['question'] === 'string' ? c['question'] : '', 140),
+      answer: trimTo(typeof c['answer'] === 'string' ? c['answer'] : '', 60),
+      description: trimTo(typeof c['description'] === 'string' ? c['description'] : '', 180),
+    };
+    if (confidence) claim.confidence = confidence;
+    return claim;
+  });
   if (claims.length === 0) {
     claims.push({ quote: '', question: '', answer: '', description: '' });
   }

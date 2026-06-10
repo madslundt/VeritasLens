@@ -14,6 +14,8 @@
 import { settings } from '@/state/store';
 import {
   callLens as callGeminiLens,
+  callLensStream as callGeminiLensStream,
+  GOOGLE_SEARCH_TOOLS,
   fetchAvailableModels as fetchGeminiModels,
   runSelfTest as runGeminiSelfTest,
   MAX_RETRIES,
@@ -23,12 +25,14 @@ import {
 } from './gemini';
 import {
   callOpenAiLens,
+  callOpenAiLensStream,
   fetchOpenAiModels,
   runSelfTest as runOpenAiSelfTest,
   transcribeAudio,
 } from './openai';
 import {
   callLens as callClaudeLens,
+  callLensStream as callClaudeLensStream,
   fetchAvailableModels as fetchClaudeModels,
   runSelfTest as runClaudeSelfTest,
 } from './claude';
@@ -44,7 +48,7 @@ import {
   type SttHost,
 } from '@/types';
 
-export { MAX_RETRIES, parseRetryAfterMs, parseGoogleRetryDelayMs };
+export { MAX_RETRIES, parseRetryAfterMs, parseGoogleRetryDelayMs, GOOGLE_SEARCH_TOOLS };
 export { callGame } from './gameClient';
 export type { CallGameOptions } from './gameClient';
 
@@ -59,6 +63,31 @@ export interface CallLensOptions extends Omit<GeminiCallLensOptions, 'apiKey' | 
   apiKey?: string;
   /** Provider-specific model id. When omitted, the active provider's stored model is used. */
   model?: string;
+}
+
+/**
+ * Streaming variant of `CallLensOptions`. Adds the partial / no-speech hooks
+ * every provider's SSE path exposes — Gemini via `:streamGenerateContent`,
+ * OpenAI-compatible hosts via `stream: true` on `/chat/completions`, and
+ * Anthropic via `stream: true` on `/v1/messages`. All three feed the shared
+ * `StreamingJsonParser`, so the HUD's partial-render layer behaves the same
+ * regardless of provider.
+ */
+export interface CallLensStreamOptions extends CallLensOptions {
+  /**
+   * Fires when a complete object inside the first top-level array of the
+   * response is parsed. `key` is the array's property name (`claims`,
+   * `questions`, `starters`, …) so the caller knows which schema slot the
+   * partial fills.
+   */
+  onPartialClaim?: (claim: Record<string, unknown>, key: string) => void;
+  /**
+   * Fires when a top-level scalar property (string / number / boolean / null)
+   * finishes parsing — once per key. Lets shapes like `translation`
+   * (sourceText/translatedText) render incrementally.
+   */
+  onPartialField?: (name: string, value: string | number | boolean | null) => void;
+  onNoSpeech?: () => void;
 }
 
 /**
@@ -162,6 +191,90 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     schema: opts.schema,
     signal: opts.signal,
     onRetry: opts.onRetry,
+    tools: opts.tools,
+  });
+}
+
+/**
+ * Streaming dispatcher. Routes to the active provider's SSE implementation:
+ *   - Gemini: `:streamGenerateContent?alt=sse`
+ *   - OpenAI-compatible (OpenAI / Groq / OpenRouter / DeepSeek / Perplexity):
+ *     `/chat/completions` with `stream: true`. STT happens upfront, same as
+ *     the non-streaming path.
+ *   - Anthropic: `/v1/messages` with `stream: true`. The tool-input JSON is
+ *     streamed via `input_json_delta` and accumulated. STT is upstream of
+ *     this module (the facade transcribes via the configured `sttHost`).
+ *
+ * All three feed the same `StreamingJsonParser` and return the full
+ * accumulated text on completion, so the caller's `parse()` runs unchanged.
+ */
+export async function callLensStream(opts: CallLensStreamOptions): Promise<string> {
+  const s = settings();
+  if (s.provider === 'claude') {
+    const sttHost: SttHost = s.sttHost;
+    const sttApiKey = s.openaiApiKeys[sttHost] ?? '';
+    if (!sttApiKey) {
+      throw new Error(
+        `Add a ${openaiHostLabel(sttHost)} API key for transcription before using Anthropic.`,
+      );
+    }
+    const sttModel = s.sttModel || STT_MODELS_BY_HOST[sttHost][0];
+    const transcript = await transcribeAudio({
+      apiKey: sttApiKey,
+      baseUrl: sttHost,
+      model: sttModel,
+      wav: opts.wav,
+      signal: opts.signal,
+    });
+    return callClaudeLensStream({
+      apiKey: opts.apiKey ?? s.claudeApiKey,
+      model: (opts.model as ClaudeModel | undefined) ?? s.claudeModel,
+      transcript,
+      prompt: opts.prompt,
+      schema: opts.schema,
+      signal: opts.signal,
+      onRetry: opts.onRetry,
+      onPartialClaim: opts.onPartialClaim,
+      onPartialField: opts.onPartialField,
+      onNoSpeech: opts.onNoSpeech,
+    });
+  }
+  if (s.provider === 'openai-compatible') {
+    const chatHost = s.openaiBaseUrl;
+    const stt = resolveStt(chatHost);
+    if (stt.isCrossHost && !stt.transcribeApiKey) {
+      throw new Error(
+        `Add a ${openaiHostLabel(stt.transcribeBaseUrl)} API key for transcription before using ${openaiHostLabel(chatHost)}.`,
+      );
+    }
+    return callOpenAiLensStream({
+      apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
+      baseUrl: chatHost,
+      model: opts.model ?? s.openaiModel,
+      transcribeModel: stt.transcribeModel,
+      transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
+      transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
+      wav: opts.wav,
+      prompt: opts.prompt,
+      schema: opts.schema,
+      signal: opts.signal,
+      onRetry: opts.onRetry,
+      onPartialClaim: opts.onPartialClaim,
+      onPartialField: opts.onPartialField,
+      onNoSpeech: opts.onNoSpeech,
+    });
+  }
+  return callGeminiLensStream({
+    apiKey: opts.apiKey ?? s.geminiApiKey,
+    model: (opts.model as GeminiModel | undefined) ?? s.geminiModel,
+    wav: opts.wav,
+    prompt: opts.prompt,
+    schema: opts.schema,
+    signal: opts.signal,
+    onRetry: opts.onRetry,
+    tools: opts.tools,
+    onPartialClaim: opts.onPartialClaim,
+    onNoSpeech: opts.onNoSpeech,
   });
 }
 

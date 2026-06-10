@@ -1,7 +1,7 @@
 // src/personas/devilsAdvocate.ts
 import type { DevilsAdvocateClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
 
 const DEVILS_ADVOCATE_PROMPT = `You are VeritasLens, a real-time analysis assistant for smart glasses.
 
@@ -20,7 +20,8 @@ export function buildDevilsAdvocatePrompt(lang: LanguageCode): string {
   return (
     `${DEVILS_ADVOCATE_PROMPT}\n\n` +
     `LANGUAGE: Write counterpoint and rationale in ${langName}. ` +
-    `The quote must stay in the original spoken language.`
+    `The quote must stay in the original spoken language.\n\n` +
+    `CONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`
   );
 }
 
@@ -30,8 +31,9 @@ const CLAIM_ITEM_SCHEMA = {
     quote: { type: 'string', description: 'Verbatim audio snippet (max 140 chars).' },
     counterpoint: { type: 'string', description: 'Strongest counter in one sentence (max 160 chars).' },
     rationale: { type: 'string', description: '2–3 sentences justifying the counter (max 280 chars).' },
+    confidence: CONFIDENCE_SCHEMA_PROP,
   },
-  required: ['quote', 'counterpoint', 'rationale'],
+  required: ['quote', 'counterpoint', 'rationale', 'confidence'],
 } as const;
 
 export const DEVILS_ADVOCATE_SCHEMA = {
@@ -50,11 +52,16 @@ export const DEVILS_ADVOCATE_SCHEMA = {
 export function parseDevilsAdvocateResponse(text: string): LensResult {
   const raw = parseJsonResponse(text);
   const items = readClaimsArray(raw).slice(0, 1);
-  const claims: DevilsAdvocateClaim[] = items.map((c) => ({
-    quote: coerceQuote(c['quote']),
-    counterpoint: trimTo(typeof c['counterpoint'] === 'string' ? c['counterpoint'] : '', 160),
-    rationale: trimTo(typeof c['rationale'] === 'string' ? c['rationale'] : '', 280),
-  }));
+  const claims: DevilsAdvocateClaim[] = items.map((c) => {
+    const confidence = coerceConfidence(c['confidence']);
+    const claim: DevilsAdvocateClaim = {
+      quote: coerceQuote(c['quote']),
+      counterpoint: trimTo(typeof c['counterpoint'] === 'string' ? c['counterpoint'] : '', 160),
+      rationale: trimTo(typeof c['rationale'] === 'string' ? c['rationale'] : '', 280),
+    };
+    if (confidence) claim.confidence = confidence;
+    return claim;
+  });
   if (claims.length === 0) {
     claims.push({ quote: '', counterpoint: '', rationale: '' });
   }

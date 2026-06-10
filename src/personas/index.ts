@@ -25,6 +25,20 @@ import { settings } from '@/state/store';
 
 export type PersonaId = string;
 
+/**
+ * Optional grounding capability a lens can opt into. When set, the runtime
+ * forwards a `tools` array to Gemini so the model can resolve check-worthy
+ * claims against fresh web results instead of from training memory.
+ *
+ * `google_search` enables the GoogleSearch tool on Gemini 2.x. Adds ~500ms–1s
+ * to wall-clock per call; restricted to lenses where factual freshness is the
+ * point (fact-check, stats-check, trivia, devil's advocate). Sentiment, eli5,
+ * fallacy, bias, key questions, and translation are deliberately off — they
+ * are interpretive, not retrieval-bound, so grounding wouldn't sharpen them
+ * and would just spend latency.
+ */
+export type LensGrounding = 'google_search';
+
 export interface Persona {
   id: PersonaId;
   name: string;
@@ -35,6 +49,8 @@ export interface Persona {
   /** Gemini responseSchema — opaque to the runtime, forwarded to the API. */
   schema: unknown;
   parse: (text: string) => LensResult;
+  /** Web-grounding capability. Omit when the lens is interpretive. */
+  grounding?: LensGrounding;
   builtin: true;
 }
 
@@ -58,6 +74,7 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildFactCheckerPrompt,
     schema: FACT_CHECKER_SCHEMA,
     parse: parseFactCheckerResponse,
+    grounding: 'google_search',
     builtin: true,
   },
   {
@@ -68,6 +85,7 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildTriviaPrompt,
     schema: TRIVIA_SCHEMA,
     parse: parseTriviaResponse,
+    grounding: 'google_search',
     builtin: true,
   },
   {
@@ -88,6 +106,7 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildStatsCheckPrompt,
     schema: STATS_CHECK_SCHEMA,
     parse: parseStatsCheckResponse,
+    grounding: 'google_search',
     builtin: true,
   },
   {
@@ -118,6 +137,7 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildDevilsAdvocatePrompt,
     schema: DEVILS_ADVOCATE_SCHEMA,
     parse: parseDevilsAdvocateResponse,
+    grounding: 'google_search',
     builtin: true,
   },
   {

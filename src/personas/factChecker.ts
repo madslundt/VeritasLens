@@ -1,7 +1,7 @@
 // src/personas/factChecker.ts
 import type { FactClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
 
 export const FACT_CHECKER_PROMPT = `You are VeritasLens, a real-time fact-check assistant for smart glasses.
 
@@ -58,7 +58,8 @@ export function buildFactCheckerPrompt(lang: LanguageCode): string {
     `${FACT_CHECKER_PROMPT}\n\n` +
     `LANGUAGE: Write each claim's \`claim\` and \`reason\` fields in ${langName}. ` +
     `Each claim's \`quote\` field must stay in the original spoken language. ` +
-    `Each claim's \`verdict\` MUST stay as one of "TRUE", "FALSE", or "UNVERIFIED" regardless of language.`
+    `Each claim's \`verdict\` MUST stay as one of "TRUE", "FALSE", or "UNVERIFIED" regardless of language.\n\n` +
+    `CONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`
   );
 }
 
@@ -69,8 +70,9 @@ const CLAIM_ITEM_SCHEMA = {
     verdict: { type: 'string', enum: ['TRUE', 'FALSE', 'UNVERIFIED'] },
     claim: { type: 'string', description: 'One concise sentence summarizing the claim (max 140 chars).' },
     reason: { type: 'string', description: '2-3 short sentences justifying the verdict (max 240 chars).' },
+    confidence: CONFIDENCE_SCHEMA_PROP,
   },
-  required: ['quote', 'verdict', 'claim', 'reason'],
+  required: ['quote', 'verdict', 'claim', 'reason', 'confidence'],
 } as const;
 
 export const FACT_CHECKER_SCHEMA = {
@@ -89,12 +91,17 @@ export const FACT_CHECKER_SCHEMA = {
 export function parseFactCheckerResponse(text: string): LensResult {
   const raw = parseJsonResponse(text);
   const items = readClaimsArray(raw);
-  const claims: FactClaim[] = items.map((c) => ({
-    quote: coerceQuote(c['quote']),
-    verdict: normalizeFactVerdict(c['verdict']),
-    claim: trimTo(typeof c['claim'] === 'string' ? c['claim'] : '', 140),
-    reason: trimTo(typeof c['reason'] === 'string' ? c['reason'] : '', 240),
-  }));
+  const claims: FactClaim[] = items.map((c) => {
+    const confidence = coerceConfidence(c['confidence']);
+    const claim: FactClaim = {
+      quote: coerceQuote(c['quote']),
+      verdict: normalizeFactVerdict(c['verdict']),
+      claim: trimTo(typeof c['claim'] === 'string' ? c['claim'] : '', 140),
+      reason: trimTo(typeof c['reason'] === 'string' ? c['reason'] : '', 240),
+    };
+    if (confidence) claim.confidence = confidence;
+    return claim;
+  });
   if (claims.length === 0) {
     claims.push({ quote: '', verdict: 'UNVERIFIED', claim: '', reason: '' });
   }

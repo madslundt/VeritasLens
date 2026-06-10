@@ -34,6 +34,7 @@ import {
   type GeminiModel,
   type HistoryEntry,
   type LanguageCode,
+  type LensPartialResult,
   type LensResult,
   type LlmProvider,
   type MeetingPrepSection,
@@ -141,6 +142,13 @@ export const [availableModels, setAvailableModels] = createSignal<string[]>([DEF
 export const [modelsLoading, setModelsLoading] = createSignal<boolean>(false);
 export const [activePersona, setActivePersona] = createSignal<string>('fact-checker');
 export const [lensResult, setLensResult] = createSignal<LensResult | null>(null);
+/**
+ * Partial lens result published as Gemini streams its response. Reset to
+ * `null` at the start of every analyze and again when the full `lensResult`
+ * lands — so a reactive consumer can use a single `lensPartialResult() ??
+ * lensResult()` lookup to pick whichever is current.
+ */
+export const [lensPartialResult, setLensPartialResult] = createSignal<LensPartialResult | null>(null);
 export const [deviceStatus, setDeviceStatus] = createSignal<DeviceStatus | null>(null);
 export const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
 export const [sessionHistory, setSessionHistory] = createSignal<HistoryEntry[]>([]);

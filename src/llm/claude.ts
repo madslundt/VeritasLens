@@ -25,6 +25,7 @@ import {
 } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
+import { StreamingJsonParser } from './streamingJsonParser';
 
 export const CLAUDE_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 export const CLAUDE_API_VERSION = '2023-06-01';
@@ -198,6 +199,219 @@ export async function callLens(opts: CallClaudeLensOptions): Promise<string> {
   }
 
   throw lastError ?? new Error('callClaudeLens: exhausted retries without a result.');
+}
+
+// ---------- Streaming variant ----------
+
+export interface CallClaudeLensStreamOptions extends CallClaudeLensOptions {
+  /** Fires for each complete object in the first top-level array of the
+   *  response. `key` is the array's property name (`claims`, `questions`,
+   *  `starters`, …). */
+  onPartialClaim?: (claim: Record<string, unknown>, key: string) => void;
+  /** Fires when a top-level scalar property finishes parsing — once per key. */
+  onPartialField?: (name: string, value: string | number | boolean | null) => void;
+  /** Fires as soon as `"noSpeech": true` is visible in the accumulating buffer. */
+  onNoSpeech?: () => void;
+}
+
+interface ClaudeStreamEvent {
+  type: string;
+  index?: number;
+  content_block?: { type?: string; name?: string };
+  delta?: { type?: string; partial_json?: string; stop_reason?: string };
+  error?: { type?: string; message?: string };
+}
+
+/**
+ * Streaming variant of `callLens`. Same retry/timeout policy on connection
+ * setup as the non-streaming path; once we start receiving bytes we surface
+ * partials immediately and never retry. The tool-use `input` JSON is streamed
+ * as `input_json_delta.partial_json` fragments which we accumulate and feed
+ * to the shared `StreamingJsonParser`.
+ *
+ * Returns the accumulated tool-input JSON string on success — identical
+ * contract to `callLens` so the lens's existing `parse()` runs unchanged.
+ */
+export async function callLensStream(opts: CallClaudeLensStreamOptions): Promise<string> {
+  if (!opts.apiKey) throw new Error('Missing Anthropic API key.');
+
+  const schema = augmentSchema(opts.schema);
+  const body = {
+    model: resolveModel(opts.model),
+    max_tokens: 2048,
+    temperature: 0.2,
+    stream: true,
+    system: opts.prompt,
+    tools: [{
+      name: LENS_TOOL_NAME,
+      description: 'Emit the structured lens result for the audio transcript above.',
+      input_schema: schema,
+    }],
+    tool_choice: { type: 'tool', name: LENS_TOOL_NAME },
+    messages: [{
+      role: 'user',
+      content: transcriptUserMessage(opts.transcript),
+    }],
+  };
+  const bodyJson = JSON.stringify(body);
+
+  let lastError: Error | undefined;
+  let nextDelayMs = 1000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await opts.onRetry?.(attempt);
+      await retryDelay(nextDelayMs, opts.signal);
+    }
+    const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(CLAUDE_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'text/event-stream',
+          'x-api-key': opts.apiKey,
+          'anthropic-version': CLAUDE_API_VERSION,
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: bodyJson,
+        signal: attemptCtl.signal,
+      });
+    } catch (err) {
+      attemptCtl.cleanup();
+      if (opts.signal?.aborted) throw err;
+      if (attemptCtl.timedOut()) {
+        lastError = new UploadTimeoutError(
+          `Anthropic request timed out after ${CHAT_TIMEOUT_MS / 1000}s.`,
+        );
+        nextDelayMs = 1000;
+        continue;
+      }
+      lastError = err instanceof Error ? err : new Error(String(err));
+      nextDelayMs = 1000;
+      continue;
+    }
+    attemptCtl.cleanup();
+
+    if (TRANSIENT_STATUSES.has(response.status)) {
+      const errText = await response.text();
+      nextDelayMs = parseRetryAfterMs(response.headers.get('retry-after')) ?? (response.status === 429 ? 5000 : 1000);
+      lastError = new Error(`Anthropic HTTP ${response.status}: ${truncate(errText, 2000)}`);
+      continue;
+    }
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Anthropic HTTP ${response.status}: ${truncate(errText, 2000)}`);
+    }
+
+    if (!response.body) throw new Error('Anthropic stream returned no body.');
+    return consumeClaudeStream(response.body, opts);
+  }
+
+  throw lastError ?? new Error('callClaudeLensStream: exhausted retries without a stream.');
+}
+
+/**
+ * Drain Anthropic's `/v1/messages` SSE stream. Tool-use input is split across
+ * `content_block_delta` events of subtype `input_json_delta`, each carrying a
+ * `partial_json` fragment. We track which content block holds our tool call
+ * (by `content_block_start`'s `name`) and accumulate only those fragments.
+ */
+async function consumeClaudeStream(
+  body: ReadableStream<Uint8Array>,
+  opts: CallClaudeLensStreamOptions,
+): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new StreamingJsonParser();
+  let pending = '';
+  let toolBlockIndex: number | undefined;
+  let saw_tool_use = false;
+
+  const dispatch = (chunk: string): void => {
+    if (!chunk) return;
+    parser.feed(chunk, (event) => {
+      if (event.type === 'claim') opts.onPartialClaim?.(event.claim, event.key);
+      else if (event.type === 'field') opts.onPartialField?.(event.name, event.value);
+      else if (event.type === 'noSpeech') opts.onNoSpeech?.();
+    });
+  };
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const events = pending.split(/\r?\n\r?\n/);
+      pending = events.pop() ?? '';
+      for (const block of events) {
+        const data = parseSseDataBlock(block);
+        if (data === null) continue;
+        const evt = safeJsonParseEvent(data);
+        if (!evt) continue;
+        if (evt.type === 'error' && evt.error?.message) {
+          throw new Error(`Anthropic error: ${evt.error.message}`);
+        }
+        if (evt.type === 'content_block_start' && evt.content_block?.type === 'tool_use'
+            && evt.content_block.name === LENS_TOOL_NAME) {
+          toolBlockIndex = evt.index;
+          saw_tool_use = true;
+          continue;
+        }
+        if (evt.type === 'content_block_delta'
+            && evt.delta?.type === 'input_json_delta'
+            && typeof evt.delta.partial_json === 'string'
+            && evt.index === toolBlockIndex) {
+          dispatch(evt.delta.partial_json);
+        }
+      }
+    }
+    pending += decoder.decode();
+    if (pending.trim().length > 0) {
+      const data = parseSseDataBlock(pending);
+      if (data) {
+        const evt = safeJsonParseEvent(data);
+        if (evt?.type === 'content_block_delta'
+            && evt.delta?.type === 'input_json_delta'
+            && typeof evt.delta.partial_json === 'string'
+            && evt.index === toolBlockIndex) {
+          dispatch(evt.delta.partial_json);
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  parser.end((event) => {
+    if (event.type === 'noSpeech') opts.onNoSpeech?.();
+  });
+
+  if (!saw_tool_use) {
+    throw new Error('Anthropic stream returned no tool_use content.');
+  }
+  const text = parser.text;
+  if (!text) throw new Error('Anthropic stream returned no tool-input fragments.');
+  return text;
+}
+
+function parseSseDataBlock(block: string): string | null {
+  const lines = block.split(/\r?\n/);
+  const dataLines = lines
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).replace(/^ /, ''));
+  if (dataLines.length === 0) return null;
+  return dataLines.join('\n');
+}
+
+function safeJsonParseEvent(s: string): ClaudeStreamEvent | null {
+  try {
+    return JSON.parse(s) as ClaudeStreamEvent;
+  } catch {
+    return null;
+  }
 }
 
 /**

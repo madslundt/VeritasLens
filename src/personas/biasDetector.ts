@@ -1,7 +1,7 @@
 // src/personas/biasDetector.ts
 import type { BiasClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
 
 const BASE_PROMPT = `You are VeritasLens, a bias detection assistant for smart glasses.
 
@@ -17,7 +17,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildBiasDetectorPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`reason\` in ${langName}. Keep \`direction\` in English. \`quote\` stays in the original spoken language.`;
+  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`reason\` in ${langName}. Keep \`direction\` in English. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -27,8 +27,9 @@ const ITEM_SCHEMA = {
     verdict: { type: 'string', enum: ['NEUTRAL', 'BIASED'] },
     direction: { type: 'string', description: 'Bias direction in English (max 30 chars).' },
     reason: { type: 'string', description: 'Explanation of bias markers (max 200 chars).' },
+    confidence: CONFIDENCE_SCHEMA_PROP,
   },
-  required: ['quote', 'verdict', 'direction', 'reason'],
+  required: ['quote', 'verdict', 'direction', 'reason', 'confidence'],
 } as const;
 
 export const BIAS_DETECTOR_SCHEMA = {
@@ -44,12 +45,15 @@ export function parseBiasDetectorResponse(text: string): LensResult {
   const items = readClaimsArray(raw);
   const claims: BiasClaim[] = items.map((c) => {
     const v = typeof c['verdict'] === 'string' ? c['verdict'].toUpperCase() : '';
-    return {
+    const confidence = coerceConfidence(c['confidence']);
+    const claim: BiasClaim = {
       quote: coerceQuote(c['quote']),
       verdict: v === 'NEUTRAL' ? 'NEUTRAL' : 'BIASED',
       direction: trimTo(typeof c['direction'] === 'string' ? c['direction'] : '', 30),
       reason: trimTo(typeof c['reason'] === 'string' ? c['reason'] : '', 200),
     };
+    if (confidence) claim.confidence = confidence;
+    return claim;
   });
   if (claims.length === 0) {
     claims.push({ quote: '', verdict: 'NEUTRAL', direction: '', reason: '' });

@@ -17,6 +17,7 @@ import { encodePcmToWav } from '@/runtime/audioBuffer';
 import { OPENAI_INLINE_AUDIO_HOSTS, OPENAI_TRANSCRIBE_MODELS, openaiHostLabel, type OpenAiBaseUrl } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
+import { StreamingJsonParser } from './streamingJsonParser';
 
 // Per-attempt deadlines for the OpenAI-compatible path. STT gets a longer
 // ceiling because a 5-minute WAV (≈ 9.6 MB) takes meaningful upload time on
@@ -234,6 +235,230 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
     return text;
   }
   throw lastError ?? new Error('callOpenAiLens: exhausted retries without a result.');
+}
+
+// ---------- Streaming variant ----------
+
+export interface CallOpenAiLensStreamOptions extends CallOpenAiLensOptions {
+  /** Fires for each complete object in the first top-level array of the
+   *  response. `key` is the array's property name (`claims`, `questions`,
+   *  `starters`, …). */
+  onPartialClaim?: (claim: Record<string, unknown>, key: string) => void;
+  /** Fires when a top-level scalar property finishes parsing — once per key. */
+  onPartialField?: (name: string, value: string | number | boolean | null) => void;
+  /** Fires as soon as `"noSpeech": true` is visible in the accumulating buffer. */
+  onNoSpeech?: () => void;
+}
+
+interface ChatCompletionsChunk {
+  choices?: Array<{ delta?: { content?: string } }>;
+  error?: { message?: string };
+}
+
+/**
+ * Streaming variant of `callOpenAiLens`. Same STT-then-chat shape as the
+ * non-streaming path, but the chat completion is requested with
+ * `stream: true` and the SSE response is drained into the shared
+ * `StreamingJsonParser` so the HUD can render the first claim before the full
+ * response arrives.
+ *
+ * Retry policy matches the non-streaming variant on connection setup; once
+ * the stream opens we never retry — partial UI already on screen would jitter.
+ */
+export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): Promise<string> {
+  if (!opts.apiKey) throw new Error(`Missing ${openaiHostLabel(opts.baseUrl)} API key.`);
+
+  const baseSchema = opts.schema as Record<string, unknown>;
+  const augmentedSchema = {
+    ...baseSchema,
+    properties: {
+      noSpeech: { type: 'boolean', description: 'Set to true if no clear human speech is detected.' },
+      ...((baseSchema['properties'] as Record<string, unknown> | undefined) ?? {}),
+    },
+  };
+  const strict = toStrictSchema(augmentedSchema);
+
+  // STT (or inline-audio prep) happens once, outside the retry loop — same
+  // pattern as the non-streaming path so a chat-side 429 doesn't re-burn STT
+  // quota.
+  let userContent: unknown;
+  if (OPENAI_INLINE_AUDIO_HOSTS.has(opts.baseUrl)) {
+    userContent = [
+      { type: 'input_audio', input_audio: { data: base64FromBytes(opts.wav), format: 'wav' } },
+      { type: 'text', text: 'Analyze the audio above according to the system prompt.' },
+    ];
+  } else {
+    const sttBaseUrl = opts.transcribeBaseUrl ?? opts.baseUrl;
+    const sttApiKey = opts.transcribeBaseUrl && opts.transcribeBaseUrl !== opts.baseUrl
+      ? (opts.transcribeApiKey ?? '')
+      : opts.apiKey;
+    if (!sttApiKey) {
+      throw new Error(`Missing ${openaiHostLabel(sttBaseUrl)} API key for transcription.`);
+    }
+    const transcript = await transcribeAudio({
+      apiKey: sttApiKey,
+      baseUrl: sttBaseUrl,
+      model: requireTranscribeModel(opts, sttBaseUrl),
+      wav: opts.wav,
+      signal: opts.signal,
+    });
+    userContent = transcriptUserMessage(transcript);
+  }
+
+  const bodyJson = JSON.stringify({
+    model: opts.model,
+    temperature: 0.2,
+    stream: true,
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'lens_result', strict: true, schema: strict },
+    },
+    messages: [
+      { role: 'system', content: opts.prompt },
+      { role: 'user', content: userContent },
+    ],
+  });
+
+  const endpoint = `${opts.baseUrl}/chat/completions`;
+  let lastError: Error | undefined;
+  let nextDelayMs = 1000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await opts.onRetry?.(attempt);
+      await retryDelay(nextDelayMs, opts.signal);
+    }
+    const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'text/event-stream',
+          authorization: `Bearer ${opts.apiKey}`,
+        },
+        body: bodyJson,
+        signal: attemptCtl.signal,
+      });
+    } catch (err) {
+      attemptCtl.cleanup();
+      if (opts.signal?.aborted) throw err;
+      if (attemptCtl.timedOut()) {
+        lastError = new UploadTimeoutError(
+          `${openaiHostLabel(opts.baseUrl)} chat request timed out after ${CHAT_TIMEOUT_MS / 1000}s.`,
+        );
+        nextDelayMs = 1000;
+        continue;
+      }
+      lastError = err instanceof Error ? err : new Error(String(err));
+      nextDelayMs = 1000;
+      continue;
+    }
+    attemptCtl.cleanup();
+
+    if (response.status === 503 || response.status === 429) {
+      const errText = await response.text();
+      nextDelayMs = parseRetryAfterMs(response.headers.get('retry-after')) ?? (response.status === 429 ? 5000 : 1000);
+      lastError = new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
+      continue;
+    }
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
+    }
+
+    if (!response.body) throw new Error(`${openaiHostLabel(opts.baseUrl)} stream returned no body.`);
+    return consumeOpenAiStream(response.body, opts);
+  }
+  throw lastError ?? new Error('callOpenAiLensStream: exhausted retries without a stream.');
+}
+
+/**
+ * Drain an OpenAI-compatible chat-completions SSE stream. Each event carries
+ * `data: {…}` with `choices[0].delta.content`; the final event is
+ * `data: [DONE]`. We accumulate the content fragments and feed them to the
+ * shared `StreamingJsonParser`.
+ */
+async function consumeOpenAiStream(
+  body: ReadableStream<Uint8Array>,
+  opts: CallOpenAiLensStreamOptions,
+): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new StreamingJsonParser();
+  let pending = '';
+
+  const dispatch = (chunk: string): void => {
+    if (!chunk) return;
+    parser.feed(chunk, (event) => {
+      if (event.type === 'claim') opts.onPartialClaim?.(event.claim, event.key);
+      else if (event.type === 'field') opts.onPartialField?.(event.name, event.value);
+      else if (event.type === 'noSpeech') opts.onNoSpeech?.();
+    });
+  };
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const events = pending.split(/\r?\n\r?\n/);
+      pending = events.pop() ?? '';
+      for (const block of events) {
+        const data = parseSseDataBlock(block);
+        if (data === null) continue;
+        if (data === '[DONE]') continue;
+        const payload = safeJsonParseChunk(data);
+        if (!payload) continue;
+        if (payload.error?.message) {
+          throw new Error(`${openaiHostLabel(opts.baseUrl)} error: ${payload.error.message}`);
+        }
+        const delta = payload.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string') dispatch(delta);
+      }
+    }
+    pending += decoder.decode();
+    if (pending.trim().length > 0) {
+      const data = parseSseDataBlock(pending);
+      if (data && data !== '[DONE]') {
+        const payload = safeJsonParseChunk(data);
+        if (payload?.error?.message) {
+          throw new Error(`${openaiHostLabel(opts.baseUrl)} error: ${payload.error.message}`);
+        }
+        const delta = payload?.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string') dispatch(delta);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  parser.end((event) => {
+    if (event.type === 'noSpeech') opts.onNoSpeech?.();
+  });
+
+  const text = parser.text;
+  if (!text) throw new Error(`${openaiHostLabel(opts.baseUrl)} stream returned no content.`);
+  return text;
+}
+
+function parseSseDataBlock(block: string): string | null {
+  const lines = block.split(/\r?\n/);
+  const dataLines = lines
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).replace(/^ /, ''));
+  if (dataLines.length === 0) return null;
+  return dataLines.join('\n');
+}
+
+function safeJsonParseChunk(s: string): ChatCompletionsChunk | null {
+  try {
+    return JSON.parse(s) as ChatCompletionsChunk;
+  } catch {
+    return null;
+  }
 }
 
 /**

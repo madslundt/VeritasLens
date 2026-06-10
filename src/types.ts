@@ -4,18 +4,25 @@
  * Per-claim shapes for the claim-shaped lenses. Each carries a verbatim
  * `quote` snippet from the audio so a single tap can cover up to MAX_CLAIMS
  * distinct items and history stays searchable.
+ *
+ * `confidence` is the model's self-rated certainty on this claim. Optional
+ * for back-compat with history entries persisted before 0.15.0 and for
+ * personas (KeyQuestion) where a verdict-style certainty isn't meaningful.
  */
-export interface FactClaim { quote: string; claim: string; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; reason: string; }
-export interface StatsClaim { quote: string; verdict: 'PLAUSIBLE' | 'SUSPICIOUS'; stat: string; reason: string; }
-export interface FallacyClaim { quote: string; fallacy: string; explanation: string; }
-export interface BiasClaim { quote: string; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string; }
-export interface TriviaClaim { quote: string; question: string; answer: string; description: string; }
-export interface Eli5Claim { quote: string; explanation: string; }
+export type ClaimConfidence = 'HIGH' | 'MED' | 'LOW';
+
+export interface FactClaim { quote: string; claim: string; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; reason: string; confidence?: ClaimConfidence; }
+export interface StatsClaim { quote: string; verdict: 'PLAUSIBLE' | 'SUSPICIOUS'; stat: string; reason: string; confidence?: ClaimConfidence; }
+export interface FallacyClaim { quote: string; fallacy: string; explanation: string; confidence?: ClaimConfidence; }
+export interface BiasClaim { quote: string; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string; confidence?: ClaimConfidence; }
+export interface TriviaClaim { quote: string; question: string; answer: string; description: string; confidence?: ClaimConfidence; }
+export interface Eli5Claim { quote: string; explanation: string; confidence?: ClaimConfidence; }
 
 export interface DevilsAdvocateClaim {
   quote: string;
   counterpoint: string;
   rationale: string;
+  confidence?: ClaimConfidence;
 }
 
 export interface KeyQuestionClaim {
@@ -27,6 +34,7 @@ export interface SentimentClaim {
   quote: string;
   tone: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'MIXED';
   explanation: string;
+  confidence?: ClaimConfidence;
 }
 
 /**
@@ -93,6 +101,23 @@ export type LensResult = (
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
   autoSelected?: boolean;
 };
+
+/**
+ * Partial result emitted as Gemini streams its response back. The HUD uses
+ * these to render the first claim before the full result is parseable.
+ *
+ * `lensId` identifies the lens being streamed so the HUD can decide what to
+ * render (a partial fact-check looks different from a partial translation).
+ * `claims` is the array of complete claim objects seen so far — each entry's
+ * shape matches the corresponding `LensResult` claim type for that lens.
+ */
+export interface LensPartialResult {
+  lensId: string;
+  /** Set when the Auto classifier picked this lens. */
+  autoSelected?: boolean;
+  /** Whichever claim objects the streaming parser has completed so far. */
+  claims: ReadonlyArray<Record<string, unknown>>;
+}
 
 // ---------- Game mode ----------
 

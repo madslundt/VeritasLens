@@ -6,6 +6,7 @@ import {
   type GeminiModel,
 } from '@/types';
 import { withFetchTimeout } from './fetchTimeout';
+import { StreamingJsonParser } from './streamingJsonParser';
 
 /**
  * Validate the model name we interpolate into the endpoint URL. Defense in
@@ -45,6 +46,13 @@ export interface CallLensOptions {
   model?: GeminiModel | string;
   /** Called before each retry (attempt = 1..MAX_RETRIES). */
   onRetry?: (attempt: number) => void | Promise<void>;
+  /**
+   * Optional Gemini `tools` array. The only entry we use today is
+   * `{ google_search: {} }` (Search grounding for fact-style lenses). Forwarded
+   * verbatim so the caller — not this module — owns the tool catalog and we
+   * don't pay a refactor every time Gemini adds a new tool.
+   */
+  tools?: unknown[];
 }
 
 export const MAX_RETRIES = 3;
@@ -83,7 +91,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
   // first fetch even leaves the function. Without this, retries hold the body
   // object alive (with its multi-MB base64 string) across every retry-delay.
   const bodyJson = ((): string => {
-    const body = {
+    const body: Record<string, unknown> = {
       contents: [
         {
           role: 'user',
@@ -99,6 +107,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
         responseSchema: augmentedSchema,
       },
     };
+    if (opts.tools && opts.tools.length > 0) body['tools'] = opts.tools;
     return JSON.stringify(body);
   })();
 
@@ -184,6 +193,230 @@ function retryDelay(ms: number, signal?: AbortSignal): Promise<void> {
     }, ms);
     signal?.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+// ---------- Streaming variant ----------
+
+const STREAM_ENDPOINT = (model: string) =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent`;
+
+/** Tools array for the Google Search grounding capability. Exported so the
+ *  lifecycle can pass it through when a persona's `grounding` field is set. */
+export const GOOGLE_SEARCH_TOOLS: ReadonlyArray<unknown> = [{ google_search: {} }];
+
+export interface CallLensStreamOptions extends CallLensOptions {
+  /**
+   * Fires for each complete object inside the first top-level array of the
+   * response — whatever its key (`claims`, `questions`, `starters`, …). The
+   * key is passed through so the caller knows which schema slot the partial
+   * fills.
+   */
+  onPartialClaim?: (claim: Record<string, unknown>, key: string) => void;
+  /**
+   * Fires when a top-level scalar property (string / number / boolean / null)
+   * finishes parsing — once per key. Enables incremental render for shapes
+   * like `translation` (sourceText, translatedText) or `sessionSummary`
+   * (topic, summary) that aren't backed by an array.
+   */
+  onPartialField?: (name: string, value: string | number | boolean | null) => void;
+  /**
+   * Fires as soon as `noSpeech: true` is visible in the stream — typically
+   * before any claim arrives. Lets the HUD show the `○` glyph faster than the
+   * full-response path could.
+   */
+  onNoSpeech?: () => void;
+}
+
+/**
+ * Streaming variant of `callLens`. Same retry/timeout policy on the
+ * connection setup, but once we start receiving bytes we surface partials
+ * immediately and never retry — partial UI already on screen would jitter.
+ *
+ * Returns the full accumulated text on success, identical to `callLens` so the
+ * lens's existing `parse()` runs unchanged on the final result.
+ */
+export async function callLensStream(opts: CallLensStreamOptions): Promise<string> {
+  if (!opts.apiKey) throw new Error('Missing Gemini API key.');
+
+  const baseSchema = opts.schema as Record<string, unknown>;
+  const augmentedSchema = {
+    ...baseSchema,
+    properties: {
+      noSpeech: { type: 'boolean', description: 'Set to true if no clear human speech is detected.' },
+      ...((baseSchema['properties'] as Record<string, unknown> | undefined) ?? {}),
+    },
+  };
+
+  const bodyJson = ((): string => {
+    const body: Record<string, unknown> = {
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: opts.prompt },
+            { inlineData: { mimeType: 'audio/wav', data: uint8ToBase64(opts.wav) } },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        responseMimeType: 'application/json',
+        responseSchema: augmentedSchema,
+      },
+    };
+    if (opts.tools && opts.tools.length > 0) body['tools'] = opts.tools;
+    return JSON.stringify(body);
+  })();
+
+  let lastError: Error | undefined;
+  let nextDelayMs = 1000;
+
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await opts.onRetry?.(attempt);
+      await retryDelay(nextDelayMs, opts.signal);
+    }
+
+    const attemptCtl = withFetchTimeout(opts.signal, FETCH_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(
+        `${STREAM_ENDPOINT(resolveModel(opts.model))}?alt=sse&key=${encodeURIComponent(opts.apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: bodyJson,
+          signal: attemptCtl.signal,
+        },
+      );
+    } catch (err) {
+      attemptCtl.cleanup();
+      if (opts.signal?.aborted) throw err;
+      nextDelayMs = jitter(1000);
+      lastError = err instanceof Error ? err : new Error(String(err));
+      continue;
+    }
+    attemptCtl.cleanup();
+
+    if (TRANSIENT_STATUSES.has(response.status)) {
+      const errText = await response.text();
+      const hinted =
+        parseRetryAfterMs(response.headers.get('retry-after')) ??
+        parseGoogleRetryDelayMs(errText);
+      nextDelayMs = hinted ?? jitter(response.status === 429 ? 5000 : 1000);
+      lastError = new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 2000)}`);
+      continue;
+    }
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(`Gemini HTTP ${response.status}: ${truncate(errText, 2000)}`);
+    }
+
+    // We're committed once headers are 200 OK: any failure past this point is
+    // surfaced to the caller. The HUD may already be rendering partials.
+    if (!response.body) throw new Error('Gemini stream returned no body.');
+    return consumeStream(response.body, opts);
+  }
+
+  throw lastError ?? new Error('callLensStream: exhausted retries without a stream.');
+}
+
+interface SseEvent {
+  data: string;
+}
+
+/**
+ * Drain Gemini's SSE response. Each event carries a `data: {...}` line whose
+ * candidates[0].content.parts[0].text holds an incremental fragment of the
+ * final JSON. We feed those fragments into the StreamingJsonParser, which
+ * emits `claim` events whenever a complete object inside `claims[]` is closed.
+ */
+async function consumeStream(
+  body: ReadableStream<Uint8Array>,
+  opts: CallLensStreamOptions,
+): Promise<string> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  const parser = new StreamingJsonParser();
+  let pending = '';
+  let blockReason: string | undefined;
+
+  const dispatch = (chunk: string): void => {
+    if (!chunk) return;
+    parser.feed(chunk, (event) => {
+      if (event.type === 'claim') opts.onPartialClaim?.(event.claim, event.key);
+      else if (event.type === 'field') opts.onPartialField?.(event.name, event.value);
+      else if (event.type === 'noSpeech') opts.onNoSpeech?.();
+    });
+  };
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      // SSE events are separated by a blank line. Some proxies use \n\n, some
+      // \r\n\r\n — handle both with a single regex split.
+      const events = pending.split(/\r?\n\r?\n/);
+      pending = events.pop() ?? '';
+      for (const block of events) {
+        const evt = parseSseBlock(block);
+        if (!evt) continue;
+        const payload = safeJsonParse(evt.data);
+        if (!payload) continue;
+        if (payload.promptFeedback?.blockReason) {
+          blockReason = payload.promptFeedback.blockReason;
+        }
+        const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (typeof text === 'string') dispatch(text);
+      }
+    }
+    // Flush any trailing partial event after the loop closes the stream.
+    pending += decoder.decode();
+    if (pending.trim().length > 0) {
+      const evt = parseSseBlock(pending);
+      if (evt) {
+        const payload = safeJsonParse(evt.data);
+        if (payload) {
+          if (payload.promptFeedback?.blockReason) blockReason = payload.promptFeedback.blockReason;
+          const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (typeof text === 'string') dispatch(text);
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  parser.end((event) => {
+    if (event.type === 'noSpeech') opts.onNoSpeech?.();
+  });
+
+  if (blockReason) throw new Error(`Gemini blocked the prompt: ${blockReason}`);
+  const text = parser.text;
+  if (!text) throw new Error('Gemini stream returned no text candidate.');
+  return text;
+}
+
+function parseSseBlock(block: string): SseEvent | null {
+  // Each block is "event: ...\ndata: ...\n…" — we only care about data: lines,
+  // and Gemini concatenates them implicitly so a single block has one logical
+  // payload. Empty / comment-only blocks (`: keepalive`) are skipped.
+  const lines = block.split(/\r?\n/);
+  const dataLines = lines
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).replace(/^ /, ''));
+  if (dataLines.length === 0) return null;
+  return { data: dataLines.join('\n') };
+}
+
+function safeJsonParse(s: string): GenerateContentResponse | null {
+  try {
+    return JSON.parse(s) as GenerateContentResponse;
+  } catch {
+    return null;
+  }
 }
 
 export interface RunSelfTestOptions {

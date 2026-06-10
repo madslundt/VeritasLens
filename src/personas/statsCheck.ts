@@ -1,7 +1,7 @@
 // src/personas/statsCheck.ts
 import type { LensResult, LanguageCode, StatsClaim } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
 
 const BASE_PROMPT = `You are VeritasLens, a statistical fact-check assistant for smart glasses.
 
@@ -18,7 +18,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildStatsCheckPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${BASE_PROMPT}\n\nLANGUAGE: Write each claim's \`stat\` and \`reason\` in ${langName}. \`quote\` stays in the original spoken language.`;
+  return `${BASE_PROMPT}\n\nLANGUAGE: Write each claim's \`stat\` and \`reason\` in ${langName}. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -28,8 +28,9 @@ const ITEM_SCHEMA = {
     verdict: { type: 'string', enum: ['PLAUSIBLE', 'SUSPICIOUS'] },
     stat: { type: 'string', description: 'The specific stat being checked (max 100 chars).' },
     reason: { type: 'string', description: 'Justification (max 200 chars).' },
+    confidence: CONFIDENCE_SCHEMA_PROP,
   },
-  required: ['quote', 'verdict', 'stat', 'reason'],
+  required: ['quote', 'verdict', 'stat', 'reason', 'confidence'],
 } as const;
 
 export const STATS_CHECK_SCHEMA = {
@@ -45,12 +46,15 @@ export function parseStatsCheckResponse(text: string): LensResult {
   const items = readClaimsArray(raw);
   const claims: StatsClaim[] = items.map((c) => {
     const v = typeof c['verdict'] === 'string' ? c['verdict'].toUpperCase() : '';
-    return {
+    const confidence = coerceConfidence(c['confidence']);
+    const claim: StatsClaim = {
       quote: coerceQuote(c['quote']),
       verdict: v === 'PLAUSIBLE' ? 'PLAUSIBLE' : 'SUSPICIOUS',
       stat: trimTo(typeof c['stat'] === 'string' ? c['stat'] : '', 100),
       reason: trimTo(typeof c['reason'] === 'string' ? c['reason'] : '', 200),
     };
+    if (confidence) claim.confidence = confidence;
+    return claim;
   });
   if (claims.length === 0) {
     claims.push({ quote: '', verdict: 'SUSPICIOUS', stat: '', reason: '' });

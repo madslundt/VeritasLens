@@ -1,7 +1,7 @@
 // src/personas/eli5.ts
 import type { Eli5Claim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
 
 const BASE_PROMPT = `You are VeritasLens, a plain-language explainer for smart glasses.
 
@@ -16,7 +16,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildEli5Prompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`explanation\` in ${langName}. \`quote\` stays in the original spoken language.`;
+  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`explanation\` in ${langName}. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -24,8 +24,9 @@ const ITEM_SCHEMA = {
   properties: {
     quote: { type: 'string', description: 'Verbatim audio snippet (max 140 chars).' },
     explanation: { type: 'string', description: 'Plain-language restatement (max 240 chars).' },
+    confidence: CONFIDENCE_SCHEMA_PROP,
   },
-  required: ['quote', 'explanation'],
+  required: ['quote', 'explanation', 'confidence'],
 } as const;
 
 export const ELI5_SCHEMA = {
@@ -39,10 +40,15 @@ export const ELI5_SCHEMA = {
 export function parseEli5Response(text: string): LensResult {
   const raw = parseJsonResponse(text);
   const items = readClaimsArray(raw);
-  const claims: Eli5Claim[] = items.map((c) => ({
-    quote: coerceQuote(c['quote']),
-    explanation: trimTo(typeof c['explanation'] === 'string' ? c['explanation'] : '', 240),
-  }));
+  const claims: Eli5Claim[] = items.map((c) => {
+    const confidence = coerceConfidence(c['confidence']);
+    const claim: Eli5Claim = {
+      quote: coerceQuote(c['quote']),
+      explanation: trimTo(typeof c['explanation'] === 'string' ? c['explanation'] : '', 240),
+    };
+    if (confidence) claim.confidence = confidence;
+    return claim;
+  });
   if (claims.length === 0) {
     claims.push({ quote: '', explanation: '' });
   }

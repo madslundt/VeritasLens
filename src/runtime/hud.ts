@@ -934,9 +934,10 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
   switch (result.type) {
     case 'fact-check': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
+      const verdictLine = c.verdict === 'TRUE' ? '+ TRUE' : c.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED';
       return {
         top: clip(c.claim, 140),
-        middle: c.verdict === 'TRUE' ? '+ TRUE' : c.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED',
+        middle: verdictLine,
         bottom: c.reason,
       };
     }
@@ -950,17 +951,19 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
     }
     case 'stats-check': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
+      const verdictLine = c.verdict === 'PLAUSIBLE' ? '+ PLAUSIBLE' : '- SUSPICIOUS';
       return {
         top: clip(c.stat, 140),
-        middle: c.verdict === 'PLAUSIBLE' ? '+ PLAUSIBLE' : '- SUSPICIOUS',
+        middle: verdictLine,
         bottom: c.reason,
       };
     }
     case 'bias': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
+      const verdictLine = c.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED';
       return {
         top: c.direction ? clip(c.direction, 140) : '',
-        middle: c.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED',
+        middle: verdictLine,
         bottom: c.reason,
       };
     }

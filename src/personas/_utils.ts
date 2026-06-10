@@ -1,7 +1,46 @@
 // src/personas/_utils.ts
 
+import type { ClaimConfidence } from '@/types';
+
 /** Maximum length, in chars, of a per-claim verbatim audio quote. */
 export const MAX_QUOTE_CHARS = 140;
+
+/**
+ * JSON-schema fragment to drop into a per-claim `properties` block so every
+ * lens declares a `confidence` field with the same enum. Kept as one constant
+ * so a new value (HIGH/MED/LOW + future tiers) only changes here.
+ */
+export const CONFIDENCE_SCHEMA_PROP = {
+  type: 'string',
+  enum: ['HIGH', 'MED', 'LOW'],
+  description: "Model self-rated certainty: HIGH = verbatim & verifiable, MED = mostly sure, LOW = inference / unclear audio.",
+} as const;
+
+/**
+ * Prompt rules appended to every claim-style lens prompt so the confidence
+ * field is filled consistently across personas. Specifically forces UNVERIFIED
+ * over FALSE when confidence would be LOW — keeps the HUD trustworthy at the
+ * cost of one verdict tier on borderline calls.
+ */
+export const CONFIDENCE_PROMPT_RULES =
+  'For each claim, set `confidence` to one of "HIGH", "MED", "LOW". ' +
+  'Use HIGH only when the claim is verbatim from the audio AND verifiable. ' +
+  'Use LOW when the claim depends on inference, unclear audio, or weak evidence. ' +
+  'If `confidence` would be LOW and a verdict-style field would be FALSE / SUSPICIOUS / BIASED, ' +
+  'prefer the neutral verdict (UNVERIFIED / PLAUSIBLE / NEUTRAL) — never accuse on low confidence.';
+
+/**
+ * Coerce an unknown JSON value into the ClaimConfidence enum. Returns
+ * `undefined` for any input that doesn't match the canonical set, so an older
+ * persona response (no confidence field) round-trips as undefined and the
+ * HUD's tag column stays blank — same behavior as a missing field.
+ */
+export function coerceConfidence(v: unknown): ClaimConfidence | undefined {
+  if (typeof v !== 'string') return undefined;
+  const upper = v.trim().toUpperCase();
+  if (upper === 'HIGH' || upper === 'MED' || upper === 'LOW') return upper;
+  return undefined;
+}
 
 export function trimTo(text: string, max: number): string {
   if (text.length <= max) return text;

@@ -1,7 +1,7 @@
 // src/personas/logicalFallacy.ts
 import type { FallacyClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
 
 const BASE_PROMPT = `You are VeritasLens, a logical reasoning assistant for smart glasses.
 
@@ -16,7 +16,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildLogicalFallacyPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`explanation\` in ${langName}. Keep \`fallacy\` as the English name. \`quote\` stays in the original spoken language.`;
+  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`explanation\` in ${langName}. Keep \`fallacy\` as the English name. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -25,8 +25,9 @@ const ITEM_SCHEMA = {
     quote: { type: 'string', description: 'Verbatim audio snippet (max 140 chars).' },
     fallacy: { type: 'string', description: 'Name of the logical fallacy, or "None detected".' },
     explanation: { type: 'string', description: 'Why this is or is not a fallacy (max 200 chars).' },
+    confidence: CONFIDENCE_SCHEMA_PROP,
   },
-  required: ['quote', 'fallacy', 'explanation'],
+  required: ['quote', 'fallacy', 'explanation', 'confidence'],
 } as const;
 
 export const LOGICAL_FALLACY_SCHEMA = {
@@ -40,11 +41,16 @@ export const LOGICAL_FALLACY_SCHEMA = {
 export function parseLogicalFallacyResponse(text: string): LensResult {
   const raw = parseJsonResponse(text);
   const items = readClaimsArray(raw);
-  const claims: FallacyClaim[] = items.map((c) => ({
-    quote: coerceQuote(c['quote']),
-    fallacy: trimTo(typeof c['fallacy'] === 'string' ? c['fallacy'] : 'Unknown', 40),
-    explanation: trimTo(typeof c['explanation'] === 'string' ? c['explanation'] : '', 200),
-  }));
+  const claims: FallacyClaim[] = items.map((c) => {
+    const confidence = coerceConfidence(c['confidence']);
+    const claim: FallacyClaim = {
+      quote: coerceQuote(c['quote']),
+      fallacy: trimTo(typeof c['fallacy'] === 'string' ? c['fallacy'] : 'Unknown', 40),
+      explanation: trimTo(typeof c['explanation'] === 'string' ? c['explanation'] : '', 200),
+    };
+    if (confidence) claim.confidence = confidence;
+    return claim;
+  });
   if (claims.length === 0) {
     claims.push({ quote: '', fallacy: 'Unknown', explanation: '' });
   }

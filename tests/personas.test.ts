@@ -157,6 +157,37 @@ describe('fact-checker', () => {
     if (result.type === 'fact-check') expect(result.claims[0]!.verdict).toBe('UNVERIFIED');
   });
 
+  it('extracts confidence (HIGH/MED/LOW) when present', () => {
+    const result = parseFactCheckerResponse(JSON.stringify({
+      claims: [
+        { quote: 'q1', verdict: 'TRUE', claim: 'c1', reason: 'r1', confidence: 'HIGH' },
+        { quote: 'q2', verdict: 'FALSE', claim: 'c2', reason: 'r2', confidence: 'low' },
+        { quote: 'q3', verdict: 'UNVERIFIED', claim: 'c3', reason: 'r3', confidence: 'med' },
+      ],
+    }));
+    if (result.type === 'fact-check') {
+      expect(result.claims[0]!.confidence).toBe('HIGH');
+      // case-insensitive — coerceConfidence normalizes to upper
+      expect(result.claims[1]!.confidence).toBe('LOW');
+      expect(result.claims[2]!.confidence).toBe('MED');
+    }
+  });
+
+  it('omits confidence when absent or invalid', () => {
+    const result = parseFactCheckerResponse(JSON.stringify({
+      claims: [
+        { quote: 'q1', verdict: 'TRUE', claim: 'c1', reason: 'r1' },
+        { quote: 'q2', verdict: 'TRUE', claim: 'c2', reason: 'r2', confidence: 'WHATEVER' },
+        { quote: 'q3', verdict: 'TRUE', claim: 'c3', reason: 'r3', confidence: 42 },
+      ],
+    }));
+    if (result.type === 'fact-check') {
+      expect(result.claims[0]!.confidence).toBeUndefined();
+      expect(result.claims[1]!.confidence).toBeUndefined();
+      expect(result.claims[2]!.confidence).toBeUndefined();
+    }
+  });
+
   it('synthesizes an empty claim when the response has no claims array', () => {
     const result = parseFactCheckerResponse(JSON.stringify({}));
     if (result.type === 'fact-check') {

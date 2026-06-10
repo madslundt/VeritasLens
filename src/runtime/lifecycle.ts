@@ -14,7 +14,6 @@ import {
   RECALL_CONTEXT_DIRECTIVE,
 } from './recallContext';
 import {
-  ACTIVE_HINT_ANALYZING,
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
   clearMenuSpinnerFrame,
@@ -65,7 +64,7 @@ import {
   advance as gameAdvance,
   teardownGame,
 } from './game';
-import { callLens, MAX_RETRIES } from '@/llm';
+import { callLens, callLensStream, GOOGLE_SEARCH_TOOLS, MAX_RETRIES } from '@/llm';
 import { formatRelativeTime } from '@/personas/_utils';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
 import {
@@ -101,6 +100,7 @@ import {
   setAppPhase,
   setErrorMessage,
   setLensResult as setStateResult,
+  setLensPartialResult,
   settings,
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
@@ -901,6 +901,43 @@ function buildAlreadyAnsweredLines(): string[] {
 const ALREADY_ANSWERED_DIRECTIVE =
   'ALREADY ANSWERED in this conversation — do NOT re-extract, re-answer, or include these claims even if they appear again in the audio. If the audio contains ONLY these (nothing new), set noSpeech=true. If the audio contains both these and something new, analyze ONLY the new content and skip the rest:';
 
+/** Conversation memory: last few taps within a short window, used as soft
+ *  context rather than hard suppression. The disclaimer is important — the
+ *  speaker's subject can change in seconds, so the model must judge whether
+ *  the memory is even relevant before leaning on it. */
+const RECENT_MEMORY_DIRECTIVE =
+  'RECENT CONTEXT (the speaker\'s subject may have changed since these — use ONLY if the current audio is clearly continuing one of them; otherwise ignore):';
+const RECENT_MEMORY_WINDOW_MS = 5 * 60_000;
+const RECENT_MEMORY_MAX_ENTRIES = 3;
+
+/**
+ * Recent-taps memory block. Filtered to:
+ *  - the current session,
+ *  - the last 5 minutes (older entries are unlikely still on-topic),
+ *  - the last 3 entries (cap so the prompt doesn't bloat),
+ *  - excluding Translation (different interaction mode — the speaker is the
+ *    other person, the wearer's prior fact-check is irrelevant context).
+ * Returns `[]` when nothing qualifies, so the caller can skip the directive
+ * entirely instead of pushing an empty section into the prompt.
+ */
+function buildRecentMemoryLines(): string[] {
+  const cutoff = Date.now() - RECENT_MEMORY_WINDOW_MS;
+  const entries = sessionHistory()
+    .filter(
+      (e) =>
+        e.sessionId === currentSessionId &&
+        e.timestamp >= cutoff &&
+        e.lensId !== 'translation',
+    )
+    .slice(-RECENT_MEMORY_MAX_ENTRIES);
+  return entries.map((e) => {
+    const ago = formatRelativeTime(e.timestamp);
+    const lens = e.lensName || e.lensId || 'lens';
+    const headline = (e.question ?? '').trim() || (e.badge ?? '').trim() || '(no headline)';
+    return `- ${ago} [${lens}]: ${headline}`;
+  });
+}
+
 /**
  * Cancel the ERR auto-clear timer and, if we're still sitting in the error
  * phase, demote the HUD back to listening. Safe to call from anywhere — the
@@ -922,17 +959,25 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   const base = persona.buildPrompt(lang);
   const recent = buildAlreadyAnsweredLines();
   const recall = buildRecallContextLines(intermediateSummaries, settings().autoSummaryEnabled);
+  // Skip soft recent-memory entirely on Translation. Translation runs are
+  // about the other person speaking — surfacing the wearer's prior fact-check
+  // headlines would mislead the model into translating around them.
+  const memory = persona.id === 'translation' ? [] : buildRecentMemoryLines();
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
     '',
     base,
   ];
-  // Recall context first (general background), then the already-answered
-  // directive (hard rule) closest to the call so the model's last-seen
-  // instruction is the suppression list, not the "look back" context.
+  // Recall context first (general background), then recent-memory (soft —
+  // the model may or may not act on it), then the already-answered directive
+  // (hard rule) closest to the call so the model's last-seen instruction is
+  // the suppression list, not the "look back" context.
   if (recall.length > 0) {
     parts.push('', RECALL_CONTEXT_DIRECTIVE, ...recall);
+  }
+  if (memory.length > 0) {
+    parts.push('', RECENT_MEMORY_DIRECTIVE, ...memory);
   }
   if (recent.length > 0) {
     parts.push('', ALREADY_ANSWERED_DIRECTIVE, ...recent);
@@ -954,6 +999,7 @@ function buildMeetingPromptWithContext(
   const base = buildMeetingPrepPrompt(lang, sections);
   const recent = buildAlreadyAnsweredLines();
   const recall = buildRecallContextLines(intermediateSummaries, settings().autoSummaryEnabled);
+  const memory = buildRecentMemoryLines();
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
@@ -962,6 +1008,9 @@ function buildMeetingPromptWithContext(
   ];
   if (recall.length > 0) {
     parts.push('', RECALL_CONTEXT_DIRECTIVE, ...recall);
+  }
+  if (memory.length > 0) {
+    parts.push('', RECENT_MEMORY_DIRECTIVE, ...memory);
   }
   if (recent.length > 0) {
     parts.push('', ALREADY_ANSWERED_DIRECTIVE, ...recent);
@@ -1125,16 +1174,31 @@ async function runAnalysis(): Promise<void> {
   // nothing meaningful to keep — e.g. on the first analysis of a session where
   // the layout is still discreet-minimal/baseline idle.
   setStateResult(null);
+  // Clear any partial from a prior analyze before kicking off a new one — the
+  // streaming path will repopulate it as Gemini emits its first claim object.
+  setLensPartialResult(null);
 
   inflight?.abort();
   const controller = new AbortController();
   inflight = controller;
   analyzing = true;
   setAppPhase('thinking');
+  // Dynamic hint = lens name + cancel affordance. The persona is fixed for
+  // manual lenses; for Auto we project the previous-winner lens in this
+  // session ("Auto → Fact-Check · …") so the wearer knows what's running
+  // before the classifier resolves. Cold first-tap (no winner yet) stays at
+  // bare "Auto · …" rather than guessing.
+  const predictedAutoLens =
+    persona.id === 'auto' && lastAutoWinnerInSession
+      ? getPersona(lastAutoWinnerInSession)?.name
+      : undefined;
+  const analyzingHint = predictedAutoLens
+    ? `${persona.name} → ${predictedAutoLens} · Double-tap to cancel`
+    : `${persona.name} · Double-tap to cancel`;
   // The spinner writes its first frame synchronously; an intermediate
   // setStatus('thinking') here would flash '...' before the spinner takes
   // over, so we skip it and let the spinner own the status slot.
-  await setActiveHint(ACTIVE_HINT_ANALYZING);
+  await setActiveHint(analyzingHint);
   startSpinner();
 
   try {
@@ -1331,22 +1395,78 @@ async function runAnalysis(): Promise<void> {
     }
 
     let rawText: string;
+    /**
+     * Tail of the partial-render queue. Each onPartialClaim chains a fresh
+     * `setLensResult(synthetic)` after the previous render resolves so two
+     * adjacent claims can't race the SDK's rebuildPageContainer (out-of-order
+     * commits would flicker the wrong page on screen). Drained before the
+     * final result render below.
+     */
+    let renderQueue: Promise<void> = Promise.resolve();
     if (speculativeRawText !== null) {
       rawText = speculativeRawText;
     } else {
       const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
       const analysisContext = buildContextBlock(analysisPersona.name);
-      rawText = await callLens({
+      // Stream the foreground call so the HUD can render the first claim as
+      // soon as it parses, instead of waiting for the whole array. Each
+      // completed claim object is appended to a partial result the HUD reads
+      // via `lensPartialResult()`. Once the full text arrives below we hand
+      // off to `setStateResult` and clear the partial.
+      const partialClaims: Record<string, unknown>[] = [];
+      const partialLensId = analysisPersona.id;
+      const partialAutoSelected = autoSelected;
+      // Grounding is opt-in per persona — only fact-style lenses (fact-check,
+      // stats-check, trivia, devil's advocate) declare it, so other lenses
+      // skip the latency cost of the Google Search tool.
+      const tools =
+        analysisPersona.grounding === 'google_search' ? [...GOOGLE_SEARCH_TOOLS] : undefined;
+      rawText = await callLensStream({
         wav,
         prompt: `${analysisContext}\n\n${analysisPrompt}`,
         schema: analysisPersona.schema,
         signal: controller.signal,
         onRetry,
+        tools,
+        onPartialClaim: (claim) => {
+          partialClaims.push(claim);
+          setLensPartialResult({
+            lensId: partialLensId,
+            autoSelected: partialAutoSelected,
+            claims: partialClaims.slice(),
+          });
+          // Render a synthetic partial on the HUD so the wearer sees claim 1
+          // the moment it parses. Lens.parse() of `{claims:[…]}` produces the
+          // same shape the final-result path renders; the spinner stays up
+          // (lifecycle stops it only after the final result lands) so the
+          // wearer can see more is still arriving. Lenses that don't follow
+          // the `{ claims: [...] }` shape (translation, etc.) throw inside
+          // parse() — we swallow that and skip the preview rather than fail
+          // the analyze.
+          const snapshot = partialClaims.slice();
+          renderQueue = renderQueue.then(async () => {
+            try {
+              const partialResult = analysisPersona.parse(JSON.stringify({ claims: snapshot }));
+              if (partialAutoSelected) partialResult.autoSelected = true;
+              await setLensResult(partialResult);
+            } catch {
+              /* preview not applicable for this lens — final result will render */
+            }
+          });
+        },
       });
     }
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
+    // Drain any in-flight partial render so the final-result commit always
+    // lands last (and therefore wins) — without this a stale partial commit
+    // could resolve after the authoritative final render and overwrite it.
+    await renderQueue;
     stopSpinner();
+    // Final result now lives in `lensResult` — drop the partial so any
+    // reactive `partial ?? final` consumer flips over to the authoritative
+    // parse without one frame of stale partial data.
+    setLensPartialResult(null);
     setStateResult(result);
     // Single atomic write for all per-claim history entries — see
     // pushHistoryEntries for the race it prevents (concurrent persist calls
@@ -1374,6 +1494,10 @@ async function runAnalysis(): Promise<void> {
     setAppPhase('displaying');
   } catch (err) {
     stopSpinner();
+    // Clear the in-progress partial across every error branch — abort,
+    // NoSpeech, transport, blockReason. The HUD's `partial ?? final` reader
+    // would otherwise hold the last claim on screen past the failure.
+    setLensPartialResult(null);
     if ((err as Error)?.name === 'AbortError') {
       // User cancelled via double-tap (which nulls `inflight` and clears
       // `analyzing` at the call site), or a back-to-back analysis aborted this
