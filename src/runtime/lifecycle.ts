@@ -1654,6 +1654,12 @@ async function runAnalysis(): Promise<void> {
       const watchValueKeys = analysisPersona.streamHeading
         ? new Set<string>([analysisPersona.streamHeading.field])
         : undefined;
+      // Carry-field accumulator — top-level scalars the persona wants in the
+      // synthesized partial. Gemini closes scalars in schema order, so any
+      // field declared before the heading field has already arrived by the
+      // time streaming starts.
+      const carriedFields: Record<string, string | number | boolean | null> = {};
+      const carryFieldSet = new Set<string>(analysisPersona.streamHeading?.carryFields ?? []);
       let lastHeadingCommitAt = 0;
       let pendingHeadingPartial: string | null = null;
       let headingTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1668,7 +1674,7 @@ async function runAnalysis(): Promise<void> {
         lastHeadingCommitAt = performance.now();
         renderQueue = renderQueue.then(async () => {
           try {
-            const synthetic = analysisPersona.streamHeading!.synthesize(partial);
+            const synthetic = analysisPersona.streamHeading!.synthesize(partial, carriedFields);
             if (partialAutoSelected) synthetic.autoSelected = true;
             await setLensResult(synthetic);
           } catch {
@@ -1684,6 +1690,23 @@ async function runAnalysis(): Promise<void> {
         onRetry,
         tools,
         watchValueKeys,
+        onPartialField: (name, value) => {
+          if (!carryFieldSet.has(name)) return;
+          carriedFields[name] = value;
+          // Render the chrome (e.g. sourceLanguage code) the moment a carry
+          // field closes, even if the heading hasn't started streaming yet.
+          // Throttled by the same 150ms gate so multiple field closes in
+          // the same window coalesce into one rebuild.
+          if (!analysisPersona.streamHeading) return;
+          pendingHeadingPartial = pendingHeadingPartial ?? '';
+          const now = performance.now();
+          const elapsed = now - lastHeadingCommitAt;
+          if (elapsed >= HEADING_COMMIT_MS) {
+            commitHeading();
+          } else if (headingTimer === null) {
+            headingTimer = setTimeout(commitHeading, HEADING_COMMIT_MS - elapsed);
+          }
+        },
         onPartialString: (name, partial) => {
           if (!analysisPersona.streamHeading) return;
           if (name !== analysisPersona.streamHeading.field) return;

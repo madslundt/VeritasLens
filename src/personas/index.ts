@@ -52,12 +52,28 @@ export type LensGrounding = 'google_search';
  * this on top would just cause the HUD to strobe.
  */
 export interface StreamHeadingConfig {
-  /** JSON property name to watch — must match the persona's schema. */
+  /** JSON property name whose mid-stream content drives the heading slot. */
   field: string;
-  /** Build a placeholder `LensResult` whose heading slot carries `partial`.
-   *  Other slots should be empty strings so the HUD's formatter renders the
-   *  partial without prefilling stale text. */
-  synthesize: (partial: string) => LensResult;
+  /**
+   * Other top-level scalar properties whose completed values should be
+   * threaded into `synthesize` via the `fields` map. Gemini emits scalars in
+   * schema order, so fields declared BEFORE the heading field in the schema
+   * are guaranteed to have arrived by the time the heading starts streaming
+   * — useful for Translate, where `sourceLanguage` and `sourceText` close
+   * before `translatedText` begins.
+   */
+  carryFields?: readonly string[];
+  /**
+   * Build a placeholder `LensResult` whose heading slot carries `partial`.
+   * `fields` contains any `carryFields` that finished parsing so far (may be
+   * absent on the first commit if the heading happens to start streaming
+   * before any of the carry fields close). Other LensResult slots should be
+   * empty strings so the HUD's formatter renders cleanly.
+   */
+  synthesize: (
+    partial: string,
+    fields: Readonly<Record<string, string | number | boolean | null>>,
+  ) => LensResult;
 }
 
 export interface Persona {
@@ -112,10 +128,11 @@ const BUILTINS: Persona[] = [
     grounding: 'google_search',
     streamHeading: {
       field: 'answer',
-      // The HUD's trivia formatter reads `c.answer` for the middle slot —
-      // populating only `answer` keeps the page minimal during streaming;
-      // question/description appear once the full claim closes via the
-      // normal final-result render.
+      // Trivia's `question` and `quote` live inside the claim object, not at
+      // top level — the parser's field-event path only sees top-level
+      // scalars, so there's nothing to carry. Populating only `answer`
+      // keeps the page minimal during streaming; question/description
+      // appear once the full claim closes via the normal final-result render.
       synthesize: (partial) => ({
         type: 'trivia',
         claims: [{ quote: '', question: '', answer: partial, description: '' }],
@@ -209,13 +226,18 @@ const BUILTINS: Persona[] = [
     parse: parseTranslationResponse,
     streamHeading: {
       field: 'translatedText',
-      // Listen-in and Converse both render `translatedText` in the heading
-      // slot — keep starters empty during streaming so the picker chrome
-      // doesn't flash with placeholder rows before the real ones land.
-      synthesize: (partial) => ({
+      // sourceLanguage + sourceText are declared BEFORE translatedText in
+      // the schema, so Gemini closes them as `field` events before the
+      // heading starts streaming. Carrying them through lets the HUD show
+      // the language code on top of the page right from the first frame
+      // instead of waiting for the final commit. Starters stay empty
+      // during streaming so the picker chrome doesn't flash with
+      // placeholder rows before the real ones land.
+      carryFields: ['sourceLanguage', 'sourceText'],
+      synthesize: (partial, fields) => ({
         type: 'translation',
-        sourceLanguage: '',
-        sourceText: '',
+        sourceLanguage: typeof fields['sourceLanguage'] === 'string' ? fields['sourceLanguage'] : '',
+        sourceText: typeof fields['sourceText'] === 'string' ? fields['sourceText'] : '',
         translatedText: partial,
         replyStarters: [],
       }),
