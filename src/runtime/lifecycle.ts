@@ -338,6 +338,11 @@ export async function stopHudRuntime(): Promise<void> {
   analyzing = false;
   stopAutoModeWatcher();
   void setAutoModeIndicator(false);
+  // Clear wearer-speak state so its 12 s safety timer can't fire after
+  // teardown and so a stale `wearerSpeakActive = true` doesn't mis-route
+  // the first auto-mode trigger of the next session into the wearer
+  // direction.
+  cancelWearerSpeak();
   // Drop any in-flight game session along with its abort controller so the
   // next HUD start sees a clean slate.
   teardownGame();
@@ -977,6 +982,9 @@ async function leaveActiveSession(): Promise<void> {
     }
     stopAutoModeWatcher();
     void setAutoModeIndicator(false);
+    // Same reason as in stopHudRuntime: drop the wearer-speak timer/flag so
+    // it can't fire into a torn-down session or bleed into the next one.
+    cancelWearerSpeak();
     await stopSpinner();
     // Abort any auto-summary tick already in flight, then stop the periodic
     // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
@@ -1950,7 +1958,7 @@ async function runSayMore(): Promise<void> {
 async function handleTranslationWearerSpeakGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     if (getWearerSpeakState() === 'recording') {
-      await cancelWearerSpeak();
+      cancelWearerSpeak();
       await restoreActivePage();
     } else {
       await openMenuForCurrentContext();
@@ -2074,8 +2082,10 @@ async function runWearerSpeakAnalyze(): Promise<void> {
 }
 
 /** Tear down a wearer-speak session that hasn't fired yet (e.g. wearer
- *  single-tapped to cancel). Idempotent. */
-async function cancelWearerSpeak(): Promise<void> {
+ *  single-tapped to cancel, or session teardown caught us mid-record).
+ *  Idempotent. Sync because there's nothing to await — kept callable from
+ *  both async gesture handlers and the teardown paths. */
+function cancelWearerSpeak(): void {
   wearerSpeakActive = false;
   if (wearerSpeakTimeoutTimer) {
     clearTimeout(wearerSpeakTimeoutTimer);

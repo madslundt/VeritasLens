@@ -99,11 +99,6 @@ const LISTEN_IN_SCHEMA = {
   required: ['sourceLanguage', 'sourceText', 'translatedText', 'replyStarters'],
 } as const;
 
-/** Back-compat alias — older code imports this name; resolves to the converse
- *  shape since that was the v1 schema. New code should call
- *  `getTranslationSchema(mode)` instead. */
-export const TRANSLATION_SCHEMA = CONVERSE_SCHEMA;
-
 /** Pick the response schema that matches the active lens mode. */
 export function getTranslationSchema(mode: TranslationMode): unknown {
   return mode === 'listen-in' ? LISTEN_IN_SCHEMA : CONVERSE_SCHEMA;
