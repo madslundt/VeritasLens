@@ -220,6 +220,19 @@ export interface CallLensStreamOptions extends CallLensOptions {
    */
   onPartialField?: (name: string, value: string | number | boolean | null) => void;
   /**
+   * Names of string-valued properties whose mid-stream content should be
+   * surfaced via `onPartialString`. Used for persona-level heading streaming
+   * (Trivia's `answer`, Translate's `translatedText`). Matched anywhere in
+   * the JSON, not just at top level.
+   */
+  watchValueKeys?: ReadonlySet<string>;
+  /**
+   * Fires while a watched value is being read, with the cumulative content
+   * decoded so far. Caller is expected to throttle HUD commits — the parser
+   * may fire one event per `feed()` call.
+   */
+  onPartialString?: (name: string, partial: string) => void;
+  /**
    * Fires as soon as `noSpeech: true` is visible in the stream — typically
    * before any claim arrives. Lets the HUD show the `○` glyph faster than the
    * full-response path could.
@@ -338,7 +351,7 @@ async function consumeStream(
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  const parser = new StreamingJsonParser();
+  const parser = new StreamingJsonParser({ watchValueKeys: opts.watchValueKeys });
   let pending = '';
   let blockReason: string | undefined;
 
@@ -347,6 +360,7 @@ async function consumeStream(
     parser.feed(chunk, (event) => {
       if (event.type === 'claim') opts.onPartialClaim?.(event.claim, event.key);
       else if (event.type === 'field') opts.onPartialField?.(event.name, event.value);
+      else if (event.type === 'valueChunk') opts.onPartialString?.(event.name, event.partial);
       else if (event.type === 'noSpeech') opts.onNoSpeech?.();
     });
   };

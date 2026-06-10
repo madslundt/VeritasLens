@@ -210,6 +210,12 @@ export interface CallClaudeLensStreamOptions extends CallClaudeLensOptions {
   onPartialClaim?: (claim: Record<string, unknown>, key: string) => void;
   /** Fires when a top-level scalar property finishes parsing — once per key. */
   onPartialField?: (name: string, value: string | number | boolean | null) => void;
+  /** Names of string-valued properties whose mid-stream content is surfaced
+   *  via `onPartialString` for incremental HUD heading render. */
+  watchValueKeys?: ReadonlySet<string>;
+  /** Fires while a watched value is being read, with cumulative decoded
+   *  content. Caller is expected to throttle HUD commits. */
+  onPartialString?: (name: string, partial: string) => void;
   /** Fires as soon as `"noSpeech": true` is visible in the accumulating buffer. */
   onNoSpeech?: () => void;
 }
@@ -325,7 +331,7 @@ async function consumeClaudeStream(
 ): Promise<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  const parser = new StreamingJsonParser();
+  const parser = new StreamingJsonParser({ watchValueKeys: opts.watchValueKeys });
   let pending = '';
   let toolBlockIndex: number | undefined;
   let saw_tool_use = false;
@@ -335,6 +341,7 @@ async function consumeClaudeStream(
     parser.feed(chunk, (event) => {
       if (event.type === 'claim') opts.onPartialClaim?.(event.claim, event.key);
       else if (event.type === 'field') opts.onPartialField?.(event.name, event.value);
+      else if (event.type === 'valueChunk') opts.onPartialString?.(event.name, event.partial);
       else if (event.type === 'noSpeech') opts.onNoSpeech?.();
     });
   };

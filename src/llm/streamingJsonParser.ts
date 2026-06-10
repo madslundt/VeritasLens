@@ -25,12 +25,29 @@
 export type StreamingJsonEvent =
   | { type: 'claim'; key: string; claim: Record<string, unknown> }
   | { type: 'field'; name: string; value: string | number | boolean | null }
+  | { type: 'valueChunk'; name: string; partial: string }
   | { type: 'noSpeech' }
   | { type: 'done' };
 
 export type StreamingJsonListener = (event: StreamingJsonEvent) => void;
 
 const NO_SPEECH_PATTERN = /"noSpeech"\s*:\s*true/;
+
+export interface StreamingJsonParserOptions {
+  /**
+   * Names of string-valued properties whose mid-stream content should be
+   * surfaced via `valueChunk` events. Matches by exact key name, anywhere in
+   * the JSON (top level or inside a nested object). For the in-flight string
+   * value of a watched key, the parser fires a `valueChunk` event per `feed()`
+   * call with the cumulative content decoded so far. Once the string closes,
+   * no further `valueChunk` events fire for that field.
+   *
+   * Intended for personas with a `streamHeading` config — Trivia's `answer`,
+   * Translate's `translatedText`. The HUD throttles commits so the SDK's
+   * page rebuild isn't strobed.
+   */
+  watchValueKeys?: ReadonlySet<string>;
+}
 
 type Mode =
   | 'before_root'
@@ -84,6 +101,31 @@ export class StreamingJsonParser {
   private emittedFieldKeys = new Set<string>();
   private claimsEmitted = 0;
 
+  // Watch-value state: independent regex-based scanner that surfaces
+  // mid-string content for `watchValueKeys`. Runs in parallel with the
+  // structural state machine; the main pass doesn't depend on it.
+  private readonly watchValueKeys: ReadonlySet<string>;
+  private readonly watchStartPattern: RegExp | null;
+  private watchActiveKey: string | null = null;
+  private watchValueStart = -1;
+  private watchEmittedLen = 0;
+  // Buffer offset past which the start-pattern regex should start scanning.
+  // Advances past each closed watched value so the same match doesn't re-fire.
+  private watchScanFrom = 0;
+
+  constructor(options: StreamingJsonParserOptions = {}) {
+    this.watchValueKeys = options.watchValueKeys ?? new Set<string>();
+    if (this.watchValueKeys.size === 0) {
+      this.watchStartPattern = null;
+    } else {
+      // Escape each key so a value-name with regex meta-chars can't smuggle
+      // a wildcard into the matcher. The keys we use today (`answer`,
+      // `translatedText`) are alphanumeric — defensive only.
+      const escaped = [...this.watchValueKeys].map((k) => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      this.watchStartPattern = new RegExp(`"(${escaped.join('|')})"\\s*:\\s*"`);
+    }
+  }
+
   /** Append a new SSE text chunk and emit any partials that just completed. */
   feed(chunk: string, onEvent: StreamingJsonListener): void {
     if (!chunk) return;
@@ -95,6 +137,10 @@ export class StreamingJsonParser {
       this.noSpeechEmitted = true;
       onEvent({ type: 'noSpeech' });
     }
+
+    // Watch-value pass — runs first so the wearer sees heading text fill in
+    // even before the structural parser finishes the enclosing claim object.
+    this.advanceWatchedValue(onEvent);
 
     while (this.pos < this.buffer.length && this.mode !== 'done') {
       const ch = this.buffer[this.pos]!;
@@ -320,6 +366,81 @@ export class StreamingJsonParser {
     if (this.doneEmitted) return;
     this.doneEmitted = true;
     onEvent({ type: 'done' });
+  }
+
+  /**
+   * Surface cumulative content for any watched string value as it streams.
+   * Runs independently of the structural scanner — uses a regex to find the
+   * opening-quote position of a watched key, then scans for the closing quote
+   * char-by-char honoring JSON escape sequences.
+   *
+   * Re-entrant: when the active watched value closes, we recurse to look for
+   * the next watched key in the same buffer (so a single feed can carry both
+   * the open and close of multiple watched values).
+   */
+  private advanceWatchedValue(onEvent: StreamingJsonListener): void {
+    if (!this.watchStartPattern) return;
+
+    if (this.watchActiveKey === null) {
+      const slice = this.buffer.slice(this.watchScanFrom);
+      const match = this.watchStartPattern.exec(slice);
+      if (!match) return;
+      this.watchActiveKey = match[1]!;
+      this.watchValueStart = this.watchScanFrom + match.index + match[0].length;
+      this.watchEmittedLen = 0;
+    }
+
+    // Scan from valueStart for the unescaped closing quote.
+    let end = -1;
+    let i = this.watchValueStart;
+    while (i < this.buffer.length) {
+      const c = this.buffer.charCodeAt(i);
+      if (c === 92 /* \\ */) {
+        // Escape — if the next char isn't in the buffer yet, we can't tell
+        // what was escaped; bail and wait for more bytes. Otherwise skip the
+        // escaped char.
+        if (i + 1 >= this.buffer.length) {
+          break;
+        }
+        i += 2;
+        continue;
+      }
+      if (c === 34 /* " */) {
+        end = i;
+        break;
+      }
+      i++;
+    }
+
+    // Build the displayable partial, honoring JSON escapes for what we have
+    // so far. If the buffer ends mid-escape, drop the trailing backslash so
+    // JSON.parse doesn't throw.
+    const sliceEnd = end === -1 ? i : end;
+    let raw = this.buffer.slice(this.watchValueStart, sliceEnd);
+    if (end === -1 && raw.endsWith('\\')) raw = raw.slice(0, -1);
+
+    let decoded: string;
+    try {
+      decoded = JSON.parse(`"${raw}"`) as string;
+    } catch {
+      // Mid-escape sequence we can't safely decode yet — wait for next feed.
+      return;
+    }
+
+    if (decoded.length > this.watchEmittedLen) {
+      this.watchEmittedLen = decoded.length;
+      onEvent({ type: 'valueChunk', name: this.watchActiveKey, partial: decoded });
+    }
+
+    if (end !== -1) {
+      this.watchActiveKey = null;
+      this.watchValueStart = -1;
+      this.watchEmittedLen = 0;
+      // Advance past the closing quote so the same key doesn't re-match on
+      // the next pass, then look for the next watched key in the same buffer.
+      this.watchScanFrom = end + 1;
+      this.advanceWatchedValue(onEvent);
+    }
   }
 }
 

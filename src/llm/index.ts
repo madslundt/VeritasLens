@@ -87,6 +87,17 @@ export interface CallLensStreamOptions extends CallLensOptions {
    * (sourceText/translatedText) render incrementally.
    */
   onPartialField?: (name: string, value: string | number | boolean | null) => void;
+  /**
+   * Names of string-valued properties whose mid-stream content should be
+   * surfaced via `onPartialString`. Used by personas with `streamHeading`
+   * configured (Trivia's `answer`, Translate's `translatedText`).
+   */
+  watchValueKeys?: ReadonlySet<string>;
+  /**
+   * Fires while a watched value is being read, with the cumulative content
+   * decoded so far. Caller throttles HUD commits.
+   */
+  onPartialString?: (name: string, partial: string) => void;
   onNoSpeech?: () => void;
 }
 
@@ -236,6 +247,8 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       onRetry: opts.onRetry,
       onPartialClaim: opts.onPartialClaim,
       onPartialField: opts.onPartialField,
+      watchValueKeys: opts.watchValueKeys,
+      onPartialString: opts.onPartialString,
       onNoSpeech: opts.onNoSpeech,
     });
   }
@@ -261,6 +274,8 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       onRetry: opts.onRetry,
       onPartialClaim: opts.onPartialClaim,
       onPartialField: opts.onPartialField,
+      watchValueKeys: opts.watchValueKeys,
+      onPartialString: opts.onPartialString,
       onNoSpeech: opts.onNoSpeech,
     });
   }

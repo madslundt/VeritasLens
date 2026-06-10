@@ -34,6 +34,8 @@ import {
   restoreHistoryListPage,
   scrollActiveReason,
   scrollHistoryDetail,
+  seedMenuSpinnerFrame,
+  seedStatusFrame,
   setActiveHint,
   setActiveLayout,
   setAutoModeIndicator,
@@ -284,7 +286,7 @@ export async function stopHudRuntime(): Promise<void> {
   if (!running) return;
   running = false;
   stopSettingsWatcher();
-  stopSpinner();
+  await stopSpinner();
   // Abort the auto-summary tick BEFORE clearing the timer, so a tick already
   // mid-fetch when shutdown begins doesn't keep its network call (and the WAV
   // / base64 closures behind it) alive past teardown.
@@ -875,7 +877,7 @@ async function leaveActiveSession(): Promise<void> {
     }
     stopAutoModeWatcher();
     void setAutoModeIndicator(false);
-    stopSpinner();
+    await stopSpinner();
     // Abort any auto-summary tick already in flight, then stop the periodic
     // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
     // base64 encoding) terminates immediately and frees its WAV/base64 closures
@@ -920,6 +922,11 @@ let spinnerPrefix = '';
 // status. Without this guard a single straggler tick can briefly revert the
 // verdict back to a spinner frame.
 let spinnerGen = 0;
+// Promise for the SDK write currently in flight from a spinner tick. stopSpinner
+// awaits this before issuing the clear writes so a tick's awaited SDK call
+// (started one cadence ago) can't land *after* the clear and paint a stale
+// glyph over the answer view.
+let spinnerInflight: Promise<void> | null = null;
 
 function statusFrameContent(frame: string): string {
   return spinnerPrefix ? `${spinnerPrefix}${frame}` : ` ${frame}  `;
@@ -930,34 +937,44 @@ function startSpinner(): void {
   let i = 0;
   const gen = spinnerGen;
   // Push an initial frame immediately so the menu/status slot doesn't stay
-  // blank for up to one tick after analysis begins. Update both canonical
-  // buffers in lock-step (cheap module-level assignments, no SDK call), but
-  // only push to the SDK for the slot that is currently visible. This halves
-  // bridge throughput in steady state and keeps the unseen slot seeded for
-  // when the user navigates to it mid-analysis.
+  // blank for up to one tick after analysis begins. Only the slot that's
+  // currently visible gets an SDK round trip; the other slot's canonical
+  // buffer is seeded via seedStatusFrame / seedMenuSpinnerFrame so a page
+  // rebuild mid-analysis still sees the latest frame without queueing a
+  // fire-and-forget write that could out-live stopSpinner.
   const dispatchFrame = async (frame: string): Promise<void> => {
     const page = currentHudPage();
     if (page === 'active') {
+      seedMenuSpinnerFrame(frame);
       await setStatus(statusFrameContent(frame));
-      // Seed menuSpinner buffer without an SDK round trip.
-      void setMenuSpinner(frame);
     } else if (page === 'menu') {
+      seedStatusFrame(statusFrameContent(frame));
       await setMenuSpinner(frame);
-      // Seed status buffer without an SDK round trip.
-      void setStatus(statusFrameContent(frame));
     } else {
       // No visible spinner slot — just seed both buffers for later rebuilds.
-      void setStatus(statusFrameContent(frame));
-      void setMenuSpinner(frame);
+      seedStatusFrame(statusFrameContent(frame));
+      seedMenuSpinnerFrame(frame);
     }
   };
 
   const tick = async (): Promise<void> => {
     if (gen !== spinnerGen) return; // stale tick after stopSpinner
     const frame = SPINNER_FRAMES[i]!;
+    // Re-check the generation immediately before issuing the SDK write —
+    // stopSpinner could have run between scheduling this tick and now. Without
+    // this second guard the write would land after the clear and stick a
+    // spinner glyph on top of the answer view.
+    if (gen !== spinnerGen) return;
+    const dispatch = dispatchFrame(frame);
+    spinnerInflight = dispatch;
     try {
-      await dispatchFrame(frame);
+      await dispatch;
+    } catch {
+      // Swallowed here so stopSpinner's drain doesn't see a rejection from a
+      // tick whose error has nothing to do with the stop. The originating
+      // setStatus / setMenuSpinner call would already have surfaced it.
     } finally {
+      if (spinnerInflight === dispatch) spinnerInflight = null;
       if (gen === spinnerGen) {
         i = (i + 1) % SPINNER_FRAMES.length;
         // Self-reschedule only after the SDK write resolves — caps cadence to
@@ -973,7 +990,7 @@ function startSpinner(): void {
   spinnerTimer = setTimeout(() => { void tick(); }, 0);
 }
 
-function stopSpinner(): void {
+async function stopSpinner(): Promise<void> {
   if (spinnerTimer) clearTimeout(spinnerTimer);
   spinnerTimer = null;
   spinnerPrefix = '';
@@ -984,8 +1001,14 @@ function stopSpinner(): void {
   // status container.
   clearStatusFrame();
   clearMenuSpinnerFrame();
-  void setMenuSpinner('');
-  void setStatus('listening');
+  // Drain any spinner tick that was mid-await when we bumped the generation,
+  // so its SDK write lands *before* our clear writes — otherwise it would
+  // overwrite the just-rendered answer with a final spinner frame.
+  if (spinnerInflight) {
+    try { await spinnerInflight; } catch { /* surfaced by the originating call */ }
+  }
+  await setMenuSpinner('');
+  await setStatus('listening');
 }
 
 /**
@@ -1371,7 +1394,7 @@ async function runAnalysis(): Promise<void> {
         onRetry,
       });
       const result = parseMeetingPrepResponse(rawText, sections);
-      stopSpinner();
+      await stopSpinner();
       setStateResult(result);
       const newEntryId = await pushHistoryEntry({
         sessionId: currentSessionId,
@@ -1411,7 +1434,7 @@ async function runAnalysis(): Promise<void> {
         (id) => !settings().autoDisabledLenses.includes(id),
       );
       if (enabled.length === 0) {
-        stopSpinner();
+        await stopSpinner();
         await setStatus('No Auto lenses enabled — configure in settings');
         return;
       }
@@ -1472,7 +1495,7 @@ async function runAnalysis(): Promise<void> {
       if (!chosen) {
         speculativeCtrl.abort();
         controller.signal.removeEventListener('abort', forwardAbort);
-        stopSpinner();
+        await stopSpinner();
         setErrorMessage(`Auto classifier returned unknown lens: ${chosenLensId}`);
         await setStatus('error');
         setAppPhase('error');
@@ -1528,6 +1551,38 @@ async function runAnalysis(): Promise<void> {
       // skip the latency cost of the Google Search tool.
       const tools =
         analysisPersona.grounding === 'google_search' ? [...GOOGLE_SEARCH_TOOLS] : undefined;
+
+      // Persona-opt-in heading streaming. When `streamHeading` is set, the
+      // parser surfaces cumulative content for that one field as it streams.
+      // Throttled to HEADING_COMMIT_MS so the SDK's page rebuild isn't
+      // strobed (50–150ms per commit on this hardware), and capped at the
+      // claim-render queue tail so the final result still wins.
+      const HEADING_COMMIT_MS = 150;
+      const watchValueKeys = analysisPersona.streamHeading
+        ? new Set<string>([analysisPersona.streamHeading.field])
+        : undefined;
+      let lastHeadingCommitAt = 0;
+      let pendingHeadingPartial: string | null = null;
+      let headingTimer: ReturnType<typeof setTimeout> | null = null;
+      const commitHeading = (): void => {
+        if (headingTimer !== null) {
+          clearTimeout(headingTimer);
+          headingTimer = null;
+        }
+        if (pendingHeadingPartial === null || !analysisPersona.streamHeading) return;
+        const partial = pendingHeadingPartial;
+        pendingHeadingPartial = null;
+        lastHeadingCommitAt = performance.now();
+        renderQueue = renderQueue.then(async () => {
+          try {
+            const synthetic = analysisPersona.streamHeading!.synthesize(partial);
+            if (partialAutoSelected) synthetic.autoSelected = true;
+            await setLensResult(synthetic);
+          } catch {
+            /* defensive — synthesize should never throw */
+          }
+        });
+      };
       rawText = await callLensStream({
         wav,
         prompt: `${analysisContext}\n\n${analysisPrompt}`,
@@ -1535,6 +1590,19 @@ async function runAnalysis(): Promise<void> {
         signal: controller.signal,
         onRetry,
         tools,
+        watchValueKeys,
+        onPartialString: (name, partial) => {
+          if (!analysisPersona.streamHeading) return;
+          if (name !== analysisPersona.streamHeading.field) return;
+          pendingHeadingPartial = partial;
+          const now = performance.now();
+          const elapsed = now - lastHeadingCommitAt;
+          if (elapsed >= HEADING_COMMIT_MS) {
+            commitHeading();
+          } else if (headingTimer === null) {
+            headingTimer = setTimeout(commitHeading, HEADING_COMMIT_MS - elapsed);
+          }
+        },
         onPartialClaim: (claim) => {
           partialClaims.push(claim);
           setLensPartialResult({
@@ -1562,6 +1630,14 @@ async function runAnalysis(): Promise<void> {
           });
         },
       });
+      // Drain any pending heading commit before the final-result render so a
+      // stale partial commit can't resolve after the authoritative final and
+      // overwrite it.
+      if (headingTimer !== null) {
+        clearTimeout(headingTimer);
+        headingTimer = null;
+      }
+      pendingHeadingPartial = null;
     }
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
@@ -1569,7 +1645,7 @@ async function runAnalysis(): Promise<void> {
     // lands last (and therefore wins) — without this a stale partial commit
     // could resolve after the authoritative final render and overwrite it.
     await renderQueue;
-    stopSpinner();
+    await stopSpinner();
     // Final result now lives in `lensResult` — drop the partial so any
     // reactive `partial ?? final` consumer flips over to the authoritative
     // parse without one frame of stale partial data.
@@ -1600,7 +1676,7 @@ async function runAnalysis(): Promise<void> {
     await setActiveHint(ACTIVE_HINT_DEFAULT);
     setAppPhase('displaying');
   } catch (err) {
-    stopSpinner();
+    await stopSpinner();
     // Clear the in-progress partial across every error branch — abort,
     // NoSpeech, transport, blockReason. The HUD's `partial ?? final` reader
     // would otherwise hold the last claim on screen past the failure.

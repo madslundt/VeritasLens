@@ -39,6 +39,27 @@ export type PersonaId = string;
  */
 export type LensGrounding = 'google_search';
 
+/**
+ * Persona-level opt-in for intra-claim heading streaming. When set, the
+ * lifecycle subscribes to `valueChunk` events for `field` and, every ~150ms,
+ * synthesizes a partial `LensResult` via `synthesize(partial)` so the wearer
+ * sees the heading text fill in character-by-character before the full
+ * response lands.
+ *
+ * Scoped narrowly to lenses where a single short string carries the wearer's
+ * answer (Trivia's `answer`, Translate's `translatedText`). Multi-claim
+ * lenses already get claim-by-claim streaming via `onPartialClaim` — adding
+ * this on top would just cause the HUD to strobe.
+ */
+export interface StreamHeadingConfig {
+  /** JSON property name to watch — must match the persona's schema. */
+  field: string;
+  /** Build a placeholder `LensResult` whose heading slot carries `partial`.
+   *  Other slots should be empty strings so the HUD's formatter renders the
+   *  partial without prefilling stale text. */
+  synthesize: (partial: string) => LensResult;
+}
+
 export interface Persona {
   id: PersonaId;
   name: string;
@@ -51,6 +72,9 @@ export interface Persona {
   parse: (text: string) => LensResult;
   /** Web-grounding capability. Omit when the lens is interpretive. */
   grounding?: LensGrounding;
+  /** Opt-in intra-claim heading streaming. Omit when the lens isn't worth
+   *  streaming character-by-character (most multi-claim lenses). */
+  streamHeading?: StreamHeadingConfig;
   builtin: true;
 }
 
@@ -86,6 +110,17 @@ const BUILTINS: Persona[] = [
     schema: TRIVIA_SCHEMA,
     parse: parseTriviaResponse,
     grounding: 'google_search',
+    streamHeading: {
+      field: 'answer',
+      // The HUD's trivia formatter reads `c.answer` for the middle slot —
+      // populating only `answer` keeps the page minimal during streaming;
+      // question/description appear once the full claim closes via the
+      // normal final-result render.
+      synthesize: (partial) => ({
+        type: 'trivia',
+        claims: [{ quote: '', question: '', answer: partial, description: '' }],
+      }),
+    },
     builtin: true,
   },
   {
@@ -172,6 +207,19 @@ const BUILTINS: Persona[] = [
       ),
     get schema() { return getTranslationSchema(settings().translationMode); },
     parse: parseTranslationResponse,
+    streamHeading: {
+      field: 'translatedText',
+      // Listen-in and Converse both render `translatedText` in the heading
+      // slot — keep starters empty during streaming so the picker chrome
+      // doesn't flash with placeholder rows before the real ones land.
+      synthesize: (partial) => ({
+        type: 'translation',
+        sourceLanguage: '',
+        sourceText: '',
+        translatedText: partial,
+        replyStarters: [],
+      }),
+    },
     builtin: true,
   },
   {

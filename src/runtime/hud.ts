@@ -787,6 +787,17 @@ export async function setMenuSpinner(content: string): Promise<void> {
 export function clearStatusFrame(): void { pendingStatusFrame = ''; }
 export function clearMenuSpinnerFrame(): void { pendingMenuSpinnerFrame = ''; }
 
+/**
+ * Seed the canonical status / menu-spinner buffers without an SDK round trip.
+ * Used by the spinner ticker for the *non-visible* slot — the next rebuild of
+ * that page will pick the seeded frame up, but we don't queue an extra device
+ * write for a slot the wearer can't currently see. Skipping the round trip is
+ * what keeps fire-and-forget spinner writes from out-living stopSpinner and
+ * landing on top of the answer view.
+ */
+export function seedStatusFrame(content: string): void { pendingStatusFrame = content; }
+export function seedMenuSpinnerFrame(content: string): void { pendingMenuSpinnerFrame = content; }
+
 let pickerHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**

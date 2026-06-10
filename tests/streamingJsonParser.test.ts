@@ -180,4 +180,58 @@ describe('StreamingJsonParser', () => {
     const fields = events.filter((e) => e.type === 'field');
     expect(fields).toHaveLength(2);
   });
+
+  it('surfaces mid-string content for a watched value across chunks', () => {
+    const parser = new StreamingJsonParser({ watchValueKeys: new Set(['translatedText']) });
+    const events: StreamingJsonEvent[] = [];
+    parser.feed('{"sourceText":"Hola","translatedText":"Hel', (e) => events.push(e));
+    parser.feed('lo, wor', (e) => events.push(e));
+    parser.feed('ld"}', (e) => events.push(e));
+    const chunks = events.filter((e) => e.type === 'valueChunk') as Array<
+      { type: 'valueChunk'; name: string; partial: string }
+    >;
+    expect(chunks.length).toBeGreaterThanOrEqual(2);
+    expect(chunks[0]!.name).toBe('translatedText');
+    expect(chunks[0]!.partial).toBe('Hel');
+    expect(chunks[chunks.length - 1]!.partial).toBe('Hello, world');
+  });
+
+  it('emits valueChunk for a watched key inside the first claim object (Trivia answer)', () => {
+    const parser = new StreamingJsonParser({ watchValueKeys: new Set(['answer']) });
+    const events: StreamingJsonEvent[] = [];
+    const text = '{"claims":[{"quote":"who","question":"Who was first?","answer":"Neil Armstrong","description":"...","confidence":"HIGH"}]}';
+    for (let i = 0; i < text.length; i += 7) parser.feed(text.slice(i, i + 7), (e) => events.push(e));
+    const chunks = events.filter((e) => e.type === 'valueChunk') as Array<
+      { type: 'valueChunk'; name: string; partial: string }
+    >;
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks[chunks.length - 1]!.partial).toBe('Neil Armstrong');
+  });
+
+  it('handles escaped quotes inside the watched value', () => {
+    const parser = new StreamingJsonParser({ watchValueKeys: new Set(['translatedText']) });
+    const events: StreamingJsonEvent[] = [];
+    parser.feed('{"translatedText":"He said \\"hi\\""}', (e) => events.push(e));
+    const chunks = events.filter((e) => e.type === 'valueChunk') as Array<
+      { type: 'valueChunk'; name: string; partial: string }
+    >;
+    expect(chunks[chunks.length - 1]!.partial).toBe('He said "hi"');
+  });
+
+  it('does not emit valueChunk when no keys are watched', () => {
+    const parser = new StreamingJsonParser();
+    const events: StreamingJsonEvent[] = [];
+    parser.feed('{"answer":"Neil"}', (e) => events.push(e));
+    expect(events.filter((e) => e.type === 'valueChunk')).toHaveLength(0);
+  });
+
+  it('emits no duplicate valueChunk content when feed() lands no new chars', () => {
+    const parser = new StreamingJsonParser({ watchValueKeys: new Set(['answer']) });
+    const events: StreamingJsonEvent[] = [];
+    parser.feed('{"answer":"Neil', (e) => events.push(e));
+    const before = events.filter((e) => e.type === 'valueChunk').length;
+    parser.feed('', (e) => events.push(e));
+    const after = events.filter((e) => e.type === 'valueChunk').length;
+    expect(after).toBe(before);
+  });
 });
