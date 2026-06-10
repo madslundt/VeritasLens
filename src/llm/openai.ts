@@ -58,6 +58,13 @@ export interface CallOpenAiLensOptions {
   signal?: AbortSignal;
   /** Called before each retry (attempt = 1..MAX_RETRIES). */
   onRetry?: (attempt: number) => void | Promise<void>;
+  /**
+   * Fired with the speech-to-text result on the transcribe-then-chat path.
+   * Never fires on inline-audio hosts (OpenRouter) since there's no separate
+   * STT step. Captured here so the rolling transcript widget on the HUD
+   * surfaces what was just heard at no extra API cost.
+   */
+  onTranscript?: (text: string) => void;
 }
 
 /**
@@ -159,23 +166,17 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
       signal: opts.signal,
     });
     userContent = transcriptUserMessage(transcript);
+    // Surface the captured transcript before the chat call so the rolling
+    // transcript widget can render the wearer's just-heard text without
+    // waiting for the structured response.
+    try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
   }
 
-  // Build the chat-completions body once so retries don't re-stringify the
-  // (potentially long) transcript on every attempt.
-  const bodyJson = JSON.stringify({
-    model: opts.model,
-    temperature: 0.2,
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: 'lens_result', strict: true, schema: strict },
-    },
-    messages: [
-      { role: 'system', content: opts.prompt },
-      { role: 'user', content: userContent },
-    ],
-  });
-
+  // Schema-mode state survives the outer retry loop so once a host has rejected
+  // strict json_schema (Groq with non-`llama-3.x` / non-`gpt-oss` models being
+  // the common case), every subsequent attempt skips straight to json_object
+  // mode — we don't waste a second 400 trying strict again on the same call.
+  let useStrictSchema = true;
   const endpoint = `${opts.baseUrl}/chat/completions`;
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
@@ -188,53 +189,147 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
     // Per-attempt deadline: a hung socket on /chat/completions used to wedge
     // the whole user gesture. Now we abort after CHAT_TIMEOUT_MS and either
     // retry (transient-equivalent) or surface UploadTimeoutError on exhaust.
-    const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${opts.apiKey}`,
-        },
-        body: bodyJson,
-        signal: attemptCtl.signal,
+    // The inner phase-loop lets us retry once with `useStrictSchema=false`
+    // when the host rejects strict json_schema — same outer attempt counter,
+    // so a json_schema 400 followed by a json_object 200 doesn't burn a retry.
+    let response: Response | null = null;
+    let errText = '';
+    let transientStatus = 0;
+    let postFailed = false;
+    for (let phase = 0; phase < 2; phase++) {
+      const bodyJson = buildChatBody({
+        model: opts.model,
+        prompt: opts.prompt,
+        userContent,
+        strictSchema: strict,
+        useStrictSchema,
+        stream: false,
       });
-    } catch (err) {
-      attemptCtl.cleanup();
-      if (opts.signal?.aborted) throw err;
-      if (attemptCtl.timedOut()) {
-        lastError = new UploadTimeoutError(
-          `${openaiHostLabel(opts.baseUrl)} chat request timed out after ${CHAT_TIMEOUT_MS / 1000}s.`,
-        );
+      const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
+      try {
+        response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${opts.apiKey}`,
+          },
+          body: bodyJson,
+          signal: attemptCtl.signal,
+        });
+      } catch (err) {
+        attemptCtl.cleanup();
+        if (opts.signal?.aborted) throw err;
+        if (attemptCtl.timedOut()) {
+          lastError = new UploadTimeoutError(
+            `${openaiHostLabel(opts.baseUrl)} chat request timed out after ${CHAT_TIMEOUT_MS / 1000}s.`,
+          );
+        } else {
+          lastError = err instanceof Error ? err : new Error(String(err));
+        }
         nextDelayMs = 1000;
-        continue;
+        postFailed = true;
+        break;
       }
-      lastError = err instanceof Error ? err : new Error(String(err));
-      nextDelayMs = 1000;
+      attemptCtl.cleanup();
+
+      if (response.status === 503 || response.status === 429) {
+        errText = await response.text();
+        transientStatus = response.status;
+        break;
+      }
+
+      if (!response.ok) {
+        errText = await response.text();
+        // First-phase schema rejection (Groq on a non-strict-capable model,
+        // DeepSeek before they added json_schema, etc.) — drop strict and
+        // retry the same attempt with json_object + schema embedded in the
+        // system prompt. After the first fallback `useStrictSchema` stays
+        // false for the rest of the call so we don't re-probe.
+        if (phase === 0 && useStrictSchema && isSchemaRejection(response.status, errText)) {
+          useStrictSchema = false;
+          continue;
+        }
+        throw new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
+      }
+      break;
+    }
+
+    if (postFailed) continue;
+    if (transientStatus !== 0) {
+      nextDelayMs = parseRetryAfterMs(response!.headers.get('retry-after')) ?? (transientStatus === 429 ? 5000 : 1000);
+      lastError = new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${transientStatus}: ${truncate(errText, 2000)}`);
       continue;
     }
-    attemptCtl.cleanup();
 
-    if (response.status === 503 || response.status === 429) {
-      const errText = await response.text();
-      nextDelayMs = parseRetryAfterMs(response.headers.get('retry-after')) ?? (response.status === 429 ? 5000 : 1000);
-      lastError = new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
-      continue;
-    }
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
-    }
-
-    const payload = (await response.json()) as ChatCompletionsResponse;
+    const payload = (await response!.json()) as ChatCompletionsResponse;
     if (payload.error?.message) throw new Error(`${openaiHostLabel(opts.baseUrl)} error: ${payload.error.message}`);
     const text = payload.choices?.[0]?.message?.content;
     if (!text) throw new Error(`${openaiHostLabel(opts.baseUrl)} returned no message content.`);
     return text;
   }
   throw lastError ?? new Error('callOpenAiLens: exhausted retries without a result.');
+}
+
+/**
+ * Detect a strict-json_schema rejection from an OpenAI-compatible host.
+ * Groq returns HTTP 400 with a body mentioning `response_format` or
+ * `json_schema` on models that don't support structured outputs. Same for
+ * older DeepSeek revisions and some OpenRouter community models. The match is
+ * generous on purpose — a false positive only costs us a single extra request
+ * with json_object mode, which still works on the strict-capable hosts.
+ */
+function isSchemaRejection(status: number, body: string): boolean {
+  if (status !== 400) return false;
+  const lower = body.toLowerCase();
+  return (
+    lower.includes('json_schema')
+    || lower.includes('response_format')
+    || lower.includes('structured output')
+    || (lower.includes('strict') && lower.includes('schema'))
+  );
+}
+
+interface BuildChatBodyOpts {
+  model: string;
+  prompt: string;
+  userContent: unknown;
+  strictSchema: unknown;
+  /** When false, embed the schema in the system prompt and use `json_object` instead of `json_schema`. */
+  useStrictSchema: boolean;
+  stream: boolean;
+}
+
+/**
+ * Build the chat-completions body for the OpenAI-compatible hosts. Two modes:
+ *
+ *   - **Strict** (`useStrictSchema=true`): the canonical path. Sends
+ *     `response_format.json_schema.strict: true` so the model is constrained at
+ *     decode time. Works on OpenAI, Claude (via Anthropic adapter, not this
+ *     file), Groq's `llama-3.x` / `gpt-oss` / `kimi-k2` set, and OpenRouter
+ *     models that opt in.
+ *   - **JSON-object fallback** (`useStrictSchema=false`): Groq's legacy
+ *     `llama-3.1-70b-versatile`, older DeepSeek, and a handful of OpenRouter
+ *     community models return HTTP 400 on strict mode. We retry with
+ *     `response_format.json_object` and prepend the schema to the system
+ *     prompt so the model still produces matching JSON — the parser doesn't
+ *     care which path produced the bytes.
+ */
+function buildChatBody(opts: BuildChatBodyOpts): string {
+  const systemContent = opts.useStrictSchema
+    ? opts.prompt
+    : `${opts.prompt}\n\nOutput strict JSON matching exactly this JSON Schema. Do not include any prose or markdown outside the JSON object:\n\n${JSON.stringify(opts.strictSchema)}`;
+  return JSON.stringify({
+    model: opts.model,
+    temperature: 0.2,
+    ...(opts.stream ? { stream: true } : {}),
+    response_format: opts.useStrictSchema
+      ? { type: 'json_schema', json_schema: { name: 'lens_result', strict: true, schema: opts.strictSchema } }
+      : { type: 'json_object' },
+    messages: [
+      { role: 'system', content: systemContent },
+      { role: 'user', content: opts.userContent },
+    ],
+  });
 }
 
 // ---------- Streaming variant ----------
@@ -309,22 +404,16 @@ export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): P
       signal: opts.signal,
     });
     userContent = transcriptUserMessage(transcript);
+    // Surface the captured transcript before the chat call so the rolling
+    // transcript widget can render the wearer's just-heard text without
+    // waiting for the structured response.
+    try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
   }
 
-  const bodyJson = JSON.stringify({
-    model: opts.model,
-    temperature: 0.2,
-    stream: true,
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: 'lens_result', strict: true, schema: strict },
-    },
-    messages: [
-      { role: 'system', content: opts.prompt },
-      { role: 'user', content: userContent },
-    ],
-  });
-
+  // Schema-mode state survives the outer retry loop, same as `callOpenAiLens`.
+  // The fallback handshake runs before the stream opens, so a schema rejection
+  // never lands partial UI on screen.
+  let useStrictSchema = true;
   const endpoint = `${opts.baseUrl}/chat/completions`;
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
@@ -334,49 +423,73 @@ export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): P
       await opts.onRetry?.(attempt);
       await retryDelay(nextDelayMs, opts.signal);
     }
-    const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          accept: 'text/event-stream',
-          authorization: `Bearer ${opts.apiKey}`,
-        },
-        body: bodyJson,
-        signal: attemptCtl.signal,
+    let response: Response | null = null;
+    let errText = '';
+    let transientStatus = 0;
+    let postFailed = false;
+    for (let phase = 0; phase < 2; phase++) {
+      const bodyJson = buildChatBody({
+        model: opts.model,
+        prompt: opts.prompt,
+        userContent,
+        strictSchema: strict,
+        useStrictSchema,
+        stream: true,
       });
-    } catch (err) {
-      attemptCtl.cleanup();
-      if (opts.signal?.aborted) throw err;
-      if (attemptCtl.timedOut()) {
-        lastError = new UploadTimeoutError(
-          `${openaiHostLabel(opts.baseUrl)} chat request timed out after ${CHAT_TIMEOUT_MS / 1000}s.`,
-        );
+      const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
+      try {
+        response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'text/event-stream',
+            authorization: `Bearer ${opts.apiKey}`,
+          },
+          body: bodyJson,
+          signal: attemptCtl.signal,
+        });
+      } catch (err) {
+        attemptCtl.cleanup();
+        if (opts.signal?.aborted) throw err;
+        if (attemptCtl.timedOut()) {
+          lastError = new UploadTimeoutError(
+            `${openaiHostLabel(opts.baseUrl)} chat request timed out after ${CHAT_TIMEOUT_MS / 1000}s.`,
+          );
+        } else {
+          lastError = err instanceof Error ? err : new Error(String(err));
+        }
         nextDelayMs = 1000;
-        continue;
+        postFailed = true;
+        break;
       }
-      lastError = err instanceof Error ? err : new Error(String(err));
-      nextDelayMs = 1000;
+      attemptCtl.cleanup();
+
+      if (response.status === 503 || response.status === 429) {
+        errText = await response.text();
+        transientStatus = response.status;
+        break;
+      }
+
+      if (!response.ok) {
+        errText = await response.text();
+        if (phase === 0 && useStrictSchema && isSchemaRejection(response.status, errText)) {
+          useStrictSchema = false;
+          continue;
+        }
+        throw new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
+      }
+      break;
+    }
+
+    if (postFailed) continue;
+    if (transientStatus !== 0) {
+      nextDelayMs = parseRetryAfterMs(response!.headers.get('retry-after')) ?? (transientStatus === 429 ? 5000 : 1000);
+      lastError = new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${transientStatus}: ${truncate(errText, 2000)}`);
       continue;
     }
-    attemptCtl.cleanup();
 
-    if (response.status === 503 || response.status === 429) {
-      const errText = await response.text();
-      nextDelayMs = parseRetryAfterMs(response.headers.get('retry-after')) ?? (response.status === 429 ? 5000 : 1000);
-      lastError = new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
-      continue;
-    }
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`${openaiHostLabel(opts.baseUrl)} HTTP ${response.status}: ${truncate(errText, 2000)}`);
-    }
-
-    if (!response.body) throw new Error(`${openaiHostLabel(opts.baseUrl)} stream returned no body.`);
-    return consumeOpenAiStream(response.body, opts);
+    if (!response!.body) throw new Error(`${openaiHostLabel(opts.baseUrl)} stream returned no body.`);
+    return consumeOpenAiStream(response!.body, opts);
   }
   throw lastError ?? new Error('callOpenAiLensStream: exhausted retries without a stream.');
 }

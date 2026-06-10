@@ -54,6 +54,7 @@ vi.mock('../src/runtime/bridge', () => ({
 
 import {
   _resetHudBootstrapForTesting,
+  blankActiveForThinking,
   bootstrapHud,
   currentHudPage,
   hasPendingActiveResult,
@@ -2059,5 +2060,82 @@ describe('showMidSummaryPage', () => {
     const upgrades = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string } }]>;
     expect(upgrades.some((c) => c[0].payload.containerName === 'vl-reason')).toBe(true);
     expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+});
+
+describe('blankActiveForThinking', () => {
+  // Layer A: when the lifecycle enters the thinking phase, the wearer's mental
+  // model is "spinner means working". Blank the prior result widget but keep
+  // sessionPages intact so swipe-up during analysis re-reveals it, and the
+  // arrival of a partial/final result auto-clears the hidden flag.
+
+  const oneClaim: LensResult = {
+    type: 'fact-check',
+    claims: [{ quote: 'q', verdict: 'TRUE', claim: 'C1', reason: 'R1' }],
+  };
+
+  it('blanks the result and marks active hidden when a prior result is on screen', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(oneClaim);
+    expect(isActiveHidden()).toBe(false);
+
+    await blankActiveForThinking();
+
+    expect(isActiveHidden()).toBe(true);
+  });
+
+  it('swipe-up after blankActiveForThinking reveals the prior result', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(oneClaim);
+    await blankActiveForThinking();
+    expect(isActiveHidden()).toBe(true);
+
+    const outcome = await scrollActiveReason(-1);
+    expect(outcome).toBe('revealed');
+    expect(isActiveHidden()).toBe(false);
+  });
+
+  it('is a no-op when there is nothing to hide (first analysis of a session)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    bridge.rebuildPageContainer.mockClear();
+
+    await blankActiveForThinking();
+
+    expect(isActiveHidden()).toBe(false);
+    // No HUD writes — the page was already in its idle layout.
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+
+  it('a fresh setLensResult after blanking clears the hidden flag (auto-return)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(oneClaim);
+    await blankActiveForThinking();
+    expect(isActiveHidden()).toBe(true);
+
+    await setLensResult({
+      type: 'fact-check',
+      claims: [{ quote: 'q2', verdict: 'FALSE', claim: 'fresh', reason: 'r2' }],
+    });
+
+    expect(isActiveHidden()).toBe(false);
+  });
+
+  it('does not double-blank when called twice (idempotent)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setLensResult(oneClaim);
+    await blankActiveForThinking();
+
+    bridge.rebuildPageContainer.mockClear();
+    await blankActiveForThinking();
+
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+    expect(isActiveHidden()).toBe(true);
   });
 });

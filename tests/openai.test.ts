@@ -185,3 +185,112 @@ describe('fetchOpenAiModels', () => {
     expect(models).toEqual(['gpt-4o', 'gpt-4o-mini']);
   });
 });
+
+describe('callOpenAiLens — Groq strict-json_schema fallback', () => {
+  // Groq returns HTTP 400 with a body mentioning `response_format` /
+  // `json_schema` for the legacy `llama-3.1-70b-versatile` and a handful of
+  // older models. The provider should retry the same attempt with
+  // `response_format: json_object` and the schema embedded in the system
+  // prompt, then succeed.
+  it('falls back to json_object + system-prompt schema on a 400 mentioning json_schema', async () => {
+    const requestBodies: string[] = [];
+    let chatCalls = 0;
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.endsWith('/audio/transcriptions')) return jsonResponse({ text: 'hi' });
+      chatCalls++;
+      requestBodies.push(String(init?.body ?? ''));
+      if (chatCalls === 1) {
+        return new Response(
+          JSON.stringify({
+            error: { message: "response_format 'json_schema' is not supported by this model" },
+          }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return jsonResponse(CHAT_OK);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const text = await callOpenAiLens({
+      ...baseOpts,
+      baseUrl: 'https://api.groq.com/openai/v1',
+      model: 'llama-3.1-70b-versatile',
+      transcribeModel: 'whisper-large-v3',
+    });
+
+    expect(text).toContain('TRUE');
+    // Two chat-completions calls — strict, then fallback — in addition to STT.
+    expect(chatCalls).toBe(2);
+
+    const strictBody = JSON.parse(requestBodies[0]);
+    expect(strictBody.response_format.type).toBe('json_schema');
+    const strictSystem = strictBody.messages.find((m: { role: string }) => m.role === 'system');
+    // Strict mode keeps the system prompt untouched — schema lives in
+    // response_format, not in the prompt.
+    expect(strictSystem.content).toBe('p');
+
+    const fallbackBody = JSON.parse(requestBodies[1]);
+    expect(fallbackBody.response_format.type).toBe('json_object');
+    const fallbackSystem = fallbackBody.messages.find((m: { role: string }) => m.role === 'system');
+    // Fallback mode appends the schema to the system prompt so the model
+    // still produces matching JSON without strict decode-time constraints.
+    expect(fallbackSystem.content).toContain('Output strict JSON matching');
+    expect(fallbackSystem.content).toContain('"verdict"');
+  });
+
+  it('fires onTranscript with the STT result on the transcribe-then-chat path', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/audio/transcriptions')) return jsonResponse({ text: 'hello world' });
+      return jsonResponse(CHAT_OK);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const seen: string[] = [];
+    await callOpenAiLens({
+      ...baseOpts,
+      baseUrl: 'https://api.openai.com/v1',
+      transcribeModel: 'whisper-1',
+      onTranscript: (text) => seen.push(text),
+    });
+
+    expect(seen).toEqual(['hello world']);
+  });
+
+  it('does not fire onTranscript on the inline-audio (OpenRouter) path', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(CHAT_OK));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const seen: string[] = [];
+    await callOpenAiLens({
+      ...baseOpts,
+      baseUrl: 'https://openrouter.ai/api/v1',
+      onTranscript: (text) => seen.push(text),
+    });
+
+    // OpenRouter attaches the WAV inline — no STT step, so no transcript to surface.
+    expect(seen).toEqual([]);
+  });
+
+  it('surfaces a non-schema 400 without retrying', async () => {
+    let chatCalls = 0;
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url.endsWith('/audio/transcriptions')) return jsonResponse({ text: 'hi' });
+      chatCalls++;
+      return new Response(
+        JSON.stringify({ error: { message: 'invalid api key' } }),
+        { status: 400, headers: { 'content-type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(callOpenAiLens({
+      ...baseOpts,
+      baseUrl: 'https://api.groq.com/openai/v1',
+      model: 'llama-3.1-70b-versatile',
+      transcribeModel: 'whisper-large-v3',
+    })).rejects.toThrow(/HTTP 400/);
+    // Only one chat-completions call — no fallback for non-schema errors so a
+    // bad key surfaces immediately instead of hiding behind a fallback retry.
+    expect(chatCalls).toBe(1);
+  });
+});

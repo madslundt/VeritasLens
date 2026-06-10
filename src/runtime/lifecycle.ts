@@ -39,6 +39,7 @@ import {
   setActiveHint,
   setActiveLayout,
   setAutoModeIndicator,
+  blankActiveForThinking,
   setLensResult,
   setMenuSpinner,
   setStatus,
@@ -130,6 +131,11 @@ import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { createEffect, createRoot, on } from 'solid-js';
 import { openaiHostLabel } from '@/types';
 import type { GeminiModel, LanguageCode, LensResult, MeetingPrepSection, Settings } from '@/types';
+import {
+  appendSegment as appendTranscriptSegment,
+  formatForPrompt as formatTranscriptForPrompt,
+  resetTranscript,
+} from './transcript';
 
 /**
  * Pick the Gemini Auto-classifier model from the current settings, or
@@ -876,6 +882,11 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   setActivePersona(personaId);
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   sessionStartTime = Date.now();
+  // Reset the rolling transcript so segments from the prior session don't
+  // bleed into this one's prompt context. Wired via the chat-byproduct
+  // `onTranscript` callback (Claude / OpenAI-compatible STT paths); Gemini
+  // gets segments via the whisper-sidecar path in `transcriptSource.ts`.
+  resetTranscript(currentSessionId);
   // Seed cross-session recall when the user has opted in AND auto-summary is
   // also on — the recall builder gates on `autoSummaryEnabled`, so seeding
   // without it would silently no-op. Pulls the most-recent N session
@@ -1178,6 +1189,15 @@ function clearErrorState(): void {
   setAppPhase('listening');
 }
 
+/** Hard cap on how many tagged transcript lines get injected into a single
+ *  prompt. The rolling buffer holds up to TRANSCRIPT_MAX_SEGMENTS (60) but the
+ *  model only needs the last few turns to attribute claims to speakers —
+ *  dragging the full window in would inflate every call past necessity. */
+const TRANSCRIPT_PROMPT_MAX_SEGMENTS = 12;
+
+const TRANSCRIPT_DIRECTIVE =
+  'RECENT TRANSCRIPT — tagged turns from this conversation so far. Use these to attribute claims to the correct speaker and to recognize a follow-up vs a fresh topic. Do NOT re-quote them verbatim unless the audio repeats them:';
+
 function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   const base = persona.buildPrompt(lang);
   const recent = buildAlreadyAnsweredLines();
@@ -1186,18 +1206,23 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   // about the other person speaking — surfacing the wearer's prior fact-check
   // headlines would mislead the model into translating around them.
   const memory = persona.id === 'translation' ? [] : buildRecentMemoryLines();
+  const transcript = formatTranscriptForPrompt({ maxSegments: TRANSCRIPT_PROMPT_MAX_SEGMENTS });
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
     '',
     base,
   ];
-  // Recall context first (general background), then recent-memory (soft —
-  // the model may or may not act on it), then the already-answered directive
+  // Recall context first (general background), then the tagged rolling
+  // transcript (recent conversation flow), then recent-memory (soft — the
+  // model may or may not act on it), then the already-answered directive
   // (hard rule) closest to the call so the model's last-seen instruction is
   // the suppression list, not the "look back" context.
   if (recall.length > 0) {
     parts.push('', RECALL_CONTEXT_DIRECTIVE, ...recall);
+  }
+  if (transcript.length > 0) {
+    parts.push('', TRANSCRIPT_DIRECTIVE, transcript);
   }
   if (memory.length > 0) {
     parts.push('', RECENT_MEMORY_DIRECTIVE, ...memory);
@@ -1422,6 +1447,13 @@ async function runAnalysis(): Promise<void> {
   // setStatus('thinking') here would flash '...' before the spinner takes
   // over, so we skip it and let the spinner own the status slot.
   await setActiveHint(analyzingHint);
+  // Blank the result widget so the wearer's mental model is "spinner means
+  // working." `sessionPages` stay intact, so a swipe-up during the analysis
+  // re-reveals the prior answer via the existing `scrollActiveReason`
+  // `activeHidden` path — no extra gesture routing needed. The arrival of a
+  // partial or final result automatically clears the hidden flag and
+  // re-renders inside `setLensResult`, so auto-return is free.
+  await blankActiveForThinking();
   startSpinner();
 
   try {
@@ -1682,6 +1714,24 @@ async function runAnalysis(): Promise<void> {
           }
         });
       };
+      // Capture the chat-byproduct transcript on Claude / OpenAI-compatible
+      // providers. The main runAnalysis path is always "wearer is listening"
+      // (wearer-speak has its own runWearerSpeakAnalyze entry that wires
+      // speaker='wearer'), so the speaker tag is 'other'. Gemini doesn't fire
+      // this callback because its audio path is inline-multimodal — Gemini's
+      // transcript landing in the buffer comes from the whisper-sidecar
+      // (transcriptSource.ts, deferred to a follow-up).
+      const captureTranscript = (text: string): void => {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        const now = Date.now();
+        appendTranscriptSegment({
+          speaker: 'other',
+          text: trimmed,
+          startedAt: now,
+          endedAt: now,
+        });
+      };
       rawText = await callLensStream({
         wav,
         prompt: `${analysisContext}\n\n${analysisPrompt}`,
@@ -1690,6 +1740,7 @@ async function runAnalysis(): Promise<void> {
         onRetry,
         tools,
         watchValueKeys,
+        onTranscript: captureTranscript,
         onPartialField: (name, value) => {
           if (!carryFieldSet.has(name)) return;
           carriedFields[name] = value;
@@ -2073,6 +2124,22 @@ async function runWearerSpeakAnalyze(): Promise<void> {
       prompt,
       schema: WEARER_SPEAK_SCHEMA,
       signal: controller.signal,
+      // Tag the wearer's just-spoken utterance into the rolling transcript so
+      // a follow-up turn from the other speaker sees the right attribution
+      // ("you said X" vs "they said X"). Only fires on Claude / OpenAI-
+      // compatible STT paths; Gemini's wearer-speak transcript will land via
+      // the whisper-sidecar in transcriptSource.ts.
+      onTranscript: (text) => {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        const now = Date.now();
+        appendTranscriptSegment({
+          speaker: 'wearer',
+          text: trimmed,
+          startedAt: now,
+          endedAt: now,
+        });
+      },
     });
     if (controller.signal.aborted) return;
     const parsed = parseWearerSpeakResponse(rawText);

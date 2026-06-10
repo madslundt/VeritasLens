@@ -729,6 +729,28 @@ export async function scrollActiveReason(dir: 1 | -1): Promise<ScrollActiveResul
   return 'noop';
 }
 
+/**
+ * Blank the active page result for the duration of a new analysis. The wearer's
+ * intended UX is "spinner means working; swipe-up to recall the last answer
+ * while you wait." This delegates to `hideActiveResultInPlace` so the existing
+ * swipe-up reveal path (active-page scrollActiveReason with `activeHidden`)
+ * surfaces the last sessionPage with no extra wiring.
+ *
+ * No-op when there's nothing to hide (first analysis of a session) — the page
+ * stays on its idle layout. No-op when the wearer is off the active page
+ * (menu/history/picker) since this is a HUD concern only; the lifecycle still
+ * starts the spinner in those slots via `startSpinner` separately.
+ *
+ * A subsequent `setLensResult(result)` — final OR partial — clears
+ * `activeHidden` and re-renders, so auto-return is free.
+ */
+export async function blankActiveForThinking(): Promise<void> {
+  if (currentPage !== 'active') return;
+  if (sessionPages.length === 0) return;
+  if (activeHidden) return;
+  await hideActiveResultInPlace();
+}
+
 /** Demote the active page to its idle layout (baseline / discreet-minimal)
  * while keeping `sessionPages` and `sessionPageIndex` intact, so a swipe-up
  * can reveal the last session page again. Shared by swipe-down dismiss and

@@ -63,6 +63,16 @@ export interface CallLensOptions extends Omit<GeminiCallLensOptions, 'apiKey' | 
   apiKey?: string;
   /** Provider-specific model id. When omitted, the active provider's stored model is used. */
   model?: string;
+  /**
+   * Fired with the speech-to-text result on providers that transcribe before
+   * the chat call (Claude and OpenAI-compatible hosts that aren't inline-audio).
+   * Gemini and OpenRouter never fire this — Gemini consumes audio inline, and
+   * OpenRouter attaches the WAV as a content part. The rolling transcript
+   * (`src/runtime/transcript.ts`) consumes this as one of its source modes
+   * (the `chat-byproduct` mode in `transcriptSource.ts`), so Claude / OpenAI
+   * users get a tagged transcript with zero extra API spend.
+   */
+  onTranscript?: (text: string) => void;
 }
 
 /**
@@ -162,6 +172,10 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       wav: opts.wav,
       signal: opts.signal,
     });
+    // Surface the captured transcript before the Anthropic call so the
+    // rolling transcript widget updates as soon as STT finishes — no need to
+    // wait for /v1/messages.
+    try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
     return callClaudeLens({
       apiKey: opts.apiKey ?? s.claudeApiKey,
       model: (opts.model as ClaudeModel | undefined) ?? s.claudeModel,
@@ -192,6 +206,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       schema: opts.schema,
       signal: opts.signal,
       onRetry: opts.onRetry,
+      onTranscript: opts.onTranscript,
     });
   }
   return callGeminiLens({
@@ -237,6 +252,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       wav: opts.wav,
       signal: opts.signal,
     });
+    try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
     return callClaudeLensStream({
       apiKey: opts.apiKey ?? s.claudeApiKey,
       model: (opts.model as ClaudeModel | undefined) ?? s.claudeModel,
@@ -277,6 +293,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       watchValueKeys: opts.watchValueKeys,
       onPartialString: opts.onPartialString,
       onNoSpeech: opts.onNoSpeech,
+      onTranscript: opts.onTranscript,
     });
   }
   return callGeminiLensStream({
