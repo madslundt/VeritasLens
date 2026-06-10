@@ -46,6 +46,7 @@ import {
   saveSttHost,
   saveSttModel,
   saveResponseLanguage,
+  saveTranscriptMode,
   saveTranslationMode,
   saveTranslationSourceLanguages,
   sessionHistory,
@@ -64,6 +65,8 @@ import {
   OPENAI_TRANSCRIBE_MODELS,
   STT_HOSTS,
   STT_MODELS_BY_HOST,
+  TRANSCRIPT_MODE_HELP,
+  TRANSCRIPT_MODE_LABELS,
   gameDifficultyLabel,
   gameFormatLabel,
   openaiHostLabel,
@@ -80,6 +83,7 @@ import {
   type MeetingPrepSection,
   type OpenAiBaseUrl,
   type SttHost,
+  type TranscriptMode,
 } from '@/types';
 import { personas } from '@/personas';
 import { MEETING_PREP_ID } from '@/personas/meetingPrep';
@@ -421,6 +425,7 @@ export const SettingsView: Component = () => {
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftCrossSessionRecall, setDraftCrossSessionRecall] = createSignal(settings().crossSessionRecallEnabled);
+  const [draftTranscriptMode, setDraftTranscriptMode] = createSignal<TranscriptMode>(settings().transcriptMode);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
   const [draftVoiceTrim, setDraftVoiceTrim] = createSignal(settings().voiceTrimEnabled);
@@ -1022,6 +1027,7 @@ export const SettingsView: Component = () => {
         autoDisabled,
         translationMode,
         translationSourceLangs,
+        transcriptMode,
         prepResult,
       ] = await Promise.all([
         saveProvider(setLs, draftProvider()),
@@ -1053,6 +1059,7 @@ export const SettingsView: Component = () => {
         saveAutoDisabledLenses(setLs, draftAutoDisabledLenses()),
         saveTranslationMode(setLs, draftTranslationMode()),
         saveTranslationSourceLanguages(setLs, resolveTranslationSourceLangs()),
+        saveTranscriptMode(setLs, draftTranscriptMode()),
         saveMeetingPrepSections(setLs, prepDraft()),
       ]);
       if (prepResult.ok) setPrepError('');
@@ -1062,7 +1069,7 @@ export const SettingsView: Component = () => {
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
         language, buffer, autoSummary, crossSessionRecall, discreet, voiceGate, voiceTrim,
         autoMode, autoModeStart, autoModeSilence, autoDisabled, translationMode,
-        translationSourceLangs,
+        translationSourceLangs, transcriptMode,
       ].every(Boolean) && prepResult.ok;
       if (allOk) {
         // Re-seed the draft signals from the persisted store. The store may
@@ -1146,6 +1153,7 @@ export const SettingsView: Component = () => {
       || draftBuffer() !== s.bufferDuration
       || draftAutoEnabled() !== s.autoSummaryEnabled
       || draftCrossSessionRecall() !== s.crossSessionRecallEnabled
+      || draftTranscriptMode() !== s.transcriptMode
       || draftDiscreet() !== s.discreet
       || draftVoiceGate() !== s.voiceGateRmsFloor
       || draftVoiceTrim() !== s.voiceTrimEnabled
@@ -2383,6 +2391,52 @@ export const SettingsView: Component = () => {
                     ⚠ Past-session summaries are sent to your provider in every prompt.
                   </span>
                 </Show>
+              </Show>
+            </div>
+
+            <div class="field">
+              <span class="field-label">Conversation transcript</span>
+              <span class="field-hint">
+                Keeps a rolling tagged transcript of who-said-what across the last ~120 s and
+                injects it into every lens prompt so the model can attribute claims to the right
+                speaker and skip re-answering. Separate from auto-summary above — that's a high-level
+                recap, this is per-turn context.
+              </span>
+              <label class="toggle-row" style="margin-top: 8px;">
+                <input
+                  type="radio"
+                  name="transcript-mode"
+                  checked={draftTranscriptMode() === 'off'}
+                  onChange={() => setDraftTranscriptMode('off')}
+                />
+                <span>{TRANSCRIPT_MODE_LABELS['off']} — no capture, no injection</span>
+              </label>
+              <label class="toggle-row">
+                <input
+                  type="radio"
+                  name="transcript-mode"
+                  checked={draftTranscriptMode() === 'on'}
+                  onChange={() => setDraftTranscriptMode('on')}
+                />
+                <span>{TRANSCRIPT_MODE_LABELS['on']} — capture &amp; inject (recommended)</span>
+              </label>
+              <label class="toggle-row">
+                <input
+                  type="radio"
+                  name="transcript-mode"
+                  checked={draftTranscriptMode() === 'on-verify'}
+                  onChange={() => setDraftTranscriptMode('on-verify')}
+                />
+                <span>{TRANSCRIPT_MODE_LABELS['on-verify']} — also flash each capture on the HUD</span>
+              </label>
+              <span class="field-hint">
+                {TRANSCRIPT_MODE_HELP[draftTranscriptMode()]}
+              </span>
+              <Show when={draftTranscriptMode() !== 'off' && (settings().provider === 'gemini' || settings().openaiBaseUrl === 'https://openrouter.ai/api/v1')}>
+                <span class="field-hint warning">
+                  ⚠ On Gemini / OpenRouter this fires one parallel Whisper call per analysis against
+                  your STT host (≈ $0.0001 / 10 s). No Whisper key set → silently skipped.
+                </span>
               </Show>
             </div>
 
