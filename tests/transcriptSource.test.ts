@@ -80,10 +80,6 @@ describe('shouldRunWhisperSidecar', () => {
     expect(shouldRunWhisperSidecar()).toBe(false);
   });
 
-  it("still runs on Gemini when transcriptMode is 'on-verify' (verify mode keeps capture on)", () => {
-    settingsFor({ provider: 'gemini', transcriptMode: 'on-verify' });
-    expect(shouldRunWhisperSidecar()).toBe(true);
-  });
 });
 
 describe('runWhisperSidecar', () => {

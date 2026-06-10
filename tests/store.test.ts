@@ -282,13 +282,6 @@ describe('loadSettings', () => {
     expect(settings().transcriptMode).toBe('off');
   });
 
-  it("round-trips transcriptMode='on-verify' through save → load", async () => {
-    const ls = fakeLocalStorage();
-    await saveTranscriptMode(ls.set, 'on-verify');
-    await loadSettings(ls.get);
-    expect(settings().transcriptMode).toBe('on-verify');
-  });
-
   it("migrates legacy transcriptEnabled='false' to transcriptMode='off' on read", async () => {
     const ls = fakeLocalStorage();
     ls.data.set('veritaslens.transcriptEnabled', 'false');
@@ -296,18 +289,17 @@ describe('loadSettings', () => {
     expect(settings().transcriptMode).toBe('off');
   });
 
-  it("migrates legacy transcriptWidgetEnabled='true' to transcriptMode='on-verify' on read", async () => {
+  it("collapses a stored 'on-verify' value to 'on' (legacy three-state value, verify-flash retired)", async () => {
     const ls = fakeLocalStorage();
-    ls.data.set('veritaslens.transcriptWidgetEnabled', 'true');
+    ls.data.set('veritaslens.transcriptMode', 'on-verify');
     await loadSettings(ls.get);
-    expect(settings().transcriptMode).toBe('on-verify');
+    expect(settings().transcriptMode).toBe('on');
   });
 
-  it('prefers the new transcriptMode key over both legacy keys when all are set', async () => {
+  it("prefers the new transcriptMode key over the legacy transcriptEnabled when both are set", async () => {
     const ls = fakeLocalStorage();
     ls.data.set('veritaslens.transcriptMode', 'off');
     ls.data.set('veritaslens.transcriptEnabled', 'true');
-    ls.data.set('veritaslens.transcriptWidgetEnabled', 'true');
     await loadSettings(ls.get);
     expect(settings().transcriptMode).toBe('off');
   });

@@ -78,15 +78,16 @@ const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_CROSS_SESSION_RECALL = 'veritaslens.crossSessionRecallEnabled';
-/** Three-state transcript control ('off' | 'on' | 'on-verify'). Read at load
- *  with a one-time migration from the v0.14.0 boolean pair below — those
- *  legacy keys are still consulted if the new key is unset, so pre-0.14.1
- *  installs that flipped the old toggles keep their intent. */
+/** Binary transcript control ('off' | 'on'). Read at load with a one-time
+ *  migration from the legacy v0.14.0-dev `transcriptEnabled` boolean — the
+ *  legacy key is still consulted if the new key is unset, so pre-0.14.1
+ *  installs that flipped the old toggle keep their intent. The other legacy
+ *  key (`transcriptWidgetEnabled`) is intentionally ignored: the HUD flash
+ *  it controlled was removed from the UI and the underlying code in
+ *  0.14.1+. */
 const SETTINGS_KEY_TRANSCRIPT_MODE = 'veritaslens.transcriptMode';
 /** Legacy 0.14.0-dev key: `transcriptEnabled: boolean`. */
 const SETTINGS_KEY_TRANSCRIPT_ENABLED_LEGACY = 'veritaslens.transcriptEnabled';
-/** Legacy 0.14.0-dev key: `transcriptWidgetEnabled: boolean`. */
-const SETTINGS_KEY_TRANSCRIPT_WIDGET_LEGACY = 'veritaslens.transcriptWidgetEnabled';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
@@ -251,7 +252,6 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_TRANSLATION_MODE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_MODE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED_LEGACY),
-      safeGet(SETTINGS_KEY_TRANSCRIPT_WIDGET_LEGACY),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -284,7 +284,6 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawTranslationMode,
     rawTranscriptMode,
     rawTranscriptEnabledLegacy,
-    rawTranscriptWidgetLegacy,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -320,11 +319,11 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
     crossSessionRecallEnabled: rawCrossSessionRecall === 'true',
-    // Three-state mode. New key wins; otherwise migrate from the v0.14.0
-    // boolean pair so any dev/internal install that flipped the old toggles
-    // keeps its intent: enabled=false → 'off', widget=true → 'on-verify',
-    // anything else → 'on' (default).
-    transcriptMode: coerceTranscriptMode(rawTranscriptMode, rawTranscriptEnabledLegacy, rawTranscriptWidgetLegacy),
+    // Binary mode. New key wins; otherwise migrate from the legacy v0.14.0-dev
+    // `transcriptEnabled` boolean so any internal install that flipped it
+    // keeps its intent (false → 'off'). Any prior `'on-verify'` value silently
+    // collapses to `'on'` since the verify-flash UI + runtime are gone.
+    transcriptMode: coerceTranscriptMode(rawTranscriptMode, rawTranscriptEnabledLegacy),
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
@@ -491,23 +490,22 @@ export const saveTranscriptMode = (setLs: SetLs, mode: TranscriptMode): Promise<
 
 /**
  * Coerce a stored transcript mode value (or fall back to the legacy 0.14.0
- * boolean pair) into the validated three-state enum.
+ * `transcriptEnabled` boolean) into the validated binary enum.
  *
  * Migration semantics:
- *   - New key set + valid → use it.
+ *   - New key set to `'off'` or `'on'` → use it.
+ *   - New key set to `'on-verify'` (legacy three-state value) → collapse
+ *     to `'on'`. Verify-flash is no longer a runtime feature.
  *   - Legacy `transcriptEnabled === 'false'` → `'off'` (privacy/cost opt-out).
- *   - Legacy `transcriptWidgetEnabled === 'true'` → `'on-verify'` (was opting
- *     into the flash, so the closest new state is verify-mode).
  *   - Anything else → DEFAULT_TRANSCRIPT_MODE.
  */
 function coerceTranscriptMode(
   mode: string | undefined,
   legacyEnabled: string | undefined,
-  legacyWidget: string | undefined,
 ): TranscriptMode {
-  if (mode === 'off' || mode === 'on' || mode === 'on-verify') return mode;
+  if (mode === 'off' || mode === 'on') return mode;
+  if (mode === 'on-verify') return 'on';
   if (legacyEnabled === 'false') return 'off';
-  if (legacyWidget === 'true') return 'on-verify';
   return DEFAULT_TRANSCRIPT_MODE;
 }
 

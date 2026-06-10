@@ -12,7 +12,6 @@ import { measureTextWrap } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
 import { getPersona, getPickerPersonas, type Persona } from '@/personas';
 import { activePersona, settings } from '@/state/store';
-import { subscribe as subscribeTranscript, type TranscriptSegment } from './transcript';
 import type { GamePreset, GameSession, HistoryEntry, LensResult } from '@/types';
 import { gameDifficultyLabel, gameFormatLabel } from '@/types';
 
@@ -348,11 +347,6 @@ export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'pic
   }
   bootstrapped = true;
   currentPage = initialPage;
-  // Hook the transcript-flash subscription once per process — idempotent if
-  // the bootstrap is re-entered (tests, mode switches). No-op when
-  // `transcriptMode` is not `'on-verify'`; only the most recent appended segment
-  // ever surfaces, never historical bursts.
-  ensureTranscriptFlashSubscribed();
 }
 
 export async function showUnconfiguredPage(): Promise<void> {
@@ -788,89 +782,11 @@ export function markActiveHidden(): void {
 /** True iff the active result is preserved in memory but currently hidden. */
 export function isActiveHidden(): boolean { return activeHidden; }
 
-/**
- * Most-recent "canonical" hint set by the lifecycle (ACTIVE_HINT_DEFAULT,
- * ACTIVE_HINT_ANALYZING, custom strings). Tracked so the transcript-widget
- * flash can revert to it after the flash timeout. Survives a flash overlay so
- * a hint change during the flash isn't lost — the flash restores whatever
- * the lifecycle most recently asked for.
- */
-let lastActiveHint: string = ACTIVE_HINT_DEFAULT;
-/** Active transcript-flash timer. Non-null = the hint slot currently shows a
- *  transcript flash, not the canonical hint. */
-let transcriptFlashTimer: ReturnType<typeof setTimeout> | null = null;
-/** Set on first bootstrapHud so subsequent calls don't double-subscribe. */
-let transcriptFlashSubscribed = false;
-/** How long a transcript flash sits before the canonical hint is restored. */
-const TRANSCRIPT_FLASH_MS = 3000;
-/** Display cap on the flashed transcript text so a long Whisper segment
- *  doesn't overflow the hint row. The full segment is still in the rolling
- *  buffer + prompt context — this cap only affects the visible flash. */
-const TRANSCRIPT_FLASH_TEXT_MAX = 40;
-
 export async function setActiveHint(content: string): Promise<void> {
-  lastActiveHint = content;
-  // Don't clobber an active transcript flash. The timer's restore handler
-  // will write `lastActiveHint` when it fires, so the lifecycle's most recent
-  // hint still lands — just deferred by up to TRANSCRIPT_FLASH_MS.
-  if (transcriptFlashTimer !== null) return;
   if (currentPage !== 'active') return;
   // Discreet layouts have no hint row.
   if (activeLayout !== 'baseline') return;
   await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
-}
-
-/**
- * Subscribe the HUD to the rolling transcript so each new segment briefly
- * flashes in the active page's hint slot when `transcriptMode === 'on-verify'`.
- * Idempotent — `bootstrapHud` may call this on every cold start. The
- * subscription itself reads the setting at fire time, so toggling the setting
- * mid-session takes effect on the next captured segment.
- */
-function ensureTranscriptFlashSubscribed(): void {
-  if (transcriptFlashSubscribed) return;
-  transcriptFlashSubscribed = true;
-  // Track segment ids we've already surfaced so the immediate-snapshot call
-  // doesn't replay every prior segment as a fresh flash on bootstrap.
-  let seenIds = new Set<string>();
-  subscribeTranscript((segments) => {
-    const nextIds = new Set(segments.map((s) => s.id));
-    const fresh = segments.filter((s) => !seenIds.has(s.id));
-    seenIds = nextIds;
-    if (fresh.length === 0) return;
-    if (settings().transcriptMode !== 'on-verify') return;
-    // Only the most recent segment matters — a burst of catch-up writes from
-    // a session restore shouldn't strobe the hint row.
-    void flashTranscriptSegment(fresh[fresh.length - 1]!);
-  });
-}
-
-async function flashTranscriptSegment(segment: TranscriptSegment): Promise<void> {
-  // No visible hint row outside baseline active — silently skip so the flash
-  // logic is safe to call from any page.
-  if (currentPage !== 'active') return;
-  if (activeLayout !== 'baseline') return;
-
-  const text = truncateForFlash(segment.text);
-  const content = `[${segment.speaker}] ${text}`;
-
-  if (transcriptFlashTimer !== null) clearTimeout(transcriptFlashTimer);
-  await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
-
-  transcriptFlashTimer = setTimeout(() => {
-    transcriptFlashTimer = null;
-    // Restore the canonical hint. Re-check page/layout because the wearer
-    // may have navigated away during the flash; if so, the next showActivePage
-    // rebuild will write the right hint via buildActivePage anyway.
-    if (currentPage !== 'active') return;
-    if (activeLayout !== 'baseline') return;
-    void upgradeText(CONTAINER.activeHint, NAME.activeHint, lastActiveHint);
-  }, TRANSCRIPT_FLASH_MS);
-}
-
-function truncateForFlash(text: string): string {
-  if (text.length <= TRANSCRIPT_FLASH_TEXT_MAX) return text;
-  return `${text.slice(0, TRANSCRIPT_FLASH_TEXT_MAX - 1)}…`;
 }
 
 /**
@@ -2633,14 +2549,4 @@ export function _resetHudBootstrapForTesting(): void {
   bootstrapped = false;
   currentPage = 'none';
   resetHudSessionState();
-  // Drop the transcript-flash subscription flag + any pending timer so each
-  // test sees a clean re-subscribe on its bootstrap call. The transcript
-  // module's `_resetTranscriptForTesting()` clears the subscribers set in
-  // parallel; both must run for the test to actually re-attach.
-  transcriptFlashSubscribed = false;
-  if (transcriptFlashTimer !== null) {
-    clearTimeout(transcriptFlashTimer);
-    transcriptFlashTimer = null;
-  }
-  lastActiveHint = ACTIVE_HINT_DEFAULT;
 }

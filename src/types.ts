@@ -412,40 +412,16 @@ export const DEFAULT_LANGUAGE: LanguageCode = 'en';
 export type BufferDuration = 30 | 120 | 300;
 
 /**
- * Three-state control for the rolling tagged transcript pipeline. See the
+ * Binary control for the rolling tagged transcript pipeline. See the
  * `Settings.transcriptMode` field for the per-state semantics. Exposed as a
  * type rather than a string union inline so the SettingsView's selector
  * options match the runtime exhaustively.
  */
-export type TranscriptMode = 'off' | 'on' | 'on-verify';
+export type TranscriptMode = 'off' | 'on';
 
-/** Defaults applied when storage is empty / unparseable. The runtime defaults
- *  to capture-and-inject without HUD verification, since most wearers want
- *  the prompt-context benefit but don't need a flash on every analysis. */
+/** Default applied when storage is empty / unparseable. The runtime defaults
+ *  to capture-and-inject — most wearers want the prompt-context benefit. */
 export const DEFAULT_TRANSCRIPT_MODE: TranscriptMode = 'on';
-
-/**
- * UI helper copy for the `transcriptMode` selector. Lives in `types.ts` so
- * non-UI code (debug logs, settings export) can reference the same labels
- * the SettingsView shows. Keys map 1:1 to `TranscriptMode` so a future
- * variant fails the build until labels are filled in.
- */
-export const TRANSCRIPT_MODE_LABELS: Record<TranscriptMode, string> = {
-  'off': 'Off',
-  'on': 'On',
-  'on-verify': 'On + verify',
-};
-
-/** One-line helper text for each transcript mode. Shown beneath the selector
- *  so wearers can read what each option does without leaving the page. */
-export const TRANSCRIPT_MODE_HELP: Record<TranscriptMode, string> = {
-  'off':
-    'No transcript is captured. Lenses see only raw audio of the most recent clip — no prompt-context block, no Whisper sidecar on Gemini / OpenRouter. Use this for the lowest cost and the strongest privacy posture.',
-  'on':
-    'Each analysis appends a `[wearer]` / `[other]` tagged segment to a rolling 120 s buffer; every lens prompt includes the most recent turns so the model attributes claims correctly across turns. Gemini and OpenRouter fire one parallel Whisper call per analysis (≈ $0.0001 / 10 s) to capture transcripts.',
-  'on-verify':
-    'Same as On, plus a 3 s `[wearer] …` / `[other] …` flash in the active page hint slot each time a segment lands. Helpful while you confirm captures look right; switch back to On once you trust it.',
-};
 
 export const DEFAULT_BUFFER_DURATION: BufferDuration = 30;
 
@@ -526,23 +502,16 @@ export interface Settings {
    * Gemini + OpenRouter additionally fire a parallel whisper-sidecar call so
    * those providers also get tagged segments without an inline-audio STT path.
    *
-   * Three-state control for the rolling tagged transcript pipeline:
+   * Binary control for the rolling tagged transcript pipeline:
    *
-   *   - `'off'`       — capture is skipped, no prompt injection, no sidecar.
-   *                     Privacy/cost-conscious users who don't want STT
-   *                     results forwarded to their LLM provider or burning
-   *                     a Whisper call per analysis on Gemini/OpenRouter.
-   *   - `'on'`        — capture + prompt injection on every lens, no HUD
-   *                     surfacing. The default. Most wearers will sit here
-   *                     once they trust the feature.
-   *   - `'on-verify'` — same as `'on'` plus a 3-second `[wearer] …` /
-   *                     `[other] …` flash in the active page's hint slot
-   *                     each time a segment lands. Verification affordance
-   *                     for onboarding / debugging; expected to be dialed
-   *                     back to `'on'` after the wearer trusts captures.
+   *   - `'off'` — capture is skipped, no prompt injection, no sidecar.
+   *               Privacy/cost-conscious users who don't want STT results
+   *               forwarded to their LLM provider or burning a Whisper call
+   *               per analysis on Gemini / OpenRouter.
+   *   - `'on'`  — capture + prompt injection on every lens. The default.
    *
    * Lens results themselves are unchanged across modes — only the prompt
-   * context differs (and the HUD flash on `'on-verify'`).
+   * context differs.
    */
   transcriptMode: TranscriptMode;
   /**
