@@ -299,6 +299,18 @@ function formatResultText(result: LensResult): string {
       if (!c) return '';
       return `${c.tone}\n\n${c.explanation}`;
     }
+    case 'translation': {
+      const lang = result.sourceLanguage ? result.sourceLanguage.toUpperCase() : '';
+      const head = lang ? `${lang}  ${result.sourceText}` : result.sourceText;
+      const starters = result.replyStarters
+        .map((s, i) => `${i + 1}. ${s.translated}\n   ${s.source}`)
+        .join('\n');
+      const blocks: string[] = [];
+      if (head) blocks.push(head);
+      if (result.translatedText) blocks.push(`→ ${result.translatedText}`);
+      if (starters) blocks.push(starters);
+      return blocks.join('\n\n');
+    }
     case 'game': {
       const scored = result.questions.some((q) => q.correctIndex !== null);
       const header = scored

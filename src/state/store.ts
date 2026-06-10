@@ -84,6 +84,7 @@ const SETTINGS_KEY_AUTO_DISABLED_LENSES = 'veritaslens.autoDisabledLenses';
 const SETTINGS_KEY_AUTO_MODE_ENABLED = 'veritaslens.autoModeEnabled';
 const SETTINGS_KEY_AUTO_MODE_START_MS = 'veritaslens.autoModeStartMs';
 const SETTINGS_KEY_AUTO_MODE_SILENCE_MS = 'veritaslens.autoModeSilenceMs';
+const SETTINGS_KEY_TRANSLATION_SOURCE_LANGS = 'veritaslens.translationSourceLanguages';
 /** Default RMS floor when neither the new nor legacy key is set. */
 const DEFAULT_VOICE_GATE_RMS_FLOOR = 200;
 /** Slider granularity exposed in the Settings UI. */
@@ -178,6 +179,9 @@ const [settings, setSettings] = createSignal<Settings>({
   autoModeEnabled: false,
   autoModeStartMs: DEFAULT_AUTO_MODE_START_MS,
   autoModeSilenceMs: DEFAULT_AUTO_MODE_SILENCE_MS,
+  // Default to auto-detect so the Translate lens works for any conversation
+  // without configuration; the user can pin a subset from Settings later.
+  translationSourceLanguages: 'auto',
 });
 export { settings };
 
@@ -218,6 +222,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_AUTO_MODE_ENABLED),
       safeGet(SETTINGS_KEY_AUTO_MODE_START_MS),
       safeGet(SETTINGS_KEY_AUTO_MODE_SILENCE_MS),
+      safeGet(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -246,6 +251,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoModeEnabled,
     rawAutoModeStartMs,
     rawAutoModeSilenceMs,
+    rawTranslationSourceLangs,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -298,7 +304,35 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       AUTO_MODE_SILENCE_MS_MIN,
       AUTO_MODE_SILENCE_MS_MAX,
     ),
+    translationSourceLanguages: coerceTranslationSourceLanguages(rawTranslationSourceLangs),
   });
+}
+
+function coerceTranslationSourceLanguages(raw: string): LanguageCode[] | 'auto' {
+  // Persisted as either the literal 'auto' or a JSON array of LanguageCode
+  // strings. Anything unparseable / unknown falls back to 'auto' so a corrupt
+  // KV blob never wedges the Translate lens.
+  if (!raw || raw === 'auto') return 'auto';
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return 'auto';
+    const codes = parsed.filter(
+      (x): x is LanguageCode => typeof x === 'string' && x in LANGUAGES,
+    );
+    return codes.length === 0 ? 'auto' : codes;
+  } catch {
+    return 'auto';
+  }
+}
+
+export async function saveTranslationSourceLanguages(
+  setLs: SetLs,
+  value: LanguageCode[] | 'auto',
+): Promise<boolean> {
+  const serialized = value === 'auto' ? 'auto' : JSON.stringify(value);
+  const ok = await setLs(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS, serialized);
+  if (ok) setSettings({ ...settings(), translationSourceLanguages: value });
+  return ok;
 }
 
 type SetLs = (k: string, v: string) => Promise<boolean>;
@@ -531,6 +565,11 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
     case 'key-questions':
     case 'sentiment':
       if (!Array.isArray(r['claims'])) return null;
+      migratedResult = r;
+      break;
+    case 'translation':
+      // No legacy shape exists for translation; require the new fields.
+      if (typeof r['sourceText'] !== 'string' || typeof r['translatedText'] !== 'string') return null;
       migratedResult = r;
       break;
     default:

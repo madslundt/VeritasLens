@@ -2080,6 +2080,14 @@ export function extractTags(result: LensResult): string[] {
       raw.push(result.preset.format, result.preset.difficulty);
       for (const t of keywordize(result.preset.topic, 3)) raw.push(t);
       break;
+    case 'translation':
+      // Tag with the detected source-language code so history can be filtered
+      // by language; plus translated-text keywords so a search for the topic
+      // words still finds the row even when the transcript is in another
+      // language the wearer can't easily type.
+      if (result.sourceLanguage) raw.push(result.sourceLanguage);
+      for (const t of keywordize(result.translatedText, 3)) raw.push(t);
+      break;
   }
   return normalizeTags(raw);
 }
@@ -2104,6 +2112,8 @@ function extractQuestion(result: LensResult): string {
       const topic = result.preset.topic || 'Random topic';
       return topic.slice(0, 80);
     }
+    case 'translation':
+      return (result.sourceText || result.translatedText).slice(0, 80);
   }
 }
 
@@ -2130,6 +2140,11 @@ function extractBadge(result: LensResult): string {
       const scored = result.questions.some((q) => q.correctIndex !== null);
       return scored ? `${result.score}/${result.questions.length}` : 'GAME';
     }
+    case 'translation':
+      // Source-language code in upper case (e.g. "ES", "FR") — picks out the
+      // detected spoken language at a glance in history. Falls back to "TR"
+      // (TRanslate) when the model couldn't identify the language.
+      return ((result.sourceLanguage || 'tr').toUpperCase()).slice(0, 4);
   }
 }
 
@@ -2188,6 +2203,8 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
       return [result];
     case 'game':
       return [result];
+    case 'translation':
+      return [result];
   }
 }
 
@@ -2224,6 +2241,10 @@ export function extractQuote(result: LensResult): string {
       return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'game':
       return '';
+    case 'translation':
+      // The source-language transcript IS the quote — it's verbatim from the
+      // audio. History search hits the original spoken text.
+      return result.sourceText;
   }
 }
 

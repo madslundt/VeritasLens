@@ -16,6 +16,12 @@ import {
   buildMeetingPrepPromptStub,
   parseMeetingPrepResponseStub,
 } from './meetingPrep';
+import {
+  TRANSLATION_SCHEMA,
+  buildTranslationPrompt,
+  parseTranslationResponse,
+} from './translation';
+import { settings } from '@/state/store';
 
 export type PersonaId = string;
 
@@ -122,6 +128,22 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildKeyQuestionsPrompt,
     schema: KEY_QUESTIONS_SCHEMA,
     parse: parseKeyQuestionsResponse,
+    builtin: true,
+  },
+  {
+    id: 'translation',
+    name: 'Translate',
+    description:
+      'Listens to someone else speak in a foreign language, shows their words plus a translation, and suggests 3 reply starters you could say back.',
+    hint: 'Tap to translate',
+    // The translation persona needs to read the wearer's source-language hint
+    // (auto vs a fixed allow-list) at prompt-build time, so we close over the
+    // store inside the wrapper instead of plumbing a second arg through the
+    // Persona.buildPrompt signature (which would change every other lens'
+    // declaration for no benefit).
+    buildPrompt: (lang) => buildTranslationPrompt(lang, settings().translationSourceLanguages),
+    schema: TRANSLATION_SCHEMA,
+    parse: parseTranslationResponse,
     builtin: true,
   },
   {

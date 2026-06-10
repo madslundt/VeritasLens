@@ -74,6 +74,21 @@ export type LensResult = (
       /** Correct-answer count. Always 0 for riddle (unscored). */
       score: number;
     }
+  | {
+      type: 'translation';
+      /** BCP-47 short code of what the speaker was saying, or "unknown". Kept
+       *  as a free string (not LanguageCode) so the runtime never throws on a
+       *  language the model knows but our LANGUAGES dictionary doesn't. */
+      sourceLanguage: string;
+      /** Verbatim transcript in the spoken language. */
+      sourceText: string;
+      /** Same utterance translated into the wearer's display language. */
+      translatedText: string;
+      /** Up to 3 short reply starters the wearer could say back. Each carries
+       *  both the original-language line (what to speak) and the translation
+       *  (what to read). */
+      replyStarters: Array<{ source: string; translated: string }>;
+    }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
   autoSelected?: boolean;
@@ -486,6 +501,13 @@ export interface Settings {
   autoModeStartMs: number;
   /** Trailing silence (ms) after the watcher is armed that triggers analysis. */
   autoModeSilenceMs: number;
+  /**
+   * Source-language hint for the Translate lens. `'auto'` lets the LLM detect
+   * any language; an array (e.g. `['es', 'fr']`) restricts the speaker to one
+   * of those codes — useful when the wearer is at a Spanish café and wants the
+   * lens to ignore stray English. Empty array is treated as `'auto'`.
+   */
+  translationSourceLanguages: LanguageCode[] | 'auto';
 }
 
 /** Defaults for the auto-mode thresholds. Used as initial values and as

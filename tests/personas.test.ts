@@ -2,6 +2,7 @@
 import { describe, it, expect } from 'vitest';
 import { trimTo, isRecord, parseJsonResponse, coerceQuote, readClaimsArray, MAX_QUOTE_CHARS, NoSpeechError } from '../src/personas/_utils';
 import { parseFactCheckerResponse, buildFactCheckerPrompt } from '../src/personas/factChecker';
+import { parseTranslationResponse, buildTranslationPrompt } from '../src/personas/translation';
 import { toStrictSchema } from '../src/llm/openai';
 
 describe('_utils', () => {
@@ -972,6 +973,95 @@ describe('key-questions', () => {
     const result = parseKeyQuestionsResponse(JSON.stringify({ claims }));
     if (result.type === 'key-questions') {
       expect(result.claims).toHaveLength(4);
+    }
+  });
+});
+
+describe('translation persona', () => {
+  it('parses a full Gemini response with 3 starters', () => {
+    const result = parseTranslationResponse(JSON.stringify({
+      sourceLanguage: 'es',
+      sourceText: '¿Qué le gustaría tomar?',
+      translatedText: 'What would you like to drink?',
+      replyStarters: [
+        { source: 'Un café, por favor.', translated: 'A coffee, please.' },
+        { source: 'Agua mineral.', translated: 'Sparkling water.' },
+        { source: '¿Qué me recomienda?', translated: 'What do you recommend?' },
+      ],
+    }));
+    expect(result.type).toBe('translation');
+    if (result.type === 'translation') {
+      expect(result.sourceLanguage).toBe('es');
+      expect(result.sourceText).toContain('gustaría');
+      expect(result.translatedText).toContain('drink');
+      expect(result.replyStarters).toHaveLength(3);
+      expect(result.replyStarters[0]!.source).toBe('Un café, por favor.');
+      expect(result.replyStarters[0]!.translated).toBe('A coffee, please.');
+    }
+  });
+
+  it('caps reply starters at 3 even when the model returns more', () => {
+    const result = parseTranslationResponse(JSON.stringify({
+      sourceLanguage: 'fr',
+      sourceText: 'Bonjour.',
+      translatedText: 'Hello.',
+      replyStarters: Array.from({ length: 6 }, (_, i) => ({
+        source: `bonjour-${i}`,
+        translated: `hi-${i}`,
+      })),
+    }));
+    if (result.type === 'translation') {
+      expect(result.replyStarters).toHaveLength(3);
+    }
+  });
+
+  it('defaults sourceLanguage to "unknown" and replyStarters to [] when fields are missing', () => {
+    const result = parseTranslationResponse(JSON.stringify({}));
+    if (result.type === 'translation') {
+      expect(result.sourceLanguage).toBe('unknown');
+      expect(result.sourceText).toBe('');
+      expect(result.translatedText).toBe('');
+      expect(result.replyStarters).toEqual([]);
+    }
+  });
+
+  it('throws NoSpeechError when the model returns noSpeech=true', () => {
+    expect(() => parseTranslationResponse(JSON.stringify({
+      noSpeech: true,
+      sourceLanguage: 'unknown',
+      sourceText: '',
+      translatedText: '',
+      replyStarters: [],
+    }))).toThrow(NoSpeechError);
+  });
+
+  it('buildTranslationPrompt embeds the target-language name', () => {
+    const prompt = buildTranslationPrompt('da', 'auto');
+    expect(prompt).toContain('Dansk');
+    expect(prompt).toContain('ANY language');
+  });
+
+  it('buildTranslationPrompt lists the allow-listed source languages', () => {
+    const prompt = buildTranslationPrompt('en', ['es', 'fr']);
+    expect(prompt).toContain('es (Español)');
+    expect(prompt).toContain('fr (Français)');
+    expect(prompt).toContain('ONE of');
+  });
+
+  it('buildTranslationPrompt with empty array behaves like auto', () => {
+    const prompt = buildTranslationPrompt('en', []);
+    expect(prompt).toContain('ANY language');
+  });
+
+  it('lowercases sourceLanguage codes returned by the model', () => {
+    const result = parseTranslationResponse(JSON.stringify({
+      sourceLanguage: 'ES',
+      sourceText: 'Hola',
+      translatedText: 'Hello',
+      replyStarters: [],
+    }));
+    if (result.type === 'translation') {
+      expect(result.sourceLanguage).toBe('es');
     }
   });
 });

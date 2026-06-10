@@ -504,6 +504,7 @@ const PERSONA_ID_BY_RESULT_TYPE: Record<LensResult['type'], string> = {
   'meeting-prep': 'meeting-prep',
   'session-summary': 'session-summary',
   'game': 'game',
+  'translation': 'translation',
 };
 
 function synthesizeEntryFromResult(result: LensResult, idx = 0): HistoryEntry {
@@ -561,6 +562,8 @@ function splitForSynthesis(result: LensResult): LensResult[] {
     case 'sentiment':
       return [result];
     case 'game':
+      return [result];
+    case 'translation':
       return [result];
   }
 }
@@ -896,6 +899,7 @@ function claimCount(result: LensResult): number {
     case 'sentiment':
       return Math.max(1, result.claims.length);
     case 'game':
+    case 'translation':
       return 1;
     default:
       return 1;
@@ -1023,6 +1027,20 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
         unanswerLine,
       ].filter(Boolean).join(' · ');
       return { top: clip(topic, 140), middle, bottom: summary };
+    }
+    case 'translation': {
+      // The HUD shows the spoken transcript on top, the translation in the
+      // middle, and 3 numbered reply starters at the bottom (each rendered
+      // as two lines: translated reply first because that's the wearer's
+      // primary reading language, then the source-language version
+      // underneath so they know what to actually speak).
+      const srcLang = (result.sourceLanguage || 'xx').toUpperCase().slice(0, 4);
+      const top = result.sourceText ? clip(`${srcLang}  ${result.sourceText}`, 220) : '';
+      const middle = clip(result.translatedText, 220);
+      const starters = result.replyStarters
+        .map((s, i) => `${i + 1}. ${s.translated}\n   ${s.source}`)
+        .join('\n');
+      return { top, middle, bottom: starters };
     }
   }
 }
