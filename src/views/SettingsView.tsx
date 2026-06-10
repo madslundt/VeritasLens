@@ -2414,21 +2414,6 @@ export const SettingsView: Component = () => {
                     against your STT host (≈ $0.0001 / 10 s). No Whisper key set → silently skipped.
                   </span>
                 </Show>
-                <label class="toggle-row" style="margin-top: 8px;">
-                  <input
-                    type="checkbox"
-                    checked={draftTranscriptMode() === 'on-verify'}
-                    onChange={(e) => setDraftTranscriptMode(e.currentTarget.checked ? 'on-verify' : 'on')}
-                  />
-                  <span>Flash each capture on the HUD (for testing)</span>
-                </label>
-                <Show when={draftTranscriptMode() === 'on-verify'}>
-                  <span class="field-hint">
-                    Surfaces every new segment as a 3 s `[wearer] …` / `[other] …` flash in the
-                    active page's hint slot so you can confirm captures look right. Switch off once
-                    you trust it.
-                  </span>
-                </Show>
               </Show>
             </div>
 
