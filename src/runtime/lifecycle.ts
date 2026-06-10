@@ -208,6 +208,15 @@ let intermediateSummaries: Array<{
   keyPoints?: string[];
   quote?: string;
 }> = [];
+/**
+ * Hard cap on the in-memory intermediate-summary buffer. Each entry pins ~1–4
+ * KB (title + summary + topics[] + keyPoints[] + quote); without a cap a
+ * multi-hour session would grow this array forever. Recall reads only the
+ * last 2 entries (`RECALL_CONTEXT_MAX_ENTRIES`), and the end-of-session
+ * synthesis de-dupes across whatever survives — so trimming oldest-first
+ * preserves both consumers' behavior.
+ */
+const MAX_INTERMEDIATE_SUMMARIES = 40;
 
 type MidSummaryResult = Extract<LensResult, { type: 'session-summary' }>;
 let midSummaryResult: { result: MidSummaryResult; generatedAt: number } | null = null;
@@ -1207,7 +1216,7 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   // about the other person speaking — surfacing the wearer's prior fact-check
   // headlines would mislead the model into translating around them.
   const memory = persona.id === 'translation' ? [] : buildRecentMemoryLines();
-  const transcript = settings().transcriptEnabled
+  const transcript = settings().transcriptMode !== 'off'
     ? formatTranscriptForPrompt({ maxSegments: TRANSCRIPT_PROMPT_MAX_SEGMENTS })
     : '';
   const parts = [
@@ -1459,6 +1468,14 @@ async function runAnalysis(): Promise<void> {
   await blankActiveForThinking();
   startSpinner();
 
+  // Hoisted teardown for the streaming heading timer so the catch/finally
+  // can drain it. The timer itself is block-scoped inside the try (declared
+  // alongside `commitHeading`), so without this handle an error/abort
+  // between timer-set (lines 1770/1782) and the success-path clear (1822)
+  // would leak the timer — it would fire after teardown and paint a stale
+  // partial heading onto the HUD via the render queue.
+  let drainHeadingTimer: () => void = () => {};
+
   try {
     // VAD-trim the upload to just the detected speech regions when enabled
     // (default) and Silero is available. The gate above already confirmed at
@@ -1698,6 +1715,13 @@ async function runAnalysis(): Promise<void> {
       let lastHeadingCommitAt = 0;
       let pendingHeadingPartial: string | null = null;
       let headingTimer: ReturnType<typeof setTimeout> | null = null;
+      drainHeadingTimer = () => {
+        if (headingTimer !== null) {
+          clearTimeout(headingTimer);
+          headingTimer = null;
+        }
+        pendingHeadingPartial = null;
+      };
       const commitHeading = (): void => {
         if (headingTimer !== null) {
           clearTimeout(headingTimer);
@@ -1722,7 +1746,7 @@ async function runAnalysis(): Promise<void> {
       // (wearer-speak has its own runWearerSpeakAnalyze entry that wires
       // speaker='wearer'), so the speaker tag is 'other'.
       const captureTranscript = (text: string): void => {
-        if (!settings().transcriptEnabled) return;
+        if (settings().transcriptMode === 'off') return;
         const trimmed = text.trim();
         if (!trimmed) return;
         const now = Date.now();
@@ -1863,6 +1887,9 @@ async function runAnalysis(): Promise<void> {
     setAppPhase('displaying');
   } catch (err) {
     await stopSpinner();
+    // Drain any pending heading streamer first — otherwise the timer can fire
+    // after teardown and clobber the just-cleared partial via the render queue.
+    drainHeadingTimer();
     // Clear the in-progress partial across every error branch — abort,
     // NoSpeech, transport, blockReason. The HUD's `partial ?? final` reader
     // would otherwise hold the last claim on screen past the failure.
@@ -2148,7 +2175,7 @@ async function runWearerSpeakAnalyze(): Promise<void> {
       // compatible STT paths; Gemini + OpenRouter rely on the whisper-sidecar
       // fired immediately above for the same outcome.
       onTranscript: (text) => {
-        if (!settings().transcriptEnabled) return;
+        if (settings().transcriptMode === 'off') return;
         const trimmed = text.trim();
         if (!trimmed) return;
         const now = Date.now();
@@ -2400,6 +2427,16 @@ async function runAutoSummary(): Promise<void> {
         keyPoints: result.keyPoints,
         quote: result.quote,
       });
+      // Cap retained intermediates so a multi-hour session can't grow this
+      // array unboundedly — each entry pins title + summary + topics[] +
+      // keyPoints[] + quote in memory. Recall only reads the last 2 anyway,
+      // and the end-of-session synthesis keeps working on the most-recent
+      // window. Drop oldest first.
+      if (intermediateSummaries.length > MAX_INTERMEDIATE_SUMMARIES) {
+        intermediateSummaries = intermediateSummaries.slice(
+          intermediateSummaries.length - MAX_INTERMEDIATE_SUMMARIES,
+        );
+      }
     }
   } catch (err) {
     wav = null;

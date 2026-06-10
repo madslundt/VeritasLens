@@ -350,7 +350,7 @@ export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'pic
   currentPage = initialPage;
   // Hook the transcript-flash subscription once per process — idempotent if
   // the bootstrap is re-entered (tests, mode switches). No-op when
-  // `transcriptWidgetEnabled` is off; only the most recent appended segment
+  // `transcriptMode` is not `'on-verify'`; only the most recent appended segment
   // ever surfaces, never historical bursts.
   ensureTranscriptFlashSubscribed();
 }
@@ -822,7 +822,7 @@ export async function setActiveHint(content: string): Promise<void> {
 
 /**
  * Subscribe the HUD to the rolling transcript so each new segment briefly
- * flashes in the active page's hint slot when `transcriptWidgetEnabled` is on.
+ * flashes in the active page's hint slot when `transcriptMode === 'on-verify'`.
  * Idempotent — `bootstrapHud` may call this on every cold start. The
  * subscription itself reads the setting at fire time, so toggling the setting
  * mid-session takes effect on the next captured segment.
@@ -838,7 +838,7 @@ function ensureTranscriptFlashSubscribed(): void {
     const fresh = segments.filter((s) => !seenIds.has(s.id));
     seenIds = nextIds;
     if (fresh.length === 0) return;
-    if (!settings().transcriptWidgetEnabled) return;
+    if (settings().transcriptMode !== 'on-verify') return;
     // Only the most recent segment matters — a burst of catch-up writes from
     // a session restore shouldn't strobe the hint row.
     void flashTranscriptSegment(fresh[fresh.length - 1]!);

@@ -78,7 +78,7 @@ import {
   showPickerPage,
   showUnconfiguredPage,
 } from '../src/runtime/hud';
-import { saveAutoSummaryEnabled, saveDiscreet, saveTranscriptWidgetEnabled, setLensResult as setStateLensResult, settings } from '../src/state/store';
+import { saveAutoSummaryEnabled, saveDiscreet, saveTranscriptMode, setLensResult as setStateLensResult, settings } from '../src/state/store';
 import { _resetTranscriptForTesting, appendSegment, resetTranscript } from '../src/runtime/transcript';
 import { getPersona, getPickerPersonas } from '../src/personas';
 import type { HistoryEntry, LensResult } from '../src/types';
@@ -2161,7 +2161,7 @@ describe('transcript-flash widget', () => {
   it('flashes a new segment in the hint slot when widget is enabled, then reverts after 3s', async () => {
     vi.useFakeTimers();
     try {
-      await saveTranscriptWidgetEnabled(fakeSetLs, true);
+      await saveTranscriptMode(fakeSetLs, 'on-verify');
       await bootstrapHud('picker');
       await showActivePage(getPersona('fact-checker')!);
       resetTranscript('sess');
@@ -2187,8 +2187,8 @@ describe('transcript-flash widget', () => {
     }
   });
 
-  it('does NOT flash when transcriptWidgetEnabled is off', async () => {
-    await saveTranscriptWidgetEnabled(fakeSetLs, false);
+  it("does NOT flash when transcriptMode is 'on' (capture only, no HUD surfacing)", async () => {
+    await saveTranscriptMode(fakeSetLs, 'on');
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     resetTranscript('sess');
@@ -2203,7 +2203,7 @@ describe('transcript-flash widget', () => {
   it('truncates a long segment with an ellipsis so it fits the hint row', async () => {
     vi.useFakeTimers();
     try {
-      await saveTranscriptWidgetEnabled(fakeSetLs, true);
+      await saveTranscriptMode(fakeSetLs, 'on-verify');
       await bootstrapHud('picker');
       await showActivePage(getPersona('fact-checker')!);
       resetTranscript('sess');
@@ -2224,7 +2224,7 @@ describe('transcript-flash widget', () => {
   });
 
   it('does not flash outside the active page (still appends to the transcript silently)', async () => {
-    await saveTranscriptWidgetEnabled(fakeSetLs, true);
+    await saveTranscriptMode(fakeSetLs, 'on-verify');
     await bootstrapHud('picker');
     // Stay on picker — never showActivePage.
     resetTranscript('sess');
@@ -2239,7 +2239,7 @@ describe('transcript-flash widget', () => {
   it('replaces an in-flight flash when a second segment lands before the timer fires', async () => {
     vi.useFakeTimers();
     try {
-      await saveTranscriptWidgetEnabled(fakeSetLs, true);
+      await saveTranscriptMode(fakeSetLs, 'on-verify');
       await bootstrapHud('picker');
       await showActivePage(getPersona('fact-checker')!);
       resetTranscript('sess');

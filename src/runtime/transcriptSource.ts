@@ -39,10 +39,10 @@ import {
  */
 export function shouldRunWhisperSidecar(): boolean {
   const s = settings();
-  // Master switch — when the transcript feature is off the sidecar is too
-  // (the chat-byproduct path is gated by the same flag inside lifecycle's
-  // appendTranscriptSegment call sites via the transcriptEnabled check).
-  if (!s.transcriptEnabled) return false;
+  // Master gate — when the transcript feature is off the sidecar is too.
+  // The chat-byproduct path is gated by the same check inside lifecycle's
+  // appendTranscriptSegment call sites.
+  if (s.transcriptMode === 'off') return false;
   if (s.provider === 'gemini') return true;
   if (s.provider === 'openai-compatible') {
     return s.openaiBaseUrl === 'https://openrouter.ai/api/v1';

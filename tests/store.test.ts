@@ -18,7 +18,7 @@ import {
   pushHistoryEntry,
   saveAutoSummaryEnabled,
   saveBufferDuration,
-  saveTranscriptEnabled,
+  saveTranscriptMode,
   saveGeminiAutoModel,
   saveGeminiKey,
   saveGeminiModel,
@@ -269,24 +269,47 @@ describe('loadSettings', () => {
     expect(settings().bufferDuration).toBe(300);
   });
 
-  it('defaults transcriptEnabled to true when storage is empty (existing installs opt in by default)', async () => {
+  it("defaults transcriptMode to 'on' when storage is empty (capture + inject, no HUD verify)", async () => {
     const ls = fakeLocalStorage();
     await loadSettings(ls.get);
-    expect(settings().transcriptEnabled).toBe(true);
+    expect(settings().transcriptMode).toBe('on');
   });
 
-  it('respects an explicit transcriptEnabled=false in storage', async () => {
+  it("round-trips transcriptMode='off' through save → load", async () => {
     const ls = fakeLocalStorage();
-    await saveTranscriptEnabled(ls.set, false);
+    await saveTranscriptMode(ls.set, 'off');
     await loadSettings(ls.get);
-    expect(settings().transcriptEnabled).toBe(false);
+    expect(settings().transcriptMode).toBe('off');
   });
 
-  it('round-trips transcriptEnabled=true through save → load', async () => {
+  it("round-trips transcriptMode='on-verify' through save → load", async () => {
     const ls = fakeLocalStorage();
-    await saveTranscriptEnabled(ls.set, true);
+    await saveTranscriptMode(ls.set, 'on-verify');
     await loadSettings(ls.get);
-    expect(settings().transcriptEnabled).toBe(true);
+    expect(settings().transcriptMode).toBe('on-verify');
+  });
+
+  it("migrates legacy transcriptEnabled='false' to transcriptMode='off' on read", async () => {
+    const ls = fakeLocalStorage();
+    ls.data.set('veritaslens.transcriptEnabled', 'false');
+    await loadSettings(ls.get);
+    expect(settings().transcriptMode).toBe('off');
+  });
+
+  it("migrates legacy transcriptWidgetEnabled='true' to transcriptMode='on-verify' on read", async () => {
+    const ls = fakeLocalStorage();
+    ls.data.set('veritaslens.transcriptWidgetEnabled', 'true');
+    await loadSettings(ls.get);
+    expect(settings().transcriptMode).toBe('on-verify');
+  });
+
+  it('prefers the new transcriptMode key over both legacy keys when all are set', async () => {
+    const ls = fakeLocalStorage();
+    ls.data.set('veritaslens.transcriptMode', 'off');
+    ls.data.set('veritaslens.transcriptEnabled', 'true');
+    ls.data.set('veritaslens.transcriptWidgetEnabled', 'true');
+    await loadSettings(ls.get);
+    expect(settings().transcriptMode).toBe('off');
   });
 });
 

@@ -20,6 +20,7 @@ import {
   DEFAULT_OPENAI_MODEL,
   DEFAULT_STT_HOST,
   DEFAULT_STT_MODEL,
+  DEFAULT_TRANSCRIPT_MODE,
   GEMINI_MODEL_PATTERN,
   LANGUAGES,
   OPENAI_BASE_URLS,
@@ -41,6 +42,7 @@ import {
   type OpenAiBaseUrl,
   type Settings,
   type SttHost,
+  type TranscriptMode,
 } from '@/types';
 
 const emptyOpenaiKeys = (): Record<OpenAiBaseUrl, string> =>
@@ -76,8 +78,15 @@ const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_CROSS_SESSION_RECALL = 'veritaslens.crossSessionRecallEnabled';
-const SETTINGS_KEY_TRANSCRIPT_ENABLED = 'veritaslens.transcriptEnabled';
-const SETTINGS_KEY_TRANSCRIPT_WIDGET_ENABLED = 'veritaslens.transcriptWidgetEnabled';
+/** Three-state transcript control ('off' | 'on' | 'on-verify'). Read at load
+ *  with a one-time migration from the v0.14.0 boolean pair below — those
+ *  legacy keys are still consulted if the new key is unset, so pre-0.14.1
+ *  installs that flipped the old toggles keep their intent. */
+const SETTINGS_KEY_TRANSCRIPT_MODE = 'veritaslens.transcriptMode';
+/** Legacy 0.14.0-dev key: `transcriptEnabled: boolean`. */
+const SETTINGS_KEY_TRANSCRIPT_ENABLED_LEGACY = 'veritaslens.transcriptEnabled';
+/** Legacy 0.14.0-dev key: `transcriptWidgetEnabled: boolean`. */
+const SETTINGS_KEY_TRANSCRIPT_WIDGET_LEGACY = 'veritaslens.transcriptWidgetEnabled';
 const SETTINGS_KEY_DISCREET = 'veritaslens.discreet';
 const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
@@ -175,8 +184,7 @@ const [settings, setSettings] = createSignal<Settings>({
   bufferDuration: DEFAULT_BUFFER_DURATION,
   autoSummaryEnabled: false,
   crossSessionRecallEnabled: false,
-  transcriptEnabled: true,
-  transcriptWidgetEnabled: false,
+  transcriptMode: DEFAULT_TRANSCRIPT_MODE,
   discreet: false,
   // VAD gate defaults to the historical RMS floor (200 int16 units). 0
   // disables the gate entirely; lower values are more permissive. Exposed
@@ -241,8 +249,9 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_AUTO_MODE_SILENCE_MS),
       safeGet(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS),
       safeGet(SETTINGS_KEY_TRANSLATION_MODE),
-      safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED),
-      safeGet(SETTINGS_KEY_TRANSCRIPT_WIDGET_ENABLED),
+      safeGet(SETTINGS_KEY_TRANSCRIPT_MODE),
+      safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED_LEGACY),
+      safeGet(SETTINGS_KEY_TRANSCRIPT_WIDGET_LEGACY),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -273,8 +282,9 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoModeSilenceMs,
     rawTranslationSourceLangs,
     rawTranslationMode,
-    rawTranscriptEnabled,
-    rawTranscriptWidgetEnabled,
+    rawTranscriptMode,
+    rawTranscriptEnabledLegacy,
+    rawTranscriptWidgetLegacy,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -310,14 +320,11 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     bufferDuration: coerceBufferDuration(rawBuffer),
     autoSummaryEnabled: rawAutoEnabled === 'true',
     crossSessionRecallEnabled: rawCrossSessionRecall === 'true',
-    // Default ON — unwritten storage returns '', which lands here as true so
-    // existing installs get the transcript feature on their next reload. The
-    // user explicitly opts out by saving 'false'.
-    transcriptEnabled: rawTranscriptEnabled !== 'false',
-    // Opt-in verification affordance — defaults OFF so existing installs
-    // never see an unexpected flash. User explicitly enables to confirm
-    // captures during testing.
-    transcriptWidgetEnabled: rawTranscriptWidgetEnabled === 'true',
+    // Three-state mode. New key wins; otherwise migrate from the v0.14.0
+    // boolean pair so any dev/internal install that flipped the old toggles
+    // keeps its intent: enabled=false → 'off', widget=true → 'on-verify',
+    // anything else → 'on' (default).
+    transcriptMode: coerceTranscriptMode(rawTranscriptMode, rawTranscriptEnabledLegacy, rawTranscriptWidgetLegacy),
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
@@ -479,11 +486,30 @@ export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<
 export const saveCrossSessionRecallEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_CROSS_SESSION_RECALL, 'crossSessionRecallEnabled', enabled);
 
-export const saveTranscriptEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_TRANSCRIPT_ENABLED, 'transcriptEnabled', enabled);
+export const saveTranscriptMode = (setLs: SetLs, mode: TranscriptMode): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_TRANSCRIPT_MODE, 'transcriptMode', mode);
 
-export const saveTranscriptWidgetEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_TRANSCRIPT_WIDGET_ENABLED, 'transcriptWidgetEnabled', enabled);
+/**
+ * Coerce a stored transcript mode value (or fall back to the legacy 0.14.0
+ * boolean pair) into the validated three-state enum.
+ *
+ * Migration semantics:
+ *   - New key set + valid → use it.
+ *   - Legacy `transcriptEnabled === 'false'` → `'off'` (privacy/cost opt-out).
+ *   - Legacy `transcriptWidgetEnabled === 'true'` → `'on-verify'` (was opting
+ *     into the flash, so the closest new state is verify-mode).
+ *   - Anything else → DEFAULT_TRANSCRIPT_MODE.
+ */
+function coerceTranscriptMode(
+  mode: string | undefined,
+  legacyEnabled: string | undefined,
+  legacyWidget: string | undefined,
+): TranscriptMode {
+  if (mode === 'off' || mode === 'on' || mode === 'on-verify') return mode;
+  if (legacyEnabled === 'false') return 'off';
+  if (legacyWidget === 'true') return 'on-verify';
+  return DEFAULT_TRANSCRIPT_MODE;
+}
 
 export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promise<boolean> {
   // Snap + clamp before persisting so we never write a value the UI couldn't

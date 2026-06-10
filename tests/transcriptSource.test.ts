@@ -44,7 +44,7 @@ function settingsFor(overrides: Record<string, unknown> = {}): void {
     openaiApiKeys: { 'https://api.groq.com/openai/v1': 'sk-stt' },
     sttModel: 'whisper-large-v3',
     openaiBaseUrl: 'https://api.openai.com/v1',
-    transcriptEnabled: true,
+    transcriptMode: 'on',
     ...overrides,
   });
 }
@@ -75,9 +75,14 @@ describe('shouldRunWhisperSidecar', () => {
     expect(shouldRunWhisperSidecar()).toBe(false);
   });
 
-  it('returns false when the transcript master switch is off, even on Gemini', () => {
-    settingsFor({ provider: 'gemini', transcriptEnabled: false });
+  it("returns false when transcriptMode is 'off', even on Gemini", () => {
+    settingsFor({ provider: 'gemini', transcriptMode: 'off' });
     expect(shouldRunWhisperSidecar()).toBe(false);
+  });
+
+  it("still runs on Gemini when transcriptMode is 'on-verify' (verify mode keeps capture on)", () => {
+    settingsFor({ provider: 'gemini', transcriptMode: 'on-verify' });
+    expect(shouldRunWhisperSidecar()).toBe(true);
   });
 });
 
