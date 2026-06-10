@@ -65,8 +65,6 @@ import {
   OPENAI_TRANSCRIBE_MODELS,
   STT_HOSTS,
   STT_MODELS_BY_HOST,
-  TRANSCRIPT_MODE_HELP,
-  TRANSCRIPT_MODE_LABELS,
   gameDifficultyLabel,
   gameFormatLabel,
   openaiHostLabel,
@@ -2396,47 +2394,41 @@ export const SettingsView: Component = () => {
 
             <div class="field">
               <span class="field-label">Conversation transcript</span>
-              <span class="field-hint">
-                Keeps a rolling tagged transcript of who-said-what across the last ~120 s and
-                injects it into every lens prompt so the model can attribute claims to the right
-                speaker and skip re-answering. Separate from auto-summary above — that's a high-level
-                recap, this is per-turn context.
-              </span>
-              <label class="toggle-row" style="margin-top: 8px;">
-                <input
-                  type="radio"
-                  name="transcript-mode"
-                  checked={draftTranscriptMode() === 'off'}
-                  onChange={() => setDraftTranscriptMode('off')}
-                />
-                <span>{TRANSCRIPT_MODE_LABELS['off']} — no capture, no injection</span>
-              </label>
               <label class="toggle-row">
                 <input
-                  type="radio"
-                  name="transcript-mode"
-                  checked={draftTranscriptMode() === 'on'}
-                  onChange={() => setDraftTranscriptMode('on')}
+                  type="checkbox"
+                  checked={draftTranscriptMode() !== 'off'}
+                  onChange={(e) => setDraftTranscriptMode(e.currentTarget.checked ? 'on' : 'off')}
                 />
-                <span>{TRANSCRIPT_MODE_LABELS['on']} — capture &amp; inject (recommended)</span>
+                <span>Capture who-said-what across the last ~120 s &amp; inject into every lens</span>
               </label>
-              <label class="toggle-row">
-                <input
-                  type="radio"
-                  name="transcript-mode"
-                  checked={draftTranscriptMode() === 'on-verify'}
-                  onChange={() => setDraftTranscriptMode('on-verify')}
-                />
-                <span>{TRANSCRIPT_MODE_LABELS['on-verify']} — also flash each capture on the HUD</span>
-              </label>
-              <span class="field-hint">
-                {TRANSCRIPT_MODE_HELP[draftTranscriptMode()]}
-              </span>
-              <Show when={draftTranscriptMode() !== 'off' && (settings().provider === 'gemini' || settings().openaiBaseUrl === 'https://openrouter.ai/api/v1')}>
-                <span class="field-hint warning">
-                  ⚠ On Gemini / OpenRouter this fires one parallel Whisper call per analysis against
-                  your STT host (≈ $0.0001 / 10 s). No Whisper key set → silently skipped.
+              <Show when={draftTranscriptMode() !== 'off'}>
+                <span class="field-hint">
+                  Each analysis appends a `[wearer]` / `[other]` tagged segment so the model can
+                  attribute claims to the right speaker and skip re-answering. Separate from
+                  auto-summary above — that's a high-level recap, this is per-turn context.
                 </span>
+                <Show when={settings().provider === 'gemini' || settings().openaiBaseUrl === 'https://openrouter.ai/api/v1'}>
+                  <span class="field-hint warning">
+                    ⚠ On Gemini / OpenRouter this fires one parallel Whisper call per analysis
+                    against your STT host (≈ $0.0001 / 10 s). No Whisper key set → silently skipped.
+                  </span>
+                </Show>
+                <label class="toggle-row" style="margin-top: 8px;">
+                  <input
+                    type="checkbox"
+                    checked={draftTranscriptMode() === 'on-verify'}
+                    onChange={(e) => setDraftTranscriptMode(e.currentTarget.checked ? 'on-verify' : 'on')}
+                  />
+                  <span>Flash each capture on the HUD (for testing)</span>
+                </label>
+                <Show when={draftTranscriptMode() === 'on-verify'}>
+                  <span class="field-hint">
+                    Surfaces every new segment as a 3 s `[wearer] …` / `[other] …` flash in the
+                    active page's hint slot so you can confirm captures look right. Switch off once
+                    you trust it.
+                  </span>
+                </Show>
               </Show>
             </div>
 
