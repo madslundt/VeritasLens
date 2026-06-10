@@ -136,6 +136,7 @@ import {
   formatForPrompt as formatTranscriptForPrompt,
   resetTranscript,
 } from './transcript';
+import { runWhisperSidecar, shouldRunWhisperSidecar } from './transcriptSource';
 
 /**
  * Pick the Gemini Auto-classifier model from the current settings, or
@@ -1717,10 +1718,7 @@ async function runAnalysis(): Promise<void> {
       // Capture the chat-byproduct transcript on Claude / OpenAI-compatible
       // providers. The main runAnalysis path is always "wearer is listening"
       // (wearer-speak has its own runWearerSpeakAnalyze entry that wires
-      // speaker='wearer'), so the speaker tag is 'other'. Gemini doesn't fire
-      // this callback because its audio path is inline-multimodal — Gemini's
-      // transcript landing in the buffer comes from the whisper-sidecar
-      // (transcriptSource.ts, deferred to a follow-up).
+      // speaker='wearer'), so the speaker tag is 'other'.
       const captureTranscript = (text: string): void => {
         const trimmed = text.trim();
         if (!trimmed) return;
@@ -1732,6 +1730,17 @@ async function runAnalysis(): Promise<void> {
           endedAt: now,
         });
       };
+      // Gemini + OpenRouter inline-audio paths never fire `onTranscript`
+      // because their lens call consumes audio inline. Fire a parallel
+      // whisper-sidecar call against the user's STT host so those providers
+      // still get a tagged transcript segment. Fired before the lens call so
+      // both run concurrently; the sidecar promise is intentionally not
+      // awaited — it lands in the background and is a no-op if it resolves
+      // after the session rotates. Aborts when the lens call is canceled via
+      // the shared controller signal.
+      if (shouldRunWhisperSidecar()) {
+        void runWhisperSidecar(wav, 'other', controller.signal);
+      }
       rawText = await callLensStream({
         wav,
         prompt: `${analysisContext}\n\n${analysisPrompt}`,
@@ -2118,6 +2127,12 @@ async function runWearerSpeakAnalyze(): Promise<void> {
     targetLangCode,
   });
 
+  // Same provider-coverage gap as runAnalysis: Gemini / OpenRouter never fire
+  // `onTranscript`, so fire the parallel whisper-sidecar with speaker='wearer'
+  // alongside the lens call.
+  if (shouldRunWhisperSidecar()) {
+    void runWhisperSidecar(wav, 'wearer', controller.signal);
+  }
   try {
     const rawText = await callLens({
       wav,
@@ -2127,8 +2142,8 @@ async function runWearerSpeakAnalyze(): Promise<void> {
       // Tag the wearer's just-spoken utterance into the rolling transcript so
       // a follow-up turn from the other speaker sees the right attribution
       // ("you said X" vs "they said X"). Only fires on Claude / OpenAI-
-      // compatible STT paths; Gemini's wearer-speak transcript will land via
-      // the whisper-sidecar in transcriptSource.ts.
+      // compatible STT paths; Gemini + OpenRouter rely on the whisper-sidecar
+      // fired immediately above for the same outcome.
       onTranscript: (text) => {
         const trimmed = text.trim();
         if (!trimmed) return;
