@@ -18,6 +18,7 @@ import {
   pushHistoryEntry,
   saveAutoSummaryEnabled,
   saveBufferDuration,
+  saveTranscriptEnabled,
   saveGeminiAutoModel,
   saveGeminiKey,
   saveGeminiModel,
@@ -266,6 +267,26 @@ describe('loadSettings', () => {
     ls.data.set('veritaslens.bufferDuration', '600');
     await loadSettings(ls.get);
     expect(settings().bufferDuration).toBe(300);
+  });
+
+  it('defaults transcriptEnabled to true when storage is empty (existing installs opt in by default)', async () => {
+    const ls = fakeLocalStorage();
+    await loadSettings(ls.get);
+    expect(settings().transcriptEnabled).toBe(true);
+  });
+
+  it('respects an explicit transcriptEnabled=false in storage', async () => {
+    const ls = fakeLocalStorage();
+    await saveTranscriptEnabled(ls.set, false);
+    await loadSettings(ls.get);
+    expect(settings().transcriptEnabled).toBe(false);
+  });
+
+  it('round-trips transcriptEnabled=true through save → load', async () => {
+    const ls = fakeLocalStorage();
+    await saveTranscriptEnabled(ls.set, true);
+    await loadSettings(ls.get);
+    expect(settings().transcriptEnabled).toBe(true);
   });
 });
 
