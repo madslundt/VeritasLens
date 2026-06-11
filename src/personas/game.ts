@@ -30,8 +30,18 @@ function languageDirective(lang: LanguageCode): string {
 /** Topic clause. Random presets pass empty topic — the LLM picks. When
  *  `recentRandomTopics` is non-empty the clause appends an explicit
  *  avoid-list so back-to-back Random plays don't all default to "space /
- *  Apollo" (the observed LLM bias when given a wide-open choice). */
-function topicClause(topic: string, recentRandomTopics: readonly string[] = []): string {
+ *  Apollo" (the observed LLM bias when given a wide-open choice).
+ *
+ *  `recentConversationTopics` is the opposite nudge: when populated, it
+ *  PREFERS a topic the wearer was recently talking about (sourced from
+ *  session-summary history). The two lists serve different purposes — one
+ *  steers away from staleness, the other steers toward relevance — so we
+ *  emit them as separate blocks rather than collapsing them. */
+function topicClause(
+  topic: string,
+  recentRandomTopics: readonly string[] = [],
+  recentConversationTopics: readonly string[] = [],
+): string {
   const trimmed = topic.trim();
   if (trimmed.length > 0) return `Topic: ${trimmed}.`;
   const base = [
@@ -41,9 +51,20 @@ function topicClause(topic: string, recentRandomTopics: readonly string[] = []):
     'Once chosen, every question must be on that same topic.',
     'Echo the chosen topic in the `chosenTopic` field of the response so it can be displayed back to the user.',
   ].join(' ');
-  if (recentRandomTopics.length === 0) return base;
-  const bullets = recentRandomTopics.map((t) => `- ${t}`).join('\n');
-  return `${base}\n\nAVOID these recent Random picks (choose a clearly different domain, not a sibling of any of these):\n${bullets}`;
+  const blocks: string[] = [base];
+  if (recentConversationTopics.length > 0) {
+    const bullets = recentConversationTopics.map((t) => `- ${t}`).join('\n');
+    blocks.push(
+      `PREFER — these topics came up in the wearer's recent conversations. If any one fits a concrete sub-domain you can build 10 distinct questions on, pick it. Otherwise pick freely from the wide universe above:\n${bullets}`,
+    );
+  }
+  if (recentRandomTopics.length > 0) {
+    const bullets = recentRandomTopics.map((t) => `- ${t}`).join('\n');
+    blocks.push(
+      `AVOID these recent Random picks (choose a clearly different domain, not a sibling of any of these):\n${bullets}`,
+    );
+  }
+  return blocks.join('\n\n');
 }
 
 const COMMON_OUTPUT_RULES = [
@@ -81,12 +102,13 @@ export function buildQuizPrompt(
   lang: LanguageCode,
   recentQuestions?: readonly string[],
   recentRandomTopics?: readonly string[],
+  recentConversationTopics?: readonly string[],
 ): string {
   const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a quiz master generating a multiple-choice quiz for a smart-glasses HUD.',
     '',
-    topicClause(topic, recentRandomTopics),
+    topicClause(topic, recentRandomTopics, recentConversationTopics),
     difficultyDirective(difficulty),
     '',
     'For each question, output:',
@@ -109,12 +131,13 @@ export function buildTrueFalsePrompt(
   lang: LanguageCode,
   recentQuestions?: readonly string[],
   recentRandomTopics?: readonly string[],
+  recentConversationTopics?: readonly string[],
 ): string {
   const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a quiz master generating a TRUE / FALSE quiz for a smart-glasses HUD.',
     '',
-    topicClause(topic, recentRandomTopics),
+    topicClause(topic, recentRandomTopics, recentConversationTopics),
     difficultyDirective(difficulty),
     '',
     'For each question, output:',
@@ -137,12 +160,13 @@ export function buildRiddlePrompt(
   lang: LanguageCode,
   recentQuestions?: readonly string[],
   recentRandomTopics?: readonly string[],
+  recentConversationTopics?: readonly string[],
 ): string {
   const avoid = buildAvoidBlock(recentQuestions);
   return [
     'You are a riddle master generating tap-to-reveal riddles for a smart-glasses HUD.',
     '',
-    topicClause(topic, recentRandomTopics),
+    topicClause(topic, recentRandomTopics, recentConversationTopics),
     difficultyDirective(difficulty),
     '',
     'For each riddle, output:',
@@ -166,11 +190,12 @@ export function buildGamePrompt(
   lang: LanguageCode,
   recentQuestions?: readonly string[],
   recentRandomTopics?: readonly string[],
+  recentConversationTopics?: readonly string[],
 ): string {
   switch (format) {
-    case 'quiz-mc': return buildQuizPrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics);
-    case 'true-false': return buildTrueFalsePrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics);
-    case 'riddle': return buildRiddlePrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics);
+    case 'quiz-mc': return buildQuizPrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics, recentConversationTopics);
+    case 'true-false': return buildTrueFalsePrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics, recentConversationTopics);
+    case 'riddle': return buildRiddlePrompt(topic, difficulty, lang, recentQuestions, recentRandomTopics, recentConversationTopics);
   }
 }
 

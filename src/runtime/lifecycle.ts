@@ -1468,14 +1468,6 @@ async function runAnalysis(): Promise<void> {
   await blankActiveForThinking();
   startSpinner();
 
-  // Hoisted teardown for the streaming heading timer so the catch/finally
-  // can drain it. The timer itself is block-scoped inside the try (declared
-  // alongside `commitHeading`), so without this handle an error/abort
-  // between timer-set (lines 1770/1782) and the success-path clear (1822)
-  // would leak the timer — it would fire after teardown and paint a stale
-  // partial heading onto the HUD via the render queue.
-  let drainHeadingTimer: () => void = () => {};
-
   try {
     // VAD-trim the upload to just the detected speech regions when enabled
     // (default) and Silero is available. The gate above already confirmed at
@@ -1670,77 +1662,16 @@ async function runAnalysis(): Promise<void> {
     }
 
     let rawText: string;
-    /**
-     * Tail of the partial-render queue. Each onPartialClaim chains a fresh
-     * `setLensResult(synthetic)` after the previous render resolves so two
-     * adjacent claims can't race the SDK's rebuildPageContainer (out-of-order
-     * commits would flicker the wrong page on screen). Drained before the
-     * final result render below.
-     */
-    let renderQueue: Promise<void> = Promise.resolve();
     if (speculativeRawText !== null) {
       rawText = speculativeRawText;
     } else {
       const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
       const analysisContext = buildContextBlock(analysisPersona.name);
-      // Stream the foreground call so the HUD can render the first claim as
-      // soon as it parses, instead of waiting for the whole array. Each
-      // completed claim object is appended to a partial result the HUD reads
-      // via `lensPartialResult()`. Once the full text arrives below we hand
-      // off to `setStateResult` and clear the partial.
-      const partialClaims: Record<string, unknown>[] = [];
-      const partialLensId = analysisPersona.id;
-      const partialAutoSelected = autoSelected;
       // Grounding is opt-in per persona — only fact-style lenses (fact-check,
       // stats-check, trivia, devil's advocate) declare it, so other lenses
       // skip the latency cost of the Google Search tool.
       const tools =
         analysisPersona.grounding === 'google_search' ? [...GOOGLE_SEARCH_TOOLS] : undefined;
-
-      // Persona-opt-in heading streaming. When `streamHeading` is set, the
-      // parser surfaces cumulative content for that one field as it streams.
-      // Throttled to HEADING_COMMIT_MS so the SDK's page rebuild isn't
-      // strobed (50–150ms per commit on this hardware), and capped at the
-      // claim-render queue tail so the final result still wins.
-      const HEADING_COMMIT_MS = 150;
-      const watchValueKeys = analysisPersona.streamHeading
-        ? new Set<string>([analysisPersona.streamHeading.field])
-        : undefined;
-      // Carry-field accumulator — top-level scalars the persona wants in the
-      // synthesized partial. Gemini closes scalars in schema order, so any
-      // field declared before the heading field has already arrived by the
-      // time streaming starts.
-      const carriedFields: Record<string, string | number | boolean | null> = {};
-      const carryFieldSet = new Set<string>(analysisPersona.streamHeading?.carryFields ?? []);
-      let lastHeadingCommitAt = 0;
-      let pendingHeadingPartial: string | null = null;
-      let headingTimer: ReturnType<typeof setTimeout> | null = null;
-      drainHeadingTimer = () => {
-        if (headingTimer !== null) {
-          clearTimeout(headingTimer);
-          headingTimer = null;
-        }
-        pendingHeadingPartial = null;
-      };
-      const commitHeading = (): void => {
-        if (headingTimer !== null) {
-          clearTimeout(headingTimer);
-          headingTimer = null;
-        }
-        if (pendingHeadingPartial === null || !analysisPersona.streamHeading) return;
-        const partial = pendingHeadingPartial;
-        pendingHeadingPartial = null;
-        lastHeadingCommitAt = performance.now();
-        renderQueue = renderQueue.then(async () => {
-          try {
-            const synthetic = analysisPersona.streamHeading!.synthesize(partial, carriedFields);
-            if (partialAutoSelected) synthetic.autoSelected = true;
-            await setLensResult(synthetic);
-          } catch {
-            /* defensive — synthesize should never throw */
-          }
-        });
-      };
       // Capture the chat-byproduct transcript on Claude / OpenAI-compatible
       // providers. The main runAnalysis path is always "wearer is listening"
       // (wearer-speak has its own runWearerSpeakAnalyze entry that wires
@@ -1768,6 +1699,10 @@ async function runAnalysis(): Promise<void> {
       if (shouldRunWhisperSidecar()) {
         void runWhisperSidecar(wav, 'other', controller.signal);
       }
+      // HUD never gets partial results — partial renders flickered/strobed on
+      // this hardware. We still consume the stream (for the transcript
+      // byproduct on chat-tool providers) but skip every partial HUD render;
+      // the final result lands in one commit below.
       rawText = await callLensStream({
         wav,
         prompt: `${analysisContext}\n\n${analysisPrompt}`,
@@ -1775,86 +1710,11 @@ async function runAnalysis(): Promise<void> {
         signal: controller.signal,
         onRetry,
         tools,
-        watchValueKeys,
         onTranscript: captureTranscript,
-        onPartialField: (name, value) => {
-          if (!carryFieldSet.has(name)) return;
-          carriedFields[name] = value;
-          // Render the chrome (e.g. sourceLanguage code) the moment a carry
-          // field closes, even if the heading hasn't started streaming yet.
-          // Throttled by the same 150ms gate so multiple field closes in
-          // the same window coalesce into one rebuild.
-          if (!analysisPersona.streamHeading) return;
-          pendingHeadingPartial = pendingHeadingPartial ?? '';
-          const now = performance.now();
-          const elapsed = now - lastHeadingCommitAt;
-          if (elapsed >= HEADING_COMMIT_MS) {
-            commitHeading();
-          } else if (headingTimer === null) {
-            headingTimer = setTimeout(commitHeading, HEADING_COMMIT_MS - elapsed);
-          }
-        },
-        onPartialString: (name, partial) => {
-          if (!analysisPersona.streamHeading) return;
-          if (name !== analysisPersona.streamHeading.field) return;
-          pendingHeadingPartial = partial;
-          const now = performance.now();
-          const elapsed = now - lastHeadingCommitAt;
-          if (elapsed >= HEADING_COMMIT_MS) {
-            commitHeading();
-          } else if (headingTimer === null) {
-            headingTimer = setTimeout(commitHeading, HEADING_COMMIT_MS - elapsed);
-          }
-        },
-        onPartialClaim: (claim) => {
-          partialClaims.push(claim);
-          setLensPartialResult({
-            lensId: partialLensId,
-            autoSelected: partialAutoSelected,
-            claims: partialClaims.slice(),
-          });
-          // Personas with `streamHeading` opt-in (Translate, Trivia) own the
-          // partial-render path via the heading streamer above — synthesizing
-          // a `{claims:[…]}` parse for them would clobber the in-flight
-          // heading text because their parsers tolerate missing fields and
-          // return an empty-shaped result instead of throwing. Skip the
-          // claim-partial render for those lenses; the heading partial keeps
-          // updating until the final result commits.
-          if (analysisPersona.streamHeading) return;
-          // Render a synthetic partial on the HUD so the wearer sees claim 1
-          // the moment it parses. Lens.parse() of `{claims:[…]}` produces the
-          // same shape the final-result path renders; the spinner stays up
-          // (lifecycle stops it only after the final result lands) so the
-          // wearer can see more is still arriving. Lenses that don't follow
-          // the `{ claims: [...] }` shape throw inside parse() — we swallow
-          // that and skip the preview rather than fail the analyze.
-          const snapshot = partialClaims.slice();
-          renderQueue = renderQueue.then(async () => {
-            try {
-              const partialResult = analysisPersona.parse(JSON.stringify({ claims: snapshot }));
-              if (partialAutoSelected) partialResult.autoSelected = true;
-              await setLensResult(partialResult);
-            } catch {
-              /* preview not applicable for this lens — final result will render */
-            }
-          });
-        },
       });
-      // Drain any pending heading commit before the final-result render so a
-      // stale partial commit can't resolve after the authoritative final and
-      // overwrite it.
-      if (headingTimer !== null) {
-        clearTimeout(headingTimer);
-        headingTimer = null;
-      }
-      pendingHeadingPartial = null;
     }
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
-    // Drain any in-flight partial render so the final-result commit always
-    // lands last (and therefore wins) — without this a stale partial commit
-    // could resolve after the authoritative final render and overwrite it.
-    await renderQueue;
     await stopSpinner();
     // Final result now lives in `lensResult` — drop the partial so any
     // reactive `partial ?? final` consumer flips over to the authoritative
@@ -1887,12 +1747,9 @@ async function runAnalysis(): Promise<void> {
     setAppPhase('displaying');
   } catch (err) {
     await stopSpinner();
-    // Drain any pending heading streamer first — otherwise the timer can fire
-    // after teardown and clobber the just-cleared partial via the render queue.
-    drainHeadingTimer();
-    // Clear the in-progress partial across every error branch — abort,
-    // NoSpeech, transport, blockReason. The HUD's `partial ?? final` reader
-    // would otherwise hold the last claim on screen past the failure.
+    // Defensive clear — partials are never written under the no-stream path,
+    // but the signal still exists and we want to leave no stale state if a
+    // pre-stream code path ever sets it again.
     setLensPartialResult(null);
     if ((err as Error)?.name === 'AbortError') {
       // User cancelled via double-tap (which nulls `inflight` and clears

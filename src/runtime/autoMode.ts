@@ -134,9 +134,14 @@ function tick(): void {
     return;
   }
 
-  const sincePcm = buffer.linearPcmSince(lastByteOffset);
+  // Use the ring's in-place RMS so this 200 ms tick doesn't allocate a fresh
+  // copy of the entire buffer (multi-MB per tick at large durations — was
+  // the dominant GC source on long sessions). Snapshot `bytesProduced`
+  // first so the offset we save matches the window we measured.
+  const offsetBefore = lastByteOffset;
   lastByteOffset = buffer.bytesProduced;
-  if (sincePcm.length < 2) {
+  const wantedBytes = lastByteOffset - offsetBefore;
+  if (wantedBytes < 2) {
     // No new samples this tick (mic stuck, or session just started). Treat
     // as silence so the state machine doesn't get stuck armed forever.
     onSilence(config);
@@ -144,7 +149,7 @@ function tick(): void {
   }
 
   const rmsFloor = config.getRmsFloor() || FALLBACK_RMS_FLOOR;
-  const rms = computeRmsInt16Le(sincePcm);
+  const rms = buffer.rmsInt16LeSince(offsetBefore);
   if (rms >= rmsFloor) {
     onVoice(config);
   } else {
@@ -198,15 +203,3 @@ function onSilence(config: AutoModeConfig): void {
   config.trigger();
 }
 
-/** Single-pass RMS over little-endian int16 PCM. Returns 0 for empty input. */
-function computeRmsInt16Le(pcm: Uint8Array): number {
-  const sampleCount = pcm.length >> 1;
-  if (sampleCount === 0) return 0;
-  const dv = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-  let sumSq = 0;
-  for (let i = 0; i < sampleCount; i++) {
-    const s = dv.getInt16(i * 2, true);
-    sumSq += s * s;
-  }
-  return Math.sqrt(sumSq / sampleCount);
-}

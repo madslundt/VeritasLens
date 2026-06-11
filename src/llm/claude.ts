@@ -336,6 +336,22 @@ async function consumeClaudeStream(
   let toolBlockIndex: number | undefined;
   let saw_tool_use = false;
 
+  // See gemini.ts:consumeStream for the rationale — `attemptCtl.cleanup()`
+  // already ran, so the fetch-level abort no longer cancels the body reader.
+  // Wire the outer signal directly so a user double-tap during streaming
+  // tears down the connection instead of leaving the reader spinning.
+  const onAbort = (): void => { void reader.cancel(); };
+  if (opts.signal) {
+    if (opts.signal.aborted) onAbort();
+    else opts.signal.addEventListener('abort', onAbort);
+  }
+  const throwIfAborted = (): void => {
+    if (!opts.signal?.aborted) return;
+    const e = new Error('Aborted');
+    e.name = 'AbortError';
+    throw e;
+  };
+
   const dispatch = (chunk: string): void => {
     if (!chunk) return;
     parser.feed(chunk, (event) => {
@@ -350,6 +366,7 @@ async function consumeClaudeStream(
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      throwIfAborted();
       pending += decoder.decode(value, { stream: true });
       const events = pending.split(/\r?\n\r?\n/);
       pending = events.pop() ?? '';
@@ -389,8 +406,11 @@ async function consumeClaudeStream(
       }
     }
   } finally {
+    opts.signal?.removeEventListener('abort', onAbort);
     reader.releaseLock();
   }
+
+  throwIfAborted();
 
   parser.end((event) => {
     if (event.type === 'noSpeech') opts.onNoSpeech?.();

@@ -468,6 +468,7 @@ export const SettingsView: Component = () => {
   const [prepError, setPrepError] = createSignal('');
   const [prepExpanded, setPrepExpanded] = createSignal(false);
   const [autoConfigExpanded, setAutoConfigExpanded] = createSignal(false);
+  const [translationConfigExpanded, setTranslationConfigExpanded] = createSignal(false);
   // Auto-lens enable list is now draft-only — toggles update the local
   // signal and are persisted by the global Save bar alongside the other
   // tabs' drafts, so the user sees the dot indicator on the Lenses tab
@@ -1135,17 +1136,6 @@ export const SettingsView: Component = () => {
   });
   const appDirty = createMemo(() => {
     const s = settings();
-    // Translation source-langs are a union ('auto' | LanguageCode[]); compare
-    // shape-first so a toggle between 'auto' and an empty array (which the
-    // resolver collapses to 'auto') doesn't read as dirty.
-    const persistedSrc = s.translationSourceLanguages;
-    const draftSrc = resolveTranslationSourceLangs();
-    const srcDirty =
-      Array.isArray(persistedSrc) !== Array.isArray(draftSrc)
-      || (Array.isArray(persistedSrc) && Array.isArray(draftSrc) && (
-        persistedSrc.length !== draftSrc.length
-        || !persistedSrc.every((c) => draftSrc.includes(c))
-      ));
     return (
       draftLanguage() !== s.responseLanguage
       || draftBuffer() !== s.bufferDuration
@@ -1158,8 +1148,6 @@ export const SettingsView: Component = () => {
       || draftAutoMode() !== s.autoModeEnabled
       || draftAutoModeStart() !== s.autoModeStartMs
       || draftAutoModeSilence() !== s.autoModeSilenceMs
-      || draftTranslationMode() !== s.translationMode
-      || srcDirty
     );
   });
   /**
@@ -1170,8 +1158,22 @@ export const SettingsView: Component = () => {
    * append) doesn't fool the bar into thinking the user has unsaved work.
    */
   const lensDirty = createMemo(() => {
+    const s = settings();
+    if (draftTranslationMode() !== s.translationMode) return true;
+    // Translation source-langs are a union ('auto' | LanguageCode[]); compare
+    // shape-first so a toggle between 'auto' and an empty array (which the
+    // resolver collapses to 'auto') doesn't read as dirty.
+    const persistedSrc = s.translationSourceLanguages;
+    const draftSrc = resolveTranslationSourceLangs();
+    const srcDirty =
+      Array.isArray(persistedSrc) !== Array.isArray(draftSrc)
+      || (Array.isArray(persistedSrc) && Array.isArray(draftSrc) && (
+        persistedSrc.length !== draftSrc.length
+        || !persistedSrc.every((c) => draftSrc.includes(c))
+      ));
+    if (srcDirty) return true;
     const a = draftAutoDisabledLenses();
-    const b = settings().autoDisabledLenses;
+    const b = s.autoDisabledLenses;
     if (a.length !== b.length) return true;
     const aSet = new Set(a);
     for (const id of b) if (!aSet.has(id)) return true;
@@ -1584,6 +1586,111 @@ export const SettingsView: Component = () => {
                         </Show>
                       </li>
                     </Match>
+                    <Match when={p.id === 'translation'}>
+                      <li
+                        class="lens-row lens-row--expandable"
+                        classList={{ 'lens-row--open': translationConfigExpanded() }}
+                      >
+                        <div class="lens-row-head">
+                          <div class="lens-row-title">
+                            <strong>{p.name}</strong>
+                            <span class="lens-tag lens-tag--ok">
+                              {draftTranslationMode() === 'converse' ? 'Converse' : 'Listen-in'}
+                              {' · '}
+                              {draftTranslationAuto() || draftTranslationSourceLangs().length === 0
+                                ? 'Auto'
+                                : `${draftTranslationSourceLangs().length} lang${draftTranslationSourceLangs().length === 1 ? '' : 's'}`}
+                            </span>
+                          </div>
+                          <div class="lens-row-sub">
+                            <span class="lens-desc">{p.description}</span>
+                            <button
+                              type="button"
+                              class="meeting-prep-trigger"
+                              classList={{ open: translationConfigExpanded() }}
+                              aria-expanded={translationConfigExpanded()}
+                              onClick={() => setTranslationConfigExpanded((v) => !v)}
+                            >
+                              <span>{translationConfigExpanded() ? 'Done' : 'Configure'}</span>
+                              <svg
+                                class="meeting-prep-chevron"
+                                viewBox="0 0 10 6"
+                                width="10"
+                                height="6"
+                                aria-hidden="true"
+                              >
+                                <path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                        <Show when={translationConfigExpanded()}>
+                          <div class="meeting-prep-inline">
+                            <div class="field">
+                              <span class="field-label">Mode</span>
+                              <span class="field-hint">
+                                <strong>Converse</strong> generates 3 short reply starters in both
+                                languages so you can hold up your end of a conversation;
+                                <strong> Listen-in</strong> drops the starters so you just see what's
+                                being said (cheaper request and a less crowded HUD). Tip: enable
+                                Auto mode in the App tab for hands-free continuous translation.
+                              </span>
+                              <label class="toggle-row" style="margin-top: 8px;">
+                                <input
+                                  type="radio"
+                                  name="translation-mode"
+                                  checked={draftTranslationMode() === 'converse'}
+                                  onChange={() => setDraftTranslationMode('converse')}
+                                />
+                                <span>Converse — show 3 reply starters</span>
+                              </label>
+                              <label class="toggle-row">
+                                <input
+                                  type="radio"
+                                  name="translation-mode"
+                                  checked={draftTranslationMode() === 'listen-in'}
+                                  onChange={() => setDraftTranslationMode('listen-in')}
+                                />
+                                <span>Listen-in — transcript &amp; translation only</span>
+                              </label>
+                            </div>
+
+                            <div class="field">
+                              <span class="field-label">Source language</span>
+                              <label class="toggle-row">
+                                <input
+                                  type="checkbox"
+                                  checked={draftTranslationAuto()}
+                                  onChange={(e) => setDraftTranslationAuto(e.currentTarget.checked)}
+                                />
+                                <span>Auto-detect what the other person is speaking</span>
+                              </label>
+                              <Show when={!draftTranslationAuto()}>
+                                <span class="field-hint">
+                                  Restrict to one or more languages. The lens marks the audio as
+                                  "no speech" when the speaker isn't using any of these — useful
+                                  when stray English at a Spanish café shouldn't fire the lens.
+                                </span>
+                                <div class="lens-list" style="margin-top: 8px;">
+                                  <For each={Object.entries(LANGUAGES)}>
+                                    {([code, name]) => (
+                                      <label class="lens-row">
+                                        <input
+                                          type="checkbox"
+                                          checked={draftTranslationSourceLangs().includes(code as LanguageCode)}
+                                          onChange={() => toggleTranslationSourceLang(code as LanguageCode)}
+                                        />
+                                        <span>{name}</span>
+                                      </label>
+                                    )}
+                                  </For>
+                                </div>
+                              </Show>
+                            </div>
+                          </div>
+                        </Show>
+                      </li>
+                    </Match>
                     <Match when={p.id === MEETING_PREP_ID}>
                       <li
                         class="lens-row lens-row--expandable"
@@ -1747,6 +1854,7 @@ export const SettingsView: Component = () => {
             <p class="field-hint">
               Hands-free quizzes, true/false rounds, and riddles you can play on the glasses.
               Tap the Games entry at the top of the lens picker to start one — Random is always available.
+              Random picks nudge toward topics from your recent session summaries when any are saved.
             </p>
             <ul class="lens-list">
               <For each={gamePresets()}>
@@ -2415,68 +2523,6 @@ export const SettingsView: Component = () => {
                   </span>
                 </Show>
               </Show>
-            </div>
-
-            <div class="field">
-              <span class="field-label">Translate lens</span>
-              <span class="field-hint">
-                Two modes for the Translate lens. <strong>Converse</strong> generates 3 short reply
-                starters in both languages so you can hold up your end of a conversation;
-                <strong> Listen-in</strong> drops the starters so you just see what's being said
-                (cheaper request and a less crowded HUD). Tip: enable Auto mode above for hands-free
-                continuous translation either way.
-              </span>
-              <label class="toggle-row" style="margin-top: 8px;">
-                <input
-                  type="radio"
-                  name="translation-mode"
-                  checked={draftTranslationMode() === 'converse'}
-                  onChange={() => setDraftTranslationMode('converse')}
-                />
-                <span>Converse — show 3 reply starters</span>
-              </label>
-              <label class="toggle-row">
-                <input
-                  type="radio"
-                  name="translation-mode"
-                  checked={draftTranslationMode() === 'listen-in'}
-                  onChange={() => setDraftTranslationMode('listen-in')}
-                />
-                <span>Listen-in — transcript &amp; translation only</span>
-              </label>
-
-              <div style="margin-top: 12px;">
-                <span class="field-label">Source language</span>
-                <label class="toggle-row">
-                  <input
-                    type="checkbox"
-                    checked={draftTranslationAuto()}
-                    onChange={(e) => setDraftTranslationAuto(e.currentTarget.checked)}
-                  />
-                  <span>Auto-detect what the other person is speaking</span>
-                </label>
-                <Show when={!draftTranslationAuto()}>
-                  <span class="field-hint">
-                    Restrict to one or more languages. The lens marks the audio as "no speech"
-                    when the speaker isn't using any of these — useful when stray English at a
-                    Spanish café shouldn't fire the lens.
-                  </span>
-                  <div class="lens-list" style="margin-top: 8px;">
-                    <For each={Object.entries(LANGUAGES)}>
-                      {([code, name]) => (
-                        <label class="lens-row">
-                          <input
-                            type="checkbox"
-                            checked={draftTranslationSourceLangs().includes(code as LanguageCode)}
-                            onChange={() => toggleTranslationSourceLang(code as LanguageCode)}
-                          />
-                          <span>{name}</span>
-                        </label>
-                      )}
-                    </For>
-                  </div>
-                </Show>
-              </div>
             </div>
 
             <div class="field">

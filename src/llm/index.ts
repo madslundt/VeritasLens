@@ -306,6 +306,9 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
     onRetry: opts.onRetry,
     tools: opts.tools,
     onPartialClaim: opts.onPartialClaim,
+    onPartialField: opts.onPartialField,
+    watchValueKeys: opts.watchValueKeys,
+    onPartialString: opts.onPartialString,
     onNoSpeech: opts.onNoSpeech,
   });
 }

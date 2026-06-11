@@ -102,6 +102,49 @@ export class PcmRingBuffer {
     return linear.subarray(linear.length - wanted);
   }
 
+  /**
+   * RMS of the int16-LE samples appended since `byteOffset`, computed
+   * directly from the ring storage without allocating. Used by the autoMode
+   * watcher's 200 ms tick, where calling `linearPcmSince` (which copies the
+   * full ring on each call) caused multi-MB-per-tick GC pressure at large
+   * buffer durations. Returns 0 for empty / sub-sample windows.
+   *
+   * Walks at most `wanted` bytes from the tail of the ring, handling the
+   * wraparound seam in two contiguous segments.
+   */
+  rmsInt16LeSince(byteOffset: number): number {
+    const wanted = Math.max(0, this.produced - byteOffset);
+    const available = Math.min(wanted, this.size);
+    // Need at least one full int16 sample (2 bytes), and an even byte count
+    // so we don't straddle the sample boundary at the segment seam.
+    const usable = available - (available % 2);
+    if (usable < 2) return 0;
+    const start = (this.head - usable + this.capacity) % this.capacity;
+    const firstLen = Math.min(usable, this.capacity - start);
+    const storage = this.storage;
+    let sumSq = 0;
+    let sampleCount = 0;
+    for (let i = 0; i < firstLen; i += 2) {
+      const lo = storage[start + i]!;
+      const hi = storage[start + i + 1]!;
+      const u = lo | (hi << 8);
+      const s = u >= 0x8000 ? u - 0x10000 : u;
+      sumSq += s * s;
+      sampleCount++;
+    }
+    const secondLen = usable - firstLen;
+    for (let i = 0; i < secondLen; i += 2) {
+      const lo = storage[i]!;
+      const hi = storage[i + 1]!;
+      const u = lo | (hi << 8);
+      const s = u >= 0x8000 ? u - 0x10000 : u;
+      sumSq += s * s;
+      sampleCount++;
+    }
+    if (sampleCount === 0) return 0;
+    return Math.sqrt(sumSq / sampleCount);
+  }
+
   /** Reset to empty. The underlying buffer is retained for reuse. */
   clear(): void {
     this.head = 0;
