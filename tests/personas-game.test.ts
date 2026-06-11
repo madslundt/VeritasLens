@@ -352,4 +352,46 @@ describe('buildGamePrompt avoid-list', () => {
     expect(prompt).not.toContain('Resist the strong default to space');
     expect(prompt).not.toContain('AVOID these recent Random picks');
   });
+
+  it('Random topic clause splices a PREFER block with bulleted conversation topics', () => {
+    const prompt = buildGamePrompt(
+      'quiz-mc', '', 'medium', 'en',
+      undefined, undefined,
+      ['Renaissance painters', 'Formula 1 history'],
+    );
+    expect(prompt).toContain('PREFER — these topics came up in the wearer');
+    expect(prompt).toContain('- Renaissance painters');
+    expect(prompt).toContain('- Formula 1 history');
+  });
+
+  it('Random topic clause emits PREFER and AVOID blocks together when both are provided', () => {
+    const prompt = buildGamePrompt(
+      'quiz-mc', '', 'medium', 'en',
+      undefined,
+      ['Space exploration'],
+      ['Pasta recipes'],
+    );
+    expect(prompt).toContain('PREFER');
+    expect(prompt).toContain('- Pasta recipes');
+    expect(prompt).toContain('AVOID these recent Random picks');
+    expect(prompt).toContain('- Space exploration');
+  });
+
+  it('Random topic clause omits the PREFER block when conversation topics is empty', () => {
+    const prompt = buildGamePrompt(
+      'quiz-mc', '', 'medium', 'en',
+      undefined, undefined, [],
+    );
+    expect(prompt).not.toContain('PREFER');
+  });
+
+  it('Non-empty topic ignores conversation-derived hints (no PREFER block)', () => {
+    const prompt = buildGamePrompt(
+      'quiz-mc', 'World War II', 'medium', 'en',
+      undefined, undefined,
+      ['Pasta recipes'],
+    );
+    expect(prompt).toContain('Topic: World War II.');
+    expect(prompt).not.toContain('PREFER');
+  });
 });

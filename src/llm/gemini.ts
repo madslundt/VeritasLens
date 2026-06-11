@@ -355,6 +355,23 @@ async function consumeStream(
   let pending = '';
   let blockReason: string | undefined;
 
+  // Wire the outer abort signal into the body reader. `attemptCtl.cleanup()`
+  // ran before this function was called, so the fetch-level signal no longer
+  // propagates here — without this, a user double-tap during streaming would
+  // leave the reader spinning until the server closed, retaining the WAV
+  // closure (up to ~19 MB).
+  const onAbort = (): void => { void reader.cancel(); };
+  if (opts.signal) {
+    if (opts.signal.aborted) onAbort();
+    else opts.signal.addEventListener('abort', onAbort);
+  }
+  const throwIfAborted = (): void => {
+    if (!opts.signal?.aborted) return;
+    const e = new Error('Aborted');
+    e.name = 'AbortError';
+    throw e;
+  };
+
   const dispatch = (chunk: string): void => {
     if (!chunk) return;
     parser.feed(chunk, (event) => {
@@ -369,6 +386,7 @@ async function consumeStream(
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
+      throwIfAborted();
       pending += decoder.decode(value, { stream: true });
       // SSE events are separated by a blank line. Some proxies use \n\n, some
       // \r\n\r\n — handle both with a single regex split.
@@ -400,8 +418,11 @@ async function consumeStream(
       }
     }
   } finally {
+    opts.signal?.removeEventListener('abort', onAbort);
     reader.releaseLock();
   }
+
+  throwIfAborted();
 
   parser.end((event) => {
     if (event.type === 'noSpeech') opts.onNoSpeech?.();

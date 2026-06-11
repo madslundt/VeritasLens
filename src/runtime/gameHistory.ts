@@ -35,6 +35,12 @@ export const MAX_RECENT_GAME_QUESTIONS_CHARS = 1500;
  *  domains to steer away from. */
 export const MAX_RECENT_RANDOM_TOPICS = 5;
 
+/** Cap for conversation-derived topic hints. Pulled from session-summary
+ *  history's `title` + `topics[]` fields. Same ballpark as Random avoid:
+ *  enough to give the LLM 1-2 conversation-adjacent picks while leaving
+ *  room to range elsewhere. */
+export const MAX_RECENT_CONVERSATION_TOPICS = 6;
+
 /**
  * Walk `history` newest-first, pulling question texts from entries that
  * match the active preset. Verbatim duplicates are dropped on insert
@@ -136,6 +142,50 @@ export function extractRecentRandomTopics(
     seen.add(key);
     out.push(topic);
     if (out.length >= maxCount) return out;
+  }
+  return out;
+}
+
+/**
+ * Pull recent conversation topics from session-summary history. Surfaces a
+ * short list (`title` and `topics[]` from each entry, newest-first) so the
+ * Random game prompt can lean toward topics the wearer was actually
+ * talking about. Case-insensitive dedupe; entries with no usable content
+ * are skipped.
+ *
+ * The extractor only looks at `session-summary` lens entries — fact-check
+ * verdicts and translations don't carry topic-level structure and would
+ * introduce noise. Returns [] when no summaries exist, which keeps the
+ * `topicClause` PREFER block out of the prompt entirely (so first-run
+ * users see the same prompt as before the feature shipped).
+ */
+export function extractRecentConversationTopics(
+  history: ReadonlyArray<HistoryEntry>,
+  maxCount: number = MAX_RECENT_CONVERSATION_TOPICS,
+): string[] {
+  if (history.length === 0 || maxCount <= 0) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = history.length - 1; i >= 0; i--) {
+    const entry = history[i]!;
+    if (entry.lensId !== 'session-summary') continue;
+    if (entry.result.type !== 'session-summary') continue;
+    const candidates: string[] = [];
+    const title = entry.result.title.trim();
+    if (title.length > 0 && title.toLowerCase() !== 'summary of conversation') {
+      candidates.push(title);
+    }
+    for (const t of entry.result.topics) {
+      const v = t.trim();
+      if (v.length > 0) candidates.push(v);
+    }
+    for (const c of candidates) {
+      const key = c.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+      if (out.length >= maxCount) return out;
+    }
   }
   return out;
 }

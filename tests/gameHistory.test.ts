@@ -1,9 +1,11 @@
 // tests/gameHistory.test.ts
 import { describe, it, expect } from 'vitest';
 import {
+  MAX_RECENT_CONVERSATION_TOPICS,
   MAX_RECENT_GAME_QUESTIONS,
   MAX_RECENT_GAME_QUESTIONS_CHARS,
   MAX_RECENT_RANDOM_TOPICS,
+  extractRecentConversationTopics,
   extractRecentGameQuestions,
   extractRecentRandomTopics,
 } from '../src/runtime/gameHistory';
@@ -260,5 +262,75 @@ describe('extractRecentRandomTopics', () => {
 
   it('exports a sane MAX_RECENT_RANDOM_TOPICS constant', () => {
     expect(MAX_RECENT_RANDOM_TOPICS).toBeGreaterThan(0);
+  });
+});
+
+describe('extractRecentConversationTopics', () => {
+  function makeSummaryEntry(opts: {
+    title: string;
+    topics: string[];
+    timestamp?: number;
+  }): HistoryEntry {
+    return {
+      id: `e-${Math.random().toString(36).slice(2, 6)}`,
+      sessionId: `s-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: opts.timestamp ?? Date.now(),
+      lensId: 'session-summary',
+      lensName: 'Summary',
+      question: opts.title,
+      badge: 'SUMMARY',
+      quote: '',
+      result: {
+        type: 'session-summary',
+        title: opts.title,
+        summary: '',
+        topics: opts.topics,
+        keyPoints: [],
+      },
+    };
+  }
+
+  it('returns [] on empty history', () => {
+    expect(extractRecentConversationTopics([])).toEqual([]);
+  });
+
+  it('returns [] when no session-summary entries exist', () => {
+    const factEntry: HistoryEntry = {
+      id: 'e1', sessionId: 's1', timestamp: Date.now(),
+      lensId: 'fact-checker', lensName: 'Fact', question: '', badge: 'TRUE', quote: '',
+      result: { type: 'fact-check', claims: [{ quote: '', claim: '', verdict: 'TRUE', reason: '' }] },
+    };
+    expect(extractRecentConversationTopics([factEntry])).toEqual([]);
+  });
+
+  it('pulls title + topics from a summary, newest-first', () => {
+    const older = makeSummaryEntry({ title: 'Rome trip plans', topics: ['flights', 'hotels'] });
+    const newer = makeSummaryEntry({ title: 'Pasta recipes', topics: ['carbonara'] });
+    const out = extractRecentConversationTopics([older, newer]);
+    // newer first, then older. Title before its own topics.
+    expect(out).toEqual(['Pasta recipes', 'carbonara', 'Rome trip plans', 'flights', 'hotels']);
+  });
+
+  it('skips the placeholder "Summary of conversation" title but keeps the topics', () => {
+    const entry = makeSummaryEntry({ title: 'Summary of conversation', topics: ['climate', 'policy'] });
+    expect(extractRecentConversationTopics([entry])).toEqual(['climate', 'policy']);
+  });
+
+  it('case-insensitive dedupes across entries', () => {
+    const a = makeSummaryEntry({ title: 'Music', topics: ['Jazz'] });
+    const b = makeSummaryEntry({ title: 'music', topics: ['JAZZ', 'blues'] });
+    // newest-first → b's "music" wins, then "JAZZ" wins; older a is fully deduped
+    expect(extractRecentConversationTopics([a, b])).toEqual(['music', 'JAZZ', 'blues']);
+  });
+
+  it('honors the count cap', () => {
+    const entries = Array.from({ length: 20 }, (_, i) =>
+      makeSummaryEntry({ title: `T${i}`, topics: [] }),
+    );
+    expect(extractRecentConversationTopics(entries, 3)).toHaveLength(3);
+  });
+
+  it('exports a sane MAX_RECENT_CONVERSATION_TOPICS constant', () => {
+    expect(MAX_RECENT_CONVERSATION_TOPICS).toBeGreaterThan(0);
   });
 });

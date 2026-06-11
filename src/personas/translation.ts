@@ -40,7 +40,10 @@ export function buildTranslationPrompt(
   const targetName = LANGUAGES[lang] ?? 'English';
   const sourceDirective =
     source === 'auto' || source.length === 0
-      ? 'The speaker may be using ANY language; detect it.'
+      ? `The speaker may be using ANY language; detect it. ` +
+        `If the detected language is ${lang} (${targetName}) — i.e. the wearer's own display language — ` +
+        `set sourceLanguage="${lang}", noSpeech=true, and return empty strings / empty arrays. ` +
+        `The wearer does not need a translation of their own language.`
       : `The speaker is using ONE of: ${source
           .map((c) => `${c} (${LANGUAGES[c] ?? c})`)
           .join(', ')}. If they are clearly using a different language, set sourceLanguage="unknown" and noSpeech=true.`;

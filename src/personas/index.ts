@@ -203,6 +203,16 @@ const BUILTINS: Persona[] = [
     builtin: true,
   },
   {
+    id: 'sentiment',
+    name: 'Tone Check',
+    description: 'Reads the emotional tone and intent behind what was said.',
+    hint: 'Tap to read the tone',
+    buildPrompt: buildSentimentPrompt,
+    schema: SENTIMENT_SCHEMA,
+    parse: parseSentimentResponse,
+    builtin: true,
+  },
+  {
     id: 'translation',
     name: 'Translate',
     description:
@@ -242,16 +252,6 @@ const BUILTINS: Persona[] = [
         replyStarters: [],
       }),
     },
-    builtin: true,
-  },
-  {
-    id: 'sentiment',
-    name: 'Tone Check',
-    description: 'Reads the emotional tone and intent behind what was said.',
-    hint: 'Tap to read the tone',
-    buildPrompt: buildSentimentPrompt,
-    schema: SENTIMENT_SCHEMA,
-    parse: parseSentimentResponse,
     builtin: true,
   },
   {

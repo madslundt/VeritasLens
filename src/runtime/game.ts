@@ -37,7 +37,7 @@ import {
   settings,
 } from '@/state/store';
 import { getBridge } from './bridge';
-import { extractRecentGameQuestions, extractRecentRandomTopics } from './gameHistory';
+import { extractRecentConversationTopics, extractRecentGameQuestions, extractRecentRandomTopics } from './gameHistory';
 import {
   showGameEndPage,
   showGameFeedbackPage,
@@ -147,6 +147,15 @@ export async function startGame(preset: GamePreset): Promise<void> {
   // rolls. No-op for saved presets (the extractor returns [] when the
   // preset id isn't the Random sentinel).
   const recentRandomTopics = extractRecentRandomTopics(sessionHistory(), preset);
+  // Conversation-derived topic hints only apply to Random presets (saved
+  // presets already pin a topic). extractRecentConversationTopics returns
+  // [] when no session summaries exist, so first-run users see the same
+  // prompt as before — the PREFER block silently appears once summaries
+  // start landing in history.
+  const recentConversationTopics =
+    preset.id === RANDOM_GAME_PRESET_ID
+      ? extractRecentConversationTopics(sessionHistory())
+      : [];
   const prompt = buildGamePrompt(
     preset.format,
     preset.topic,
@@ -154,6 +163,7 @@ export async function startGame(preset: GamePreset): Promise<void> {
     lang,
     recentQuestions,
     recentRandomTopics,
+    recentConversationTopics,
   );
 
   try {

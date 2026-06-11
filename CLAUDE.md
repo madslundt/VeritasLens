@@ -4,7 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-VeritasLens is a SolidJS + TypeScript single-bundle web app that runs **inside the Even Realities G2 Even App WebView**. There is no companion server. The app talks to the glasses through `@evenrealities/even_hub_sdk` and sends audio snapshots to the Gemini REST API on user gesture.
+VeritasLens is a SolidJS + TypeScript single-bundle web app that runs **inside the Even Realities G2 Even App WebView**. There is no companion server. The app talks to the glasses through `@evenrealities/even_hub_sdk` and sends audio snapshots to a wearer-chosen LLM provider on user gesture.
+
+### Supported LLM providers
+
+`src/types.ts` defines `LlmProvider = 'gemini' | 'openai-compatible' | 'claude'`; the `openai-compatible` route fans out across five concrete hosts via `OPENAI_BASE_URLS`. Routing lives in `src/llm/index.ts:callLensStream` (analysis) and `src/llm/gameClient.ts` (the Lens Game). All providers stream structured JSON via `StreamingJsonParser`.
+
+| Provider | Chat host | Audio path | Notes |
+|---|---|---|---|
+| Gemini (default) | `generativelanguage.googleapis.com` | Inline (`generateContent` with `inlineData` audio) | Default; only provider with `google_search` grounding. `src/llm/gemini.ts`. |
+| Claude | `api.anthropic.com` | STT sidecar → tool-use streaming | Always borrows STT from a `SttHost` (Groq Whisper or OpenAI Whisper). `src/llm/claude.ts`. |
+| OpenAI | `api.openai.com/v1` | `/audio/transcriptions` (whisper-1) → `/chat/completions` | Self-transcribes. |
+| Groq | `api.groq.com/openai/v1` | `/audio/transcriptions` (whisper-large-v3) → `/chat/completions` | Self-transcribes; recommended default STT for Claude and chat-only hosts. |
+| OpenRouter | `openrouter.ai/api/v1` | Inline audio (`input_audio` content part) | Model picker filters to audio-capable models via `OPENAI_INLINE_AUDIO_HOSTS`. Whisper sidecar still fires so the tagged transcript matches Gemini's path. |
+| DeepSeek | `api.deepseek.com/v1` | Borrowed STT host → chat-completions | `OPENAI_CHAT_ONLY_HOSTS`; needs a separate key for the chosen `SttHost`. |
+| Perplexity | `api.perplexity.ai` | Borrowed STT host → chat-completions | Same chat-only pattern as DeepSeek. |
+
+API keys are stored per provider/host in `Settings.geminiApiKey`, `Settings.claudeApiKey`, and `Settings.openaiApiKeys` (a `Record<OpenAiBaseUrl, string>`). The cross-host STT relationship is captured by `Settings.sttHost` + `Settings.sttModel`. The `Test` button in Settings runs `runSelfTest()` against the active draft so an unsaved key/model surfaces failures before first real use.
+
+When adding a provider:
+1. Extend `LlmProvider` (or add a new `OpenAiBaseUrl` entry plus the right inline-audio / chat-only set membership).
+2. Add the host to `permissions.network.whitelist` in `app.json`.
+3. Add a streaming client (`src/llm/<provider>.ts`) that returns a string and emits `claim` / `field` / `valueChunk` / `noSpeech` events into the shared `StreamingJsonParser`.
+4. Wire it into `callLensStream` in `src/llm/index.ts` — forward `onPartialClaim`, `onPartialField`, `watchValueKeys`, `onPartialString`, and `onNoSpeech`, otherwise heading streaming (Translate, Trivia) silently degrades.
+5. Add SSE-consumer tests in `tests/<provider>.test.ts` covering happy path, abort mid-stream, transient 503/429 retry, and `noSpeech`.
 
 ## Commands
 
@@ -73,7 +96,7 @@ When adding a lens:
 
 ### Persistence
 
-Settings and history go through `bridge.setLocalStorage` / `bridge.getLocalStorage` (the Even App's KV store). Keys are namespaced under `veritaslens.*` (see top of `src/state/store.ts`). The history blob is JSON, capped at `HISTORY_BYTE_BUDGET = 200 KB` and `HISTORY_MAX_ENTRIES = 500`, trimmed FIFO. The Gemini API key uses the same store — there is no separate secure storage tier on this platform.
+Settings and history go through `bridge.setLocalStorage` / `bridge.getLocalStorage` (the Even App's KV store). Keys are namespaced under `veritaslens.*` (see top of `src/state/store.ts`). The history blob is JSON, capped at `HISTORY_BYTE_BUDGET = 400 KB` and `HISTORY_MAX_ENTRIES = 500`, trimmed FIFO. The Gemini API key uses the same store — there is no separate secure storage tier on this platform.
 
 ### Retries
 
@@ -85,7 +108,7 @@ Settings and history go through `bridge.setLocalStorage` / `bridge.getLocalStora
 
 ## Release packaging
 
-`app.json` drives the `.ehpk` submission. Bump `version` (semver) for each release. `min_app_version` and `min_sdk_version` must match what the SDK actually requires. The only network host permitted by `permissions.network.whitelist` is `https://generativelanguage.googleapis.com`. Build then pack:
+`app.json` drives the `.ehpk` submission. Bump `version` (semver) for each release. `min_app_version` and `min_sdk_version` must match what the SDK actually requires. `permissions.network.whitelist` covers every supported LLM provider host: `https://generativelanguage.googleapis.com` (Gemini), `https://api.anthropic.com` (Claude), and the five OpenAI-compatible hosts — `https://api.openai.com`, `https://api.groq.com`, `https://openrouter.ai`, `https://api.deepseek.com`, `https://api.perplexity.ai`. Any new provider host must be added here before it can be reached from the WebView. Build then pack:
 
 ```bash
 npm run build
