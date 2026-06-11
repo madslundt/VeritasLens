@@ -53,6 +53,13 @@ export interface CallClaudeLensOptions {
   model?: ClaudeModel | string;
   /** Called before each retry (attempt = 1..MAX_RETRIES). */
   onRetry?: (attempt: number) => void | Promise<void>;
+  /**
+   * Extra tools appended to Anthropic's `tools` array alongside the lens-result
+   * tool. Used today for `web_search_20250305` so grounded lenses (fact-check,
+   * trivia, devil's-advocate, companion) get fresh web data. Tool definitions
+   * are forwarded verbatim — caller owns the catalog (see `src/llm/tools.ts`).
+   */
+  tools?: unknown[];
 }
 
 interface MessagesResponseContentToolUse {
@@ -109,16 +116,24 @@ export async function callLens(opts: CallClaudeLensOptions): Promise<string> {
   if (!opts.apiKey) throw new Error('Missing Anthropic API key.');
 
   const schema = augmentSchema(opts.schema);
+  const lensTool = {
+    name: LENS_TOOL_NAME,
+    description: 'Emit the structured lens result for the audio transcript above.',
+    input_schema: schema,
+  };
   const body = {
     model: resolveModel(opts.model),
     max_tokens: 2048,
     temperature: 0.2,
     system: opts.prompt,
-    tools: [{
-      name: LENS_TOOL_NAME,
-      description: 'Emit the structured lens result for the audio transcript above.',
-      input_schema: schema,
-    }],
+    // The lens output tool is mandatory; extra tools (web_search_20250305 for
+    // grounded lenses) are appended so Claude can call them en route to
+    // emitting the structured result.
+    tools: [lensTool, ...(opts.tools ?? [])],
+    // `tool_choice` stays forced to the lens tool. Claude is allowed to call
+    // web_search *first* under `type: tool` — Anthropic's docs explicitly
+    // permit auxiliary tool calls before the forced one — so grounding still
+    // happens even though the final-call tool is pinned.
     tool_choice: { type: 'tool', name: LENS_TOOL_NAME },
     messages: [{
       role: 'user',
@@ -242,17 +257,18 @@ export async function callLensStream(opts: CallClaudeLensStreamOptions): Promise
   if (!opts.apiKey) throw new Error('Missing Anthropic API key.');
 
   const schema = augmentSchema(opts.schema);
+  const lensTool = {
+    name: LENS_TOOL_NAME,
+    description: 'Emit the structured lens result for the audio transcript above.',
+    input_schema: schema,
+  };
   const body = {
     model: resolveModel(opts.model),
     max_tokens: 2048,
     temperature: 0.2,
     stream: true,
     system: opts.prompt,
-    tools: [{
-      name: LENS_TOOL_NAME,
-      description: 'Emit the structured lens result for the audio transcript above.',
-      input_schema: schema,
-    }],
+    tools: [lensTool, ...(opts.tools ?? [])],
     tool_choice: { type: 'tool', name: LENS_TOOL_NAME },
     messages: [{
       role: 'user',

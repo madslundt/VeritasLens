@@ -278,6 +278,29 @@ describe('trivia', () => {
   });
 });
 
+describe('fact-check numerical absorption', () => {
+  it('parses a FALSE verdict on a numerical claim', () => {
+    const result = parseFactCheckerResponse(JSON.stringify({
+      claims: [{
+        quote: 'Inflation hit 12% last year',
+        verdict: 'FALSE',
+        claim: 'US inflation reached 12% in the prior year.',
+        reason: 'CPI peaked near 9.1% in mid-2022.',
+      }],
+    }));
+    expect(result.type).toBe('fact-check');
+    if (result.type === 'fact-check') {
+      expect(result.claims[0]!.verdict).toBe('FALSE');
+      expect(result.claims[0]!.reason).toContain('9.1');
+    }
+  });
+
+  it('prompt instructs the model to treat numerical claims as check-worthy', () => {
+    const prompt = buildFactCheckerPrompt('en');
+    expect(prompt).toMatch(/numerical/i);
+  });
+});
+
 import { parseLogicalFallacyResponse } from '../src/personas/logicalFallacy';
 
 describe('logical-fallacy', () => {
@@ -308,26 +331,6 @@ describe('logical-fallacy', () => {
   });
 });
 
-import { parseStatsCheckResponse } from '../src/personas/statsCheck';
-
-describe('stats-check', () => {
-  it('parses a PLAUSIBLE single-claim response', () => {
-    const result = parseStatsCheckResponse(
-      JSON.stringify({ claims: [{ quote: '71% of the planet is water', verdict: 'PLAUSIBLE', stat: '71% of the Earth is water', reason: 'Accurate figure.' }] }),
-    );
-    expect(result.type).toBe('stats-check');
-    if (result.type === 'stats-check') {
-      expect(result.claims[0]!.verdict).toBe('PLAUSIBLE');
-      expect(result.claims[0]!.quote).toContain('71%');
-    }
-  });
-
-  it('defaults to SUSPICIOUS for unknown verdict', () => {
-    const result = parseStatsCheckResponse(JSON.stringify({ claims: [{ quote: '', verdict: 'UNKNOWN', stat: 'x', reason: 'y' }] }));
-    if (result.type === 'stats-check') expect(result.claims[0]!.verdict).toBe('SUSPICIOUS');
-  });
-});
-
 import { parseBiasDetectorResponse } from '../src/personas/biasDetector';
 
 describe('bias-detector', () => {
@@ -346,6 +349,16 @@ describe('bias-detector', () => {
     if (result.type === 'bias') {
       expect(result.claims[0]!.verdict).toBe('BIASED');
       expect(result.claims[0]!.direction).toBe('political-left');
+    }
+  });
+
+  it('absorbs tonal/emotional framing (formerly the Sentiment lens)', () => {
+    const result = parseBiasDetectorResponse(
+      JSON.stringify({ claims: [{ quote: 'this is an absolute disaster', verdict: 'BIASED', direction: 'catastrophising', reason: 'Strong negative-emotional loading without a factional slant.' }] }),
+    );
+    if (result.type === 'bias') {
+      expect(result.claims[0]!.verdict).toBe('BIASED');
+      expect(result.claims[0]!.direction).toBe('catastrophising');
     }
   });
 });
@@ -560,9 +573,9 @@ import {
 describe('auto-classifier', () => {
   it('parses a valid classification', () => {
     const result = parseAutoClassifierResponse(
-      JSON.stringify({ chosenLensId: 'stats-check', reason: 'Numerical claim' }),
+      JSON.stringify({ chosenLensId: 'fact-checker', reason: 'Numerical claim' }),
     );
-    expect(result.chosenLensId).toBe('stats-check');
+    expect(result.chosenLensId).toBe('fact-checker');
     expect(result.reason).toBe('Numerical claim');
   });
 
@@ -944,42 +957,6 @@ describe('meeting-prep / parseMeetingPrepResponse', () => {
   });
 });
 
-import { parseSentimentResponse } from '../src/personas/sentiment';
-
-describe('sentiment', () => {
-  it('parses a NEGATIVE tone response', () => {
-    const result = parseSentimentResponse(JSON.stringify({
-      claims: [{
-        quote: 'this is an absolute disaster',
-        tone: 'NEGATIVE',
-        explanation: 'Strong catastrophising language signals frustration or alarm. The absolute qualifier amplifies the negative framing.',
-      }],
-    }));
-    expect(result.type).toBe('sentiment');
-    if (result.type === 'sentiment') {
-      expect(result.claims[0]!.tone).toBe('NEGATIVE');
-      expect(result.claims[0]!.quote).toBe('this is an absolute disaster');
-    }
-  });
-
-  it('falls back to NEUTRAL for unknown tone', () => {
-    const result = parseSentimentResponse(JSON.stringify({
-      claims: [{ quote: 'q', tone: 'ANGRY', explanation: 'e' }],
-    }));
-    if (result.type === 'sentiment') {
-      expect(result.claims[0]!.tone).toBe('NEUTRAL');
-    }
-  });
-
-  it('synthesizes an empty claim when claims array is missing', () => {
-    const result = parseSentimentResponse(JSON.stringify({}));
-    if (result.type === 'sentiment') {
-      expect(result.claims).toHaveLength(1);
-      expect(result.claims[0]!.tone).toBe('NEUTRAL');
-    }
-  });
-});
-
 describe('key-questions', () => {
   it('parses a two-question response', () => {
     const result = parseKeyQuestionsResponse(JSON.stringify({
@@ -1242,5 +1219,64 @@ describe('wearer-speak (two-way)', () => {
     const parsed = parseWearerSpeakResponse(JSON.stringify({}));
     expect(parsed.spoken).toBe('');
     expect(parsed.translated).toBe('');
+  });
+});
+
+import { parseCompanionResponse, buildCompanionPrompt } from '../src/personas/companion';
+
+describe('companion', () => {
+  it('parses a single-tidbit response', () => {
+    const result = parseCompanionResponse(JSON.stringify({
+      claims: [{
+        quote: 'the Roman aqueducts',
+        kind: 'fact',
+        headline: 'Some aqueducts still flow today',
+        detail: 'The Aqua Virgo, built in 19 BC, still feeds the Trevi Fountain in Rome.',
+        confidence: 'HIGH',
+      }],
+    }));
+    expect(result.type).toBe('companion');
+    if (result.type === 'companion') {
+      expect(result.claims).toHaveLength(1);
+      expect(result.claims[0]!.kind).toBe('fact');
+      expect(result.claims[0]!.headline).toContain('aqueducts');
+      expect(result.claims[0]!.quote).toBe('the Roman aqueducts');
+      expect(result.claims[0]!.confidence).toBe('HIGH');
+    }
+  });
+
+  it('accepts all four kinds, coerces unknown to "fact", and caps at MAX_CLAIMS=5', () => {
+    const result = parseCompanionResponse(JSON.stringify({
+      claims: [
+        { quote: 'q1', kind: 'story', headline: 'h1', detail: 'd1', confidence: 'HIGH' },
+        { quote: 'q2', kind: 'connection', headline: 'h2', detail: 'd2', confidence: 'MED' },
+        { quote: 'q3', kind: 'nonsense', headline: 'h3', detail: 'd3', confidence: 'HIGH' },
+        { quote: 'q4', kind: 'stat', headline: 'h4', detail: 'About 1 in 6 Danes…', confidence: 'MED' },
+        { quote: 'q5', kind: 'fact', headline: 'h5', detail: 'd5', confidence: 'HIGH' },
+        { quote: 'q6', kind: 'fact', headline: 'h6', detail: 'd6', confidence: 'HIGH' },
+      ],
+    }));
+    if (result.type === 'companion') {
+      expect(result.claims).toHaveLength(5);
+      expect(result.claims[0]!.kind).toBe('story');
+      expect(result.claims[1]!.kind).toBe('connection');
+      expect(result.claims[2]!.kind).toBe('fact');
+      expect(result.claims[3]!.kind).toBe('stat');
+      expect(result.claims[4]!.kind).toBe('fact');
+    }
+  });
+
+  it('throws NoSpeechError on noSpeech=true or empty claims', () => {
+    expect(() =>
+      parseCompanionResponse(JSON.stringify({ noSpeech: true, claims: [] })),
+    ).toThrow(NoSpeechError);
+    expect(() =>
+      parseCompanionResponse(JSON.stringify({ claims: [] })),
+    ).toThrow(NoSpeechError);
+  });
+
+  it('buildCompanionPrompt includes the language name', () => {
+    const prompt = buildCompanionPrompt('da');
+    expect(prompt).toContain('Dansk');
   });
 });

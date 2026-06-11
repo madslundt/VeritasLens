@@ -4,12 +4,11 @@ import type { LensResult, LanguageCode } from '@/types';
 import { FACT_CHECKER_SCHEMA, buildFactCheckerPrompt, parseFactCheckerResponse } from './factChecker';
 import { TRIVIA_SCHEMA, buildTriviaPrompt, parseTriviaResponse } from './trivia';
 import { LOGICAL_FALLACY_SCHEMA, buildLogicalFallacyPrompt, parseLogicalFallacyResponse } from './logicalFallacy';
-import { STATS_CHECK_SCHEMA, buildStatsCheckPrompt, parseStatsCheckResponse } from './statsCheck';
 import { BIAS_DETECTOR_SCHEMA, buildBiasDetectorPrompt, parseBiasDetectorResponse } from './biasDetector';
 import { ELI5_SCHEMA, buildEli5Prompt, parseEli5Response } from './eli5';
 import { DEVILS_ADVOCATE_SCHEMA, buildDevilsAdvocatePrompt, parseDevilsAdvocateResponse } from './devilsAdvocate';
 import { KEY_QUESTIONS_SCHEMA, buildKeyQuestionsPrompt, parseKeyQuestionsResponse } from './keyQuestions';
-import { SENTIMENT_SCHEMA, buildSentimentPrompt, parseSentimentResponse } from './sentiment';
+import { COMPANION_SCHEMA, buildCompanionPrompt, parseCompanionResponse } from './companion';
 import { AUTO_CLASSIFIER_SCHEMA, buildAutoPrompt, parseAutoResponse } from './auto';
 import {
   MEETING_PREP_ID,
@@ -32,10 +31,11 @@ export type PersonaId = string;
  *
  * `google_search` enables the GoogleSearch tool on Gemini 2.x. Adds ~500ms–1s
  * to wall-clock per call; restricted to lenses where factual freshness is the
- * point (fact-check, stats-check, trivia, devil's advocate). Sentiment, eli5,
- * fallacy, bias, key questions, and translation are deliberately off — they
- * are interpretive, not retrieval-bound, so grounding wouldn't sharpen them
- * and would just spend latency.
+ * point (fact-check, trivia, devil's advocate) or where the wearer may repeat
+ * the response aloud and a hallucinated detail would embarrass them
+ * (companion). Eli5, fallacy, bias, key questions, and translation are
+ * deliberately off — they are interpretive, not retrieval-bound, so grounding
+ * wouldn't sharpen them and would just spend latency.
  */
 export type LensGrounding = 'google_search';
 
@@ -109,12 +109,24 @@ const BUILTINS: Persona[] = [
   {
     id: 'fact-checker',
     name: 'Fact Check',
-    description: 'Labels the most check-worthy claim TRUE / FALSE / UNVERIFIED.',
+    description: 'Labels the most check-worthy claim — including numerical ones — TRUE / FALSE / UNVERIFIED.',
     hint: 'Tap to fact-check',
     buildPrompt: buildFactCheckerPrompt,
     schema: FACT_CHECKER_SCHEMA,
     parse: parseFactCheckerResponse,
     grounding: 'google_search',
+    streamHeading: {
+      // `correction` is the wearer's payload when the verdict is FALSE — the
+      // single line they can repeat back. Stream it character-by-character so
+      // the truth lands on the HUD before the longer `reason` block does.
+      // On TRUE/UNVERIFIED `correction` is empty in the schema, so this
+      // watcher never fires and the wearer falls through to the final result.
+      field: 'correction',
+      synthesize: (partial) => ({
+        type: 'fact-check',
+        claims: [{ quote: '', verdict: 'FALSE', claim: '', reason: '', correction: partial }],
+      }),
+    },
     builtin: true,
   },
   {
@@ -151,21 +163,10 @@ const BUILTINS: Persona[] = [
     builtin: true,
   },
   {
-    id: 'stats-check',
-    name: 'Stats Check',
-    description: 'Rates a numerical claim as PLAUSIBLE or SUSPICIOUS.',
-    hint: 'Tap to check the numbers',
-    buildPrompt: buildStatsCheckPrompt,
-    schema: STATS_CHECK_SCHEMA,
-    parse: parseStatsCheckResponse,
-    grounding: 'google_search',
-    builtin: true,
-  },
-  {
     id: 'bias-detector',
-    name: 'Bias Check',
-    description: 'Detects political, emotional, or factional bias in statements.',
-    hint: 'Tap to detect bias',
+    name: 'Framing Check',
+    description: 'Detects political, factional, emotional, or tonal framing in statements.',
+    hint: 'Tap to check the framing',
     buildPrompt: buildBiasDetectorPrompt,
     schema: BIAS_DETECTOR_SCHEMA,
     parse: parseBiasDetectorResponse,
@@ -179,6 +180,16 @@ const BUILTINS: Persona[] = [
     buildPrompt: buildEli5Prompt,
     schema: ELI5_SCHEMA,
     parse: parseEli5Response,
+    streamHeading: {
+      // The new oneLine field carries the wearer's punchy restatement —
+      // stream it character-by-character so the simplest version of the
+      // jargon appears on the HUD before the longer `expanded` block lands.
+      field: 'oneLine',
+      synthesize: (partial) => ({
+        type: 'eli5',
+        claims: [{ quote: '', oneLine: partial }],
+      }),
+    },
     builtin: true,
   },
   {
@@ -203,13 +214,26 @@ const BUILTINS: Persona[] = [
     builtin: true,
   },
   {
-    id: 'sentiment',
-    name: 'Tone Check',
-    description: 'Reads the emotional tone and intent behind what was said.',
-    hint: 'Tap to read the tone',
-    buildPrompt: buildSentimentPrompt,
-    schema: SENTIMENT_SCHEMA,
-    parse: parseSentimentResponse,
+    id: 'companion',
+    name: 'Companion',
+    description:
+      'Surfaces up to 5 short tidbits — facts, stats, anecdotes, or unexpected connections — about what the speakers just brought up.',
+    hint: 'Tap for tidbits',
+    buildPrompt: buildCompanionPrompt,
+    schema: COMPANION_SCHEMA,
+    parse: parseCompanionResponse,
+    grounding: 'google_search',
+    streamHeading: {
+      // First claim's `headline` is the wearer's visual hook — stream it
+      // character-by-character (same approach as Trivia's `answer`). Each
+      // subsequent claim's headline is also a watched key; the HUD takes
+      // whichever closes first as the heading slot.
+      field: 'headline',
+      synthesize: (partial) => ({
+        type: 'companion',
+        claims: [{ quote: '', kind: 'fact', headline: partial, detail: '' }],
+      }),
+    },
     builtin: true,
   },
   {

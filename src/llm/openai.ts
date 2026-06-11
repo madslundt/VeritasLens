@@ -65,6 +65,14 @@ export interface CallOpenAiLensOptions {
    * surfaces what was just heard at no extra API cost.
    */
   onTranscript?: (text: string) => void;
+  /**
+   * Effective model override resolved by the grounding helper. When set this
+   * replaces `opts.model` for the actual request body. Used by Perplexity to
+   * swap into a `sonar-*` online model when a grounded lens runs, and by
+   * OpenRouter to apply the `:online` suffix. Falls through to `opts.model`
+   * when omitted.
+   */
+  effectiveModel?: string;
 }
 
 /**
@@ -198,7 +206,7 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
     let postFailed = false;
     for (let phase = 0; phase < 2; phase++) {
       const bodyJson = buildChatBody({
-        model: opts.model,
+        model: opts.effectiveModel ?? opts.model,
         prompt: opts.prompt,
         userContent,
         strictSchema: strict,

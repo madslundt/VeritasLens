@@ -23,6 +23,7 @@ import {
   parseRetryAfterMs,
   type CallLensOptions as GeminiCallLensOptions,
 } from './gemini';
+import { applyModelGrounding, resolveProviderGrounding } from './tools';
 import {
   callOpenAiLens,
   callOpenAiLensStream,
@@ -43,6 +44,8 @@ import {
   openaiHostLabel,
   type ClaudeModel,
   type GeminiModel,
+  type GroundingMode,
+  type LensGrounding,
   type LlmProvider,
   type OpenAiBaseUrl,
   type SttHost,
@@ -84,6 +87,22 @@ export interface CallLensOptions extends Omit<GeminiCallLensOptions, 'apiKey' | 
  * regardless of provider.
  */
 export interface CallLensStreamOptions extends CallLensOptions {
+  /**
+   * Provider-agnostic grounding intent — typically `persona.grounding`. The
+   * facade translates this into a provider-native shape via
+   * `resolveProviderGrounding` (Gemini tools, Claude web_search tool, OpenRouter
+   * `:online` suffix, Perplexity sonar-* model override). When the persona
+   * didn't ask for grounding, leave undefined.
+   */
+  grounding?: LensGrounding;
+  /**
+   * Fires once after grounding has been resolved with the effective mode for
+   * this call. `'grounded'` when the provider supports web search (or
+   * grounding wasn't requested); `'groundless'` when grounding was requested
+   * but the provider can't supply it (Groq, DeepSeek, OpenAI Chat
+   * Completions). The lifecycle uses this to render a `GROUNDLESS` HUD badge.
+   */
+  onGroundingMode?: (mode: GroundingMode) => void;
   /**
    * Fires when a complete object inside the first top-level array of the
    * response is parsed. `key` is the array's property name (`claims`,
@@ -253,14 +272,18 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       signal: opts.signal,
     });
     try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
+    const claudeModel = (opts.model as ClaudeModel | undefined) ?? s.claudeModel;
+    const grounding = resolveProviderGrounding('claude', undefined, opts.grounding, claudeModel);
+    try { opts.onGroundingMode?.(grounding.mode); } catch { /* subscriber errors must not break the lens call */ }
     return callClaudeLensStream({
       apiKey: opts.apiKey ?? s.claudeApiKey,
-      model: (opts.model as ClaudeModel | undefined) ?? s.claudeModel,
+      model: claudeModel,
       transcript,
       prompt: opts.prompt,
       schema: opts.schema,
       signal: opts.signal,
       onRetry: opts.onRetry,
+      tools: grounding.tools,
       onPartialClaim: opts.onPartialClaim,
       onPartialField: opts.onPartialField,
       watchValueKeys: opts.watchValueKeys,
@@ -276,10 +299,14 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
         `Add a ${openaiHostLabel(stt.transcribeBaseUrl)} API key for transcription before using ${openaiHostLabel(chatHost)}.`,
       );
     }
+    const baseModel = opts.model ?? s.openaiModel;
+    const grounding = resolveProviderGrounding('openai-compatible', chatHost, opts.grounding, baseModel);
+    try { opts.onGroundingMode?.(grounding.mode); } catch { /* subscriber errors must not break the lens call */ }
     return callOpenAiLensStream({
       apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
       baseUrl: chatHost,
-      model: opts.model ?? s.openaiModel,
+      model: baseModel,
+      effectiveModel: applyModelGrounding(baseModel, grounding),
       transcribeModel: stt.transcribeModel,
       transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
       transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
@@ -296,15 +323,23 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       onTranscript: opts.onTranscript,
     });
   }
+  const geminiModel = (opts.model as GeminiModel | undefined) ?? s.geminiModel;
+  const grounding = resolveProviderGrounding('gemini', undefined, opts.grounding, geminiModel);
+  try { opts.onGroundingMode?.(grounding.mode); } catch { /* subscriber errors must not break the lens call */ }
+  // Gemini callers may also pass `opts.tools` directly (legacy path). Prefer
+  // the resolver-derived tools when grounding intent was declared; fall back
+  // to the explicit tools array otherwise so the existing lifecycle pass-
+  // through path keeps working until every caller migrates to `grounding:`.
+  const tools = grounding.tools ?? opts.tools;
   return callGeminiLensStream({
     apiKey: opts.apiKey ?? s.geminiApiKey,
-    model: (opts.model as GeminiModel | undefined) ?? s.geminiModel,
+    model: geminiModel,
     wav: opts.wav,
     prompt: opts.prompt,
     schema: opts.schema,
     signal: opts.signal,
     onRetry: opts.onRetry,
-    tools: opts.tools,
+    tools,
     onPartialClaim: opts.onPartialClaim,
     onPartialField: opts.onPartialField,
     watchValueKeys: opts.watchValueKeys,

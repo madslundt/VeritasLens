@@ -43,16 +43,6 @@ describe('extractTags', () => {
     expect(extractTags(r)).toContain('ad hominem');
   });
 
-  it('stats-check: includes verdict and stat keywords', () => {
-    const r: LensResult = {
-      type: 'stats-check',
-      claims: [{ quote: '', verdict: 'SUSPICIOUS', stat: '90% of statistics are made up', reason: '...' }],
-    };
-    const tags = extractTags(r);
-    expect(tags).toContain('suspicious');
-    expect(tags).toContain('statistics');
-  });
-
   it('bias: includes verdict and direction', () => {
     const r: LensResult = {
       type: 'bias',

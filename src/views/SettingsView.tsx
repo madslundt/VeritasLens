@@ -56,6 +56,7 @@ import {
 } from '@/state/store';
 import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
+import { resolveProviderGrounding } from '@/llm/tools';
 import {
   CLAUDE_MODELS,
   LANGUAGES,
@@ -245,13 +246,6 @@ function formatResultText(result: LensResult): string {
         return `${head}${c.explanation}`;
       }).join('\n\n');
     }
-    case 'stats-check': {
-      return result.claims.map((c, i) => {
-        const icon = c.verdict === 'PLAUSIBLE' ? '✓' : '✗';
-        const head = result.claims.length > 1 ? `Stat ${i + 1}/${result.claims.length}\n` : '';
-        return `${head}${icon} ${c.verdict}\n${c.reason}`;
-      }).join('\n\n');
-    }
     case 'bias': {
       return result.claims.map((c, i) => {
         const icon = c.verdict === 'NEUTRAL' ? '✓' : '✗';
@@ -298,10 +292,11 @@ function formatResultText(result: LensResult): string {
     case 'key-questions': {
       return result.claims.map((c, i) => `Q${i + 1}: ${c.question}\n${c.context}`).join('\n\n');
     }
-    case 'sentiment': {
-      const c = result.claims[0];
-      if (!c) return '';
-      return `${c.tone}\n\n${c.explanation}`;
+    case 'companion': {
+      return result.claims.map((c, i) => {
+        const head = result.claims.length > 1 ? `${i + 1}/${result.claims.length}\n` : '';
+        return `${head}${c.headline}\n[${c.kind.toUpperCase()}] ${c.detail}`;
+      }).join('\n\n');
     }
     case 'translation': {
       const lang = result.sourceLanguage ? result.sourceLanguage.toUpperCase() : '';
@@ -1977,6 +1972,31 @@ export const SettingsView: Component = () => {
                 audio first (Whisper), then analyse the transcript. OpenRouter
                 sends the audio inline to multimodal models. One API key per
                 host, stored only on this device.
+              </span>
+              <span class="field-hint">
+                {(() => {
+                  // The grounding-capability hint surfaces whether fact-style
+                  // lenses (fact-check, trivia, devil's advocate, companion)
+                  // will resolve to a web-search call or run on training data
+                  // alone for the currently-drafted provider/model. Computed
+                  // from the same helper the runtime uses, so the hint can't
+                  // drift away from actual behaviour.
+                  const provider = draftProvider();
+                  const model = provider === 'gemini'
+                    ? draftModel()
+                    : provider === 'claude'
+                      ? draftClaudeModel()
+                      : draftOpenaiModel();
+                  const resolved = resolveProviderGrounding(
+                    provider,
+                    provider === 'openai-compatible' ? draftOpenaiBaseUrl() : undefined,
+                    'web_search',
+                    model,
+                  );
+                  return resolved.mode === 'grounded'
+                    ? 'Grounded: fact-style lenses pull fresh web results before answering.'
+                    : 'Groundless: this host has no web search — fact-style lenses run on training data only. The HUD marks groundless answers with a trailing °.';
+                })()}
               </span>
             </label>
 

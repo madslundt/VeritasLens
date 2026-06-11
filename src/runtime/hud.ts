@@ -437,6 +437,7 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     autoSelected: entry.result.autoSelected === true,
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
+    groundingMode: entry.groundingMode,
   });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
@@ -467,6 +468,7 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
     autoSelected: entry.result.autoSelected === true,
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
+    groundingMode: entry.groundingMode,
   });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
@@ -496,6 +498,84 @@ export async function setStatus(label: keyof typeof STATUS_LABEL | string): Prom
   await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
 }
 
+// ---------- Streaming heading ----------
+//
+// Throttled mid-stream write to the reason container. Used by lenses that
+// declare `streamHeading` so the wearer sees the payload (Trivia's answer,
+// Translate's translatedText, Companion's headline, ELI5's oneLine,
+// Fact-check's correction, Meeting Prep's answer) fill in character-by-
+// character before the final result lands. The G2's full page rebuild
+// strobes if fired per chunk, so this writes to a single named container
+// via `upgradeText` and throttles to STREAMING_THROTTLE_MS — visually
+// indistinguishable from raw streaming but kind to the bridge bandwidth.
+
+const STREAMING_THROTTLE_MS = 150;
+let streamingPending: string | null = null;
+let streamingLast = '';
+let streamingTimer: ReturnType<typeof setTimeout> | null = null;
+let streamingActive = false;
+
+/**
+ * Push a streaming partial onto the active page's reason container. Cleared
+ * when the final result lands (the normal `setLensResult` path takes over).
+ * Off-screen calls (currentPage !== 'active') queue the most recent value
+ * but don't write — the lifecycle's `setLensResult` will commit the final
+ * answer once the wearer returns.
+ */
+export function setLensStreamingHeading(text: string): void {
+  if (currentPage !== 'active') return;
+  streamingActive = true;
+  streamingPending = text;
+  if (streamingTimer) return;
+  // First write fires immediately so the wearer sees something the moment
+  // the stream starts; subsequent writes coalesce into a single trailing
+  // flush after the throttle window. Skip the immediate write when the
+  // value matches the last write — no point re-rendering the same string.
+  // Keeps the perceived latency low without burning bridge writes on every
+  // chunk.
+  if (text !== streamingLast) {
+    void flushStreamingHeading();
+  } else {
+    streamingPending = null;
+  }
+  streamingTimer = setTimeout(() => {
+    streamingTimer = null;
+    if (streamingPending !== null && streamingPending !== streamingLast) {
+      void flushStreamingHeading();
+    }
+  }, STREAMING_THROTTLE_MS);
+}
+
+/** Internal: drain the pending streaming partial to the reason container. */
+async function flushStreamingHeading(): Promise<void> {
+  if (streamingPending === null) return;
+  const next = streamingPending;
+  streamingLast = next;
+  streamingPending = null;
+  if (currentPage !== 'active') return;
+  await upgradeText(CONTAINER.reason, NAME.reason, next);
+}
+
+/**
+ * Tear down any pending streaming heading writes. Called by the lifecycle as
+ * soon as the final result is ready so a trailing throttled flush can't
+ * land *after* `setLensResult`'s rebuild and undo it.
+ */
+export function clearLensStreamingHeading(): void {
+  if (streamingTimer) {
+    clearTimeout(streamingTimer);
+    streamingTimer = null;
+  }
+  streamingPending = null;
+  streamingLast = '';
+  streamingActive = false;
+}
+
+/** Test helper — observable state of the streaming heading throttle. */
+export function getLensStreamingState(): { active: boolean; last: string } {
+  return { active: streamingActive, last: streamingLast };
+}
+
 /** Optional context the lifecycle passes after running a new analysis.
  *  Without it (tests, menu replay), `setLensResult` synthesizes a 1-entry
  *  "session" from the result alone — within-analysis scope only. */
@@ -519,12 +599,11 @@ const PERSONA_ID_BY_RESULT_TYPE: Record<LensResult['type'], string> = {
   'fact-check': 'fact-checker',
   'trivia': 'trivia',
   'logical-fallacy': 'logical-fallacy',
-  'stats-check': 'stats-check',
   'bias': 'bias-detector',
   'eli5': 'eli5',
   'devils-advocate': 'devils-advocate',
   'key-questions': 'key-questions',
-  'sentiment': 'sentiment',
+  'companion': 'companion',
   'meeting-prep': 'meeting-prep',
   'session-summary': 'session-summary',
   'game': 'game',
@@ -559,9 +638,6 @@ function splitForSynthesis(result: LensResult): LensResult[] {
     case 'fact-check':
       return result.claims.length <= 1 ? [result]
         : result.claims.map((c) => ({ type: 'fact-check', claims: [c], autoSelected: result.autoSelected }));
-    case 'stats-check':
-      return result.claims.length <= 1 ? [result]
-        : result.claims.map((c) => ({ type: 'stats-check', claims: [c], autoSelected: result.autoSelected }));
     case 'logical-fallacy':
       return result.claims.length <= 1 ? [result]
         : result.claims.map((c) => ({ type: 'logical-fallacy', claims: [c], autoSelected: result.autoSelected }));
@@ -583,7 +659,7 @@ function splitForSynthesis(result: LensResult): LensResult[] {
     case 'devils-advocate':
       return result.claims.length <= 1 ? [result]
         : result.claims.map((c) => ({ type: 'devils-advocate' as const, claims: [c], autoSelected: result.autoSelected }));
-    case 'sentiment':
+    case 'companion':
       return [result];
     case 'game':
       return [result];
@@ -955,14 +1031,13 @@ function claimCount(result: LensResult): number {
   switch (result.type) {
     case 'fact-check':
     case 'logical-fallacy':
-    case 'stats-check':
     case 'bias':
     case 'trivia':
     case 'eli5':
     case 'meeting-prep':
     case 'devils-advocate':
     case 'key-questions':
-    case 'sentiment':
+    case 'companion':
       return Math.max(1, result.claims.length);
     case 'game':
     case 'translation':
@@ -979,8 +1054,9 @@ function formatUnifiedBody(
   result: LensResult,
   claimIdx: number,
   _autoSelected: boolean,
+  groundingMode: 'grounded' | 'groundless' = 'grounded',
 ): string {
-  const { top, middle, bottom } = formatLensResultBase(result, claimIdx);
+  const { top, middle, bottom } = formatLensResultBase(result, claimIdx, groundingMode);
 
   // Stitch non-empty sections together with a blank line between them so the
   // visual hierarchy (heading | verdict/source | body) remains legible without
@@ -996,14 +1072,30 @@ function formatUnifiedBody(
  *  Auto prefix. The indicator/Auto are stamped in at unified-body composition
  *  time by `formatUnifiedBody` because the format depends on the cursor's
  *  session context (within-analysis "1/N" vs session-relative "X/Y"). */
-function formatLensResultBase(result: LensResult, claimIdx: number): { top: string; middle: string; bottom: string } {
+/**
+ * Exported for tests. Production code goes through `formatUnifiedBody` →
+ * `formatEntryBody` → `computePagesForResult`; surface this so a unit test
+ * can assert that the groundless `°` mark lands on the verdict slot for the
+ * lens shapes that carry one (fact-check, bias).
+ */
+export function formatLensResultBase(
+  result: LensResult,
+  claimIdx: number,
+  groundingMode: 'grounded' | 'groundless' = 'grounded',
+): { top: string; middle: string; bottom: string } {
+  // `°` after the verdict glyph signals the wearer that this answer came from
+  // training data alone — provider couldn't supply web grounding. Only
+  // attached to lens types whose verdict slot drives the wearer's confidence
+  // decision (fact-check, bias). Other lenses already carry their own
+  // groundedness signal in the badge column.
+  const groundlessMark = groundingMode === 'groundless' ? '°' : '';
   switch (result.type) {
     case 'fact-check': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       const verdictLine = c.verdict === 'TRUE' ? '+ TRUE' : c.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED';
       return {
         top: clip(c.claim, 140),
-        middle: verdictLine,
+        middle: `${verdictLine}${groundlessMark}`,
         bottom: c.reason,
       };
     }
@@ -1015,27 +1107,24 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       return { top: c.fallacy.toUpperCase(), middle: '', bottom: c.explanation };
     }
-    case 'stats-check': {
-      const c = result.claims[claimIdx] ?? result.claims[0]!;
-      const verdictLine = c.verdict === 'PLAUSIBLE' ? '+ PLAUSIBLE' : '- SUSPICIOUS';
-      return {
-        top: clip(c.stat, 140),
-        middle: verdictLine,
-        bottom: c.reason,
-      };
-    }
     case 'bias': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       const verdictLine = c.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED';
       return {
         top: c.direction ? clip(c.direction, 140) : '',
-        middle: verdictLine,
+        middle: `${verdictLine}${groundlessMark}`,
         bottom: c.reason,
       };
     }
     case 'eli5': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: '', middle: '', bottom: c.explanation };
+      // Newer responses populate `oneLine` (heading) + `expanded` (body); the
+      // legacy single-blob `explanation` covers history rows from earlier
+      // releases. The HUD prefers oneLine on top with expanded below; falls
+      // back to whichever is present.
+      const top = c.oneLine ?? '';
+      const bottom = c.expanded ?? c.explanation ?? '';
+      return { top, middle: '', bottom };
     }
     case 'session-summary':
       return { top: '', middle: '', bottom: formatSessionSummaryBody(result) };
@@ -1071,13 +1160,13 @@ function formatLensResultBase(result: LensResult, claimIdx: number): { top: stri
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       return { top: clip(c.question, 140), middle: '', bottom: c.context };
     }
-    case 'sentiment': {
+    case 'companion': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      const toneLabel = c.tone === 'POSITIVE' ? '+ POSITIVE'
-        : c.tone === 'NEGATIVE' ? '- NEGATIVE'
-        : c.tone === 'MIXED' ? '~ MIXED'
-        : '= NEUTRAL';
-      return { top: clip(c.quote, 140), middle: toneLabel, bottom: c.explanation };
+      return {
+        top: clip(c.headline, 140),
+        middle: c.kind.toUpperCase(),
+        bottom: c.detail,
+      };
     }
     case 'game': {
       const topic = result.preset.topic || 'Random';
@@ -1278,11 +1367,15 @@ function charSplitFallback(text: string, innerW: number, maxLines: number, cache
  * arrow-prefixed followup) rather than by extra vertical whitespace, so we
  * don't pay for double-blank-line claim breaks.
  */
-function formatEntryBody(result: LensResult, autoSelected: boolean): string {
+function formatEntryBody(
+  result: LensResult,
+  autoSelected: boolean,
+  groundingMode: 'grounded' | 'groundless' = 'grounded',
+): string {
   const total = claimCount(result);
   const parts: string[] = [];
   for (let i = 0; i < total; i++) {
-    const body = formatUnifiedBody(result, i, autoSelected);
+    const body = formatUnifiedBody(result, i, autoSelected, groundingMode);
     if (body) parts.push(body);
   }
   return parts.join('\n\n');
@@ -1320,13 +1413,18 @@ function bulletRow(currentIdx: number, total: number): string {
 function computePagesForResult(
   result: LensResult,
   pageLines: number,
-  options: { autoSelected?: boolean; sessionTag?: string; autoLensLabel?: string } = {},
+  options: {
+    autoSelected?: boolean;
+    sessionTag?: string;
+    autoLensLabel?: string;
+    groundingMode?: 'grounded' | 'groundless';
+  } = {},
 ): PageRef[] {
   const autoSelected = options.autoSelected ?? (result.autoSelected === true);
   const sessionTag = options.sessionTag ?? '';
   const autoPrefix =
     autoSelected && options.autoLensLabel ? options.autoLensLabel : '';
-  const body = formatEntryBody(result, autoSelected);
+  const body = formatEntryBody(result, autoSelected, options.groundingMode);
 
   // Auto prefix and session tag share the first line, joined by ' · ' so the
   // shape is `Fact Check · 1/3 · <body>`. Either or both may be empty.
@@ -1424,6 +1522,7 @@ function recomputeSessionPages(): void {
       autoSelected: entry.result.autoSelected === true,
       autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
       sessionTag,
+      groundingMode: entry.groundingMode,
     });
     for (const p of pages) {
       out.push({ entryIdx: i, claimIdx: p.claimIdx, pageWithinClaim: p.pageWithinClaim, text: p.text });

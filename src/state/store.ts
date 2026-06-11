@@ -156,6 +156,16 @@ export const [modelsLoading, setModelsLoading] = createSignal<boolean>(false);
 export const [activePersona, setActivePersona] = createSignal<string>('fact-checker');
 export const [lensResult, setLensResult] = createSignal<LensResult | null>(null);
 /**
+ * Grounding mode of the lens result currently on screen. `'grounded'` is the
+ * happy path — either the persona didn't ask for grounding, or the active
+ * provider supplied it. `'groundless'` means the persona declared `grounding`
+ * but the provider couldn't deliver it (Groq, DeepSeek, OpenAI Chat
+ * Completions) — the HUD appends a `°` to the badge so the wearer knows the
+ * answer came from training data alone. Resets to `'grounded'` between
+ * analyses so a stale flag from an earlier provider doesn't leak across taps.
+ */
+export const [lensGroundingMode, setLensGroundingMode] = createSignal<'grounded' | 'groundless'>('grounded');
+/**
  * Partial lens result published as Gemini streams its response. Reset to
  * `null` at the start of every analyze and again when the full `lensResult`
  * lands — so a reactive consumer can use a single `lensPartialResult() ??
@@ -603,11 +613,6 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
         ? r
         : { type, claims: wrap({ verdict: r['verdict'], claim: r['claim'], reason: r['reason'] }), autoSelected: r['autoSelected'] };
       break;
-    case 'stats-check':
-      migratedResult = Array.isArray(r['claims'])
-        ? r
-        : { type, claims: wrap({ verdict: r['verdict'], stat: r['stat'], reason: r['reason'] }), autoSelected: r['autoSelected'] };
-      break;
     case 'logical-fallacy':
       migratedResult = Array.isArray(r['claims'])
         ? r
@@ -640,7 +645,7 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
       break;
     case 'devils-advocate':
     case 'key-questions':
-    case 'sentiment':
+    case 'companion':
       if (!Array.isArray(r['claims'])) return null;
       migratedResult = r;
       break;
@@ -653,6 +658,12 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
       return null;
   }
 
+  const persistedTags = Array.isArray(e['tags'])
+    ? (e['tags'] as unknown[]).filter((t): t is string => typeof t === 'string')
+    : undefined;
+  const persistedGrounding = e['groundingMode'] === 'grounded' || e['groundingMode'] === 'groundless'
+    ? (e['groundingMode'] as 'grounded' | 'groundless')
+    : undefined;
   return {
     id: String(e['id'] ?? `${Date.now()}-mig`),
     sessionId: String(e['sessionId'] ?? ''),
@@ -663,6 +674,8 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
     badge: String(e['badge'] ?? ''),
     quote: typeof e['quote'] === 'string' ? e['quote'] : '',
     result: migratedResult as HistoryEntry['result'],
+    ...(persistedTags ? { tags: persistedTags } : {}),
+    ...(persistedGrounding ? { groundingMode: persistedGrounding } : {}),
   };
 }
 

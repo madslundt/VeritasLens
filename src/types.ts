@@ -11,29 +11,109 @@
  */
 export type ClaimConfidence = 'HIGH' | 'MED' | 'LOW';
 
-export interface FactClaim { quote: string; claim: string; verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED'; reason: string; confidence?: ClaimConfidence; }
-export interface StatsClaim { quote: string; verdict: 'PLAUSIBLE' | 'SUSPICIOUS'; stat: string; reason: string; confidence?: ClaimConfidence; }
-export interface FallacyClaim { quote: string; fallacy: string; explanation: string; confidence?: ClaimConfidence; }
-export interface BiasClaim { quote: string; verdict: 'NEUTRAL' | 'BIASED'; direction: string; reason: string; confidence?: ClaimConfidence; }
-export interface TriviaClaim { quote: string; question: string; answer: string; description: string; confidence?: ClaimConfidence; }
-export interface Eli5Claim { quote: string; explanation: string; confidence?: ClaimConfidence; }
+export interface FactClaim {
+  quote: string;
+  claim: string;
+  verdict: 'TRUE' | 'FALSE' | 'UNVERIFIED';
+  reason: string;
+  /**
+   * The correct value/best-supported alternative — populated when verdict is
+   * FALSE (the actual fact) or UNVERIFIED (the strongest current candidate or
+   * a "sources disagree" note). Empty on TRUE. ≤80 chars so the wearer can
+   * skim and repeat it back in conversation without parsing the longer
+   * `reason` field. Optional for back-compat with history rows from earlier
+   * releases.
+   */
+  correction?: string;
+  confidence?: ClaimConfidence;
+}
+export interface FallacyClaim {
+  quote: string;
+  fallacy: string;
+  explanation: string;
+  /**
+   * A polite, conversational phrase the wearer can say out loud to flag the
+   * fallacy in the moment (e.g. "That sounds a bit like circular reasoning").
+   * ≤80 chars. Optional for back-compat.
+   */
+  callOut?: string;
+  confidence?: ClaimConfidence;
+}
+export interface BiasClaim {
+  quote: string;
+  verdict: 'NEUTRAL' | 'BIASED';
+  direction: string;
+  reason: string;
+  /**
+   * Same underlying claim reframed from the opposite tonal/political angle —
+   * helps the wearer pivot the conversation. ≤80 chars. Empty when verdict
+   * is NEUTRAL. Optional for back-compat.
+   */
+  counterFrame?: string;
+  confidence?: ClaimConfidence;
+}
+export interface TriviaClaim {
+  quote: string;
+  question: string;
+  answer: string;
+  description: string;
+  /**
+   * Common alternative phrasing of the answer (e.g. "Paris, France" alongside
+   * "Paris"; "Albert Einstein" alongside "Einstein"). Optional; ≤60 chars.
+   */
+  alt?: string;
+  confidence?: ClaimConfidence;
+}
+export interface Eli5Claim {
+  quote: string;
+  /**
+   * Legacy single-blob explanation. Kept optional so old history still parses;
+   * new responses populate `oneLine` + `expanded` instead. The HUD prefers the
+   * new fields when present and falls back here.
+   */
+  explanation?: string;
+  /** Simplest possible single-sentence restatement, ≤60 chars. */
+  oneLine?: string;
+  /** Richer plain-language version, ≤220 chars. */
+  expanded?: string;
+  confidence?: ClaimConfidence;
+}
 
 export interface DevilsAdvocateClaim {
   quote: string;
   counterpoint: string;
   rationale: string;
+  /**
+   * Conversational lead-in the wearer can use to introduce the counter
+   * tactfully (e.g. "That's fair, though one thing worth considering is…").
+   * ≤80 chars. Optional for back-compat.
+   */
+  pivot?: string;
   confidence?: ClaimConfidence;
 }
+
+/** Priority signal for Key Questions. CRITICAL questions go first. */
+export type KeyQuestionPriority = 'CRITICAL' | 'IMPORTANT' | 'NICE';
 
 export interface KeyQuestionClaim {
   question: string;
   context: string;
+  /**
+   * CRITICAL = decision goes wrong without it; IMPORTANT = materially
+   * improves the outcome; NICE = curiosity/optional. Optional for back-compat
+   * with history; defaults to IMPORTANT when absent. Drives sort order and
+   * the priority glyph on the HUD badge.
+   */
+  priority?: KeyQuestionPriority;
 }
 
-export interface SentimentClaim {
+export type CompanionKind = 'fact' | 'stat' | 'story' | 'connection';
+
+export interface CompanionClaim {
   quote: string;
-  tone: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'MIXED';
-  explanation: string;
+  kind: CompanionKind;
+  headline: string;
+  detail: string;
   confidence?: ClaimConfidence;
 }
 
@@ -65,14 +145,13 @@ export type LensResult = (
   | { type: 'fact-check'; claims: FactClaim[] }
   | { type: 'trivia'; claims: TriviaClaim[] }
   | { type: 'logical-fallacy'; claims: FallacyClaim[] }
-  | { type: 'stats-check'; claims: StatsClaim[] }
   | { type: 'bias'; claims: BiasClaim[] }
   | { type: 'eli5'; claims: Eli5Claim[] }
   | { type: 'session-summary'; title: string; summary: string; topics: string[]; keyPoints: string[]; quote?: string }
   | { type: 'meeting-prep'; claims: MeetingPrepClaim[] }
   | { type: 'devils-advocate'; claims: DevilsAdvocateClaim[] }
   | { type: 'key-questions'; claims: KeyQuestionClaim[] }
-  | { type: 'sentiment'; claims: SentimentClaim[] }
+  | { type: 'companion'; claims: CompanionClaim[] }
   | {
       type: 'game';
       preset: GamePreset;
@@ -198,6 +277,28 @@ export interface GameSession {
 export const RANDOM_GAME_PRESET_ID = '__random__';
 
 /**
+ * Provider-agnostic intent for a lens that wants its facts grounded in fresh
+ * web results. `src/llm/tools.ts` translates this into the appropriate
+ * provider-native shape (Gemini google_search tool, Claude web_search_20250305
+ * tool, OpenRouter ':online' suffix, Perplexity sonar-* model override).
+ *
+ * Historical name `'google_search'` is kept as an alias for back-compat so
+ * persona records and persisted history that referenced the old literal still
+ * parse without a migration.
+ */
+export type LensGrounding = 'web_search' | 'google_search';
+
+/**
+ * Whether a grounded lens actually got grounded on this call. `'grounded'`
+ * when the active provider has a web-search capability we plumbed through;
+ * `'groundless'` when grounding was requested but the provider can't supply
+ * it (Groq, DeepSeek, OpenAI Chat Completions). Surfaces on the HUD as a
+ * `GROUNDLESS` badge so the wearer knows the answer came from training data
+ * alone.
+ */
+export type GroundingMode = 'grounded' | 'groundless';
+
+/**
  * One labeled context block the user prepared before a meeting, e.g. pasted
  * contract text or questions to ask. Persisted under `veritaslens.meetingPrep`.
  */
@@ -231,6 +332,15 @@ export interface HistoryEntry {
    * `extractTags` in `lifecycle.ts`.
    */
   tags?: string[];
+  /**
+   * Grounding mode at the time of capture. `'grounded'` (or absent) — the
+   * answer was either non-grounded by intent or grounded successfully.
+   * `'groundless'` — the persona declared grounding but the provider
+   * couldn't supply web search, so the row reflects training-data only.
+   * Optional for back-compat with rows persisted before the multi-provider
+   * grounding work. Drives the trailing `°` glyph on the badge column.
+   */
+  groundingMode?: GroundingMode;
 }
 
 /** Curated Gemini models we know accept inline audio input. Used as the

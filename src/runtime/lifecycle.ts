@@ -41,6 +41,8 @@ import {
   setAutoModeIndicator,
   blankActiveForThinking,
   setLensResult,
+  setLensStreamingHeading,
+  clearLensStreamingHeading,
   setMenuSpinner,
   setStatus,
   setSummaryBadgeState,
@@ -79,7 +81,7 @@ import {
   advance as gameAdvance,
   teardownGame,
 } from './game';
-import { callLens, callLensStream, GOOGLE_SEARCH_TOOLS, MAX_RETRIES } from '@/llm';
+import { callLens, callLensStream, MAX_RETRIES } from '@/llm';
 import { formatRelativeTime } from '@/personas/_utils';
 import { getPersona, type Persona, type PersonaId } from '@/personas';
 import {
@@ -124,6 +126,7 @@ import {
   setErrorMessage,
   setLensResult as setStateResult,
   setLensPartialResult,
+  setLensGroundingMode,
   settings,
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
@@ -1523,13 +1526,28 @@ async function runAnalysis(): Promise<void> {
       const meetingPrompt = buildMeetingPromptWithContext(persona, lang, sections);
       const meetingSchema = buildMeetingPrepSchema(sections);
       const meetingContext = buildContextBlock(persona.name);
-      const rawText = await callLens({
+      // Meeting Prep's schema is built dynamically from the user's prepared
+      // sections — we can't preconfigure `streamHeading` on the persona record
+      // (the answer field is the wearer's payload but the schema isn't known
+      // at registry time). Inline the same heading-streaming pattern as the
+      // generic runAnalysis path: watch `answer` and push partials through
+      // the throttled HUD writer so the response types in instead of landing
+      // in one beat after the spinner.
+      const rawText = await callLensStream({
         wav,
         prompt: `${meetingContext}\n\n${meetingPrompt}`,
         schema: meetingSchema,
         signal: controller.signal,
         onRetry,
+        watchValueKeys: new Set<string>(['answer']),
+        onPartialString: (name, partial) => {
+          if (name !== 'answer') return;
+          void stopSpinner();
+          void setStatus('');
+          setLensStreamingHeading(partial);
+        },
       });
+      clearLensStreamingHeading();
       const result = parseMeetingPrepResponse(rawText, sections);
       await stopSpinner();
       setStateResult(result);
@@ -1662,16 +1680,20 @@ async function runAnalysis(): Promise<void> {
     }
 
     let rawText: string;
+    // Captures the effective grounding mode for *this* call so we can decorate
+    // the badge with a `°` suffix when the user picked a provider that can't
+    // ground (Groq, DeepSeek, OpenAI Chat Completions). The wearer needs to
+    // know when an answer came from training data alone vs. a fresh web
+    // result — otherwise a stale or hallucinated fact looks indistinguishable
+    // from a grounded one. Reset to `'grounded'` here so the previous tap's
+    // mode doesn't leak into a fresh analyze that uses a different provider.
+    let groundingMode: 'grounded' | 'groundless' = 'grounded';
+    setLensGroundingMode('grounded');
     if (speculativeRawText !== null) {
       rawText = speculativeRawText;
     } else {
       const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
       const analysisContext = buildContextBlock(analysisPersona.name);
-      // Grounding is opt-in per persona — only fact-style lenses (fact-check,
-      // stats-check, trivia, devil's advocate) declare it, so other lenses
-      // skip the latency cost of the Google Search tool.
-      const tools =
-        analysisPersona.grounding === 'google_search' ? [...GOOGLE_SEARCH_TOOLS] : undefined;
       // Capture the chat-byproduct transcript on Claude / OpenAI-compatible
       // providers. The main runAnalysis path is always "wearer is listening"
       // (wearer-speak has its own runWearerSpeakAnalyze entry that wires
@@ -1699,20 +1721,52 @@ async function runAnalysis(): Promise<void> {
       if (shouldRunWhisperSidecar()) {
         void runWhisperSidecar(wav, 'other', controller.signal);
       }
-      // HUD never gets partial results — partial renders flickered/strobed on
-      // this hardware. We still consume the stream (for the transcript
-      // byproduct on chat-tool providers) but skip every partial HUD render;
-      // the final result lands in one commit below.
+      // Heading streaming wiring: when the active persona declares
+      // `streamHeading` (Trivia answer, Translate translatedText, Companion
+      // headline, ELI5 oneLine, …), the parser fires `onPartialString` events
+      // as the watched field's value flows in. We push each partial through
+      // the HUD's throttled `setLensStreamingHeading` write — single
+      // `upgradeText` to the reason container, not a full page rebuild — so
+      // the wearer sees the payload type itself in instead of staring at a
+      // spinner. The G2's bridge bandwidth and screen refresh both tolerate
+      // a 150 ms throttle without strobe.
+      const heading = analysisPersona.streamHeading;
+      const watchValueKeys = heading ? new Set<string>([heading.field]) : undefined;
+      const onPartialString = heading
+        ? (name: string, partial: string): void => {
+            if (name !== heading.field) return;
+            // Strip the spinner the moment the answer starts arriving so the
+            // streaming text isn't competing with the dots for the wearer's
+            // attention. setStatus('') leaves the status row blank.
+            void stopSpinner();
+            void setStatus('');
+            setLensStreamingHeading(partial);
+          }
+        : undefined;
       rawText = await callLensStream({
         wav,
         prompt: `${analysisContext}\n\n${analysisPrompt}`,
         schema: analysisPersona.schema,
         signal: controller.signal,
         onRetry,
-        tools,
+        grounding: analysisPersona.grounding,
+        onGroundingMode: (mode) => {
+          groundingMode = mode;
+          // Publish to the store so the live HUD reads the mark the moment
+          // the resolver picks a mode — before the first byte of the result
+          // comes back. Keeps the badge consistent between the in-flight
+          // displaying frame and the history entry persisted seconds later.
+          setLensGroundingMode(mode);
+        },
+        watchValueKeys,
+        onPartialString,
         onTranscript: captureTranscript,
       });
     }
+    // Cancel any pending throttled streaming write before the final
+    // setLensResult rebuilds the page. Without this a trailing flush can
+    // land *after* the rebuild and overwrite it with a stale partial.
+    clearLensStreamingHeading();
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
     await stopSpinner();
@@ -1726,16 +1780,40 @@ async function runAnalysis(): Promise<void> {
     // overwriting each other with stale snapshots). Capture the returned ids
     // so the HUD's session-wide swipe scroll knows which entries belong to
     // this just-finished analysis (drives the "1/N within-analysis" indicator).
+    // When grounding was requested but the active provider can't supply it,
+    // the badge picks up a trailing `°` so the wearer immediately sees the
+    // result wasn't grounded (different shape from a `GROUNDED` glyph — just
+    // a small mark that doesn't crowd the HUD).
+    const decorateBadge = (badge: string): string =>
+      groundingMode === 'groundless' && analysisPersona.grounding ? `${badge}°` : badge;
+    /**
+     * Key-Questions badge format: `Q<index>` for IMPORTANT (default),
+     * `Q<index>!` for CRITICAL, `Q<index>°` for NICE. `!` and `°` give the
+     * wearer an at-a-glance priority signal without crowding the badge.
+     */
+    const keyQuestionBadge = (single: LensResult, idx: number): string => {
+      if (single.type !== 'key-questions') return '';
+      const priority = single.claims[0]?.priority ?? 'IMPORTANT';
+      const suffix = priority === 'CRITICAL' ? '!' : priority === 'NICE' ? '°' : '';
+      return `Q${idx + 1}${suffix}`;
+    };
+    // Only mark history rows as `groundless` when grounding was actually
+    // requested. Skipping the field for grounding-agnostic lenses keeps the
+    // persisted blob small and makes the future "show grounded-only" filter
+    // straightforward — absence of the field means "irrelevant", not
+    // "groundless".
+    const persistedGroundingMode = analysisPersona.grounding ? groundingMode : undefined;
     const freshIds = await pushHistoryEntries(
       splitResultByClaim(result).map((single, idx) => ({
         sessionId: currentSessionId,
         lensId: analysisPersona.id,
         lensName: analysisPersona.name,
         question: extractQuestion(single),
-        badge: single.type === 'key-questions' ? `Q${idx + 1}` : extractBadge(single),
+        badge: decorateBadge(single.type === 'key-questions' ? keyQuestionBadge(single, idx) : extractBadge(single)),
         quote: extractQuote(single),
         result: single,
         tags: extractTags(single),
+        ...(persistedGroundingMode ? { groundingMode: persistedGroundingMode } : {}),
       })),
       (k, v) => getBridge().setLocalStorage(k, v),
     );
@@ -2694,12 +2772,6 @@ export function extractTags(result: LensResult): string[] {
     case 'logical-fallacy':
       for (const c of result.claims) raw.push(c.fallacy);
       break;
-    case 'stats-check':
-      for (const c of result.claims) {
-        raw.push(c.verdict);
-        for (const t of keywordize(c.stat, 3)) raw.push(t);
-      }
-      break;
     case 'bias':
       for (const c of result.claims) {
         raw.push(c.verdict);
@@ -2708,7 +2780,9 @@ export function extractTags(result: LensResult): string[] {
       break;
     case 'eli5':
       for (const c of result.claims) {
-        for (const t of keywordize(c.explanation, 3)) raw.push(t);
+        // Any populated explanation form contributes to the tag bag — try the
+        // new fields first, fall back to the legacy blob for old history.
+        for (const t of keywordize(c.oneLine ?? c.expanded ?? c.explanation ?? '', 3)) raw.push(t);
       }
       break;
     case 'session-summary':
@@ -2730,10 +2804,10 @@ export function extractTags(result: LensResult): string[] {
         for (const t of keywordize(c.question, 3)) raw.push(t);
       }
       break;
-    case 'sentiment':
+    case 'companion':
       for (const c of result.claims) {
-        raw.push(c.tone);
-        for (const t of keywordize(c.explanation, 3)) raw.push(t);
+        raw.push(c.kind);
+        for (const t of keywordize(c.headline, 3)) raw.push(t);
       }
       break;
     case 'game':
@@ -2754,20 +2828,41 @@ export function extractTags(result: LensResult): string[] {
 
 function extractQuestion(result: LensResult): string {
   switch (result.type) {
-    case 'fact-check': return result.claims[0]?.claim ?? '';
+    case 'fact-check': {
+      const c = result.claims[0];
+      if (!c) return '';
+      // On FALSE the wearer wants the *truth* in the title slot, not the
+      // claim summary — `correction` is the repeatable line. Falls back to
+      // the claim summary for TRUE / UNVERIFIED or when correction is empty.
+      if (c.verdict === 'FALSE' && c.correction) return c.correction;
+      return c.claim ?? '';
+    }
     case 'trivia': return result.claims[0]?.question ?? '';
-    case 'logical-fallacy': return result.claims[0]?.fallacy ?? '';
-    case 'stats-check': return result.claims[0]?.stat ?? '';
+    case 'logical-fallacy': {
+      const c = result.claims[0];
+      if (!c) return '';
+      // `callOut` (when present) is what the wearer can say — preferred over
+      // the bare fallacy name as the heading slot.
+      return c.callOut || c.fallacy || '';
+    }
     case 'bias': {
       const c = result.claims[0];
-      return c ? (c.direction || c.verdict) : '';
+      if (!c) return '';
+      if (c.verdict === 'BIASED' && c.counterFrame) return c.counterFrame;
+      return c.direction || c.verdict;
     }
-    case 'eli5': return (result.claims[0]?.explanation ?? '').slice(0, 80);
+    case 'eli5': {
+      const c = result.claims[0];
+      if (!c) return '';
+      // Prefer the new `oneLine` over `expanded`/legacy `explanation` so the
+      // punchiest single-sentence form fills the heading slot.
+      return (c.oneLine || c.expanded || c.explanation || '').slice(0, 80);
+    }
     case 'session-summary': return (result.title || result.summary).slice(0, 80);
     case 'meeting-prep': return result.claims[0]?.text ?? '';
     case 'devils-advocate': return (result.claims[0]?.counterpoint ?? '').slice(0, 60);
     case 'key-questions': return (result.claims[0]?.question ?? '').slice(0, 60);
-    case 'sentiment': return (result.claims[0]?.explanation ?? '').slice(0, 60);
+    case 'companion': return (result.claims[0]?.headline ?? '').slice(0, 60);
     case 'game': {
       const topic = result.preset.topic || 'Random topic';
       return topic.slice(0, 80);
@@ -2782,7 +2877,6 @@ function extractBadge(result: LensResult): string {
     case 'fact-check': return result.claims[0]?.verdict ?? 'UNVERIFIED';
     case 'trivia': return 'ANSWER';
     case 'logical-fallacy': return (result.claims[0]?.fallacy ?? '').slice(0, 12).toUpperCase();
-    case 'stats-check': return result.claims[0]?.verdict ?? 'SUSPICIOUS';
     case 'bias': return result.claims[0]?.verdict ?? 'NEUTRAL';
     case 'eli5': return 'ELI5';
     case 'session-summary': return 'SUMMARY';
@@ -2795,7 +2889,7 @@ function extractBadge(result: LensResult): string {
     }
     case 'devils-advocate': return 'COUNTER';
     case 'key-questions': return 'Q1';
-    case 'sentiment': return result.claims[0]?.tone ?? 'NEUTRAL';
+    case 'companion': return (result.claims[0]?.kind ?? 'TIDBIT').toUpperCase();
     case 'game': {
       const scored = result.questions.some((q) => q.correctIndex !== null);
       return scored ? `${result.score}/${result.questions.length}` : 'GAME';
@@ -2819,7 +2913,6 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
   switch (result.type) {
     case 'fact-check':
     case 'logical-fallacy':
-    case 'stats-check':
     case 'bias':
     case 'trivia':
     case 'eli5': {
@@ -2830,8 +2923,6 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
       switch (result.type) {
         case 'fact-check':
           return result.claims.map((c) => ({ type: 'fact-check', claims: [c], autoSelected: result.autoSelected }));
-        case 'stats-check':
-          return result.claims.map((c) => ({ type: 'stats-check', claims: [c], autoSelected: result.autoSelected }));
         case 'logical-fallacy':
           return result.claims.map((c) => ({ type: 'logical-fallacy', claims: [c], autoSelected: result.autoSelected }));
         case 'bias':
@@ -2859,7 +2950,7 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
     }
     case 'devils-advocate':
       return [result];
-    case 'sentiment':
+    case 'companion':
       return [result];
     case 'game':
       return [result];
@@ -2878,7 +2969,6 @@ export function extractQuote(result: LensResult): string {
   switch (result.type) {
     case 'fact-check':
     case 'logical-fallacy':
-    case 'stats-check':
     case 'bias':
     case 'trivia':
     case 'eli5':
@@ -2897,7 +2987,7 @@ export function extractQuote(result: LensResult): string {
       return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'key-questions':
       return '';
-    case 'sentiment':
+    case 'companion':
       return result.claims.map((c) => c.quote).filter(Boolean).join(' · ');
     case 'game':
       return '';
