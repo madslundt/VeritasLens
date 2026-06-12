@@ -20,8 +20,12 @@ import {
   saveAutoModeEnabled,
   saveAutoModeStartMs,
   saveAutoModeSilenceMs,
+  saveAutoModeIntervalMs,
   saveVoiceGateRmsFloor,
   saveVoiceTrimEnabled,
+  AUTO_MODE_INTERVAL_MS_MAX,
+  AUTO_MODE_INTERVAL_MS_MIN,
+  AUTO_MODE_INTERVAL_STEP_MS,
   AUTO_MODE_SILENCE_MS_MAX,
   AUTO_MODE_SILENCE_MS_MIN,
   AUTO_MODE_START_MS_MAX,
@@ -425,6 +429,7 @@ export const SettingsView: Component = () => {
   const [draftAutoMode, setDraftAutoMode] = createSignal(settings().autoModeEnabled);
   const [draftAutoModeStart, setDraftAutoModeStart] = createSignal(settings().autoModeStartMs);
   const [draftAutoModeSilence, setDraftAutoModeSilence] = createSignal(settings().autoModeSilenceMs);
+  const [draftAutoModeInterval, setDraftAutoModeInterval] = createSignal(settings().autoModeIntervalMs);
   const [draftTranslationMode, setDraftTranslationMode] =
     createSignal<'converse' | 'listen-in'>(settings().translationMode);
   // Source-language hint persisted as either 'auto' (literal) or an array of
@@ -1018,6 +1023,7 @@ export const SettingsView: Component = () => {
         autoMode,
         autoModeStart,
         autoModeSilence,
+        autoModeInterval,
         autoDisabled,
         translationMode,
         translationSourceLangs,
@@ -1050,6 +1056,7 @@ export const SettingsView: Component = () => {
         saveAutoModeEnabled(setLs, draftAutoMode()),
         saveAutoModeStartMs(setLs, draftAutoModeStart()),
         saveAutoModeSilenceMs(setLs, draftAutoModeSilence()),
+        saveAutoModeIntervalMs(setLs, draftAutoModeInterval()),
         saveAutoDisabledLenses(setLs, draftAutoDisabledLenses()),
         saveTranslationMode(setLs, draftTranslationMode()),
         saveTranslationSourceLanguages(setLs, resolveTranslationSourceLangs()),
@@ -1062,7 +1069,7 @@ export const SettingsView: Component = () => {
         provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
         language, buffer, autoSummary, crossSessionRecall, discreet, voiceGate, voiceTrim,
-        autoMode, autoModeStart, autoModeSilence, autoDisabled, translationMode,
+        autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
         translationSourceLangs, transcriptMode,
       ].every(Boolean) && prepResult.ok;
       if (allOk) {
@@ -1076,6 +1083,7 @@ export const SettingsView: Component = () => {
         // 1234 → 1250) and letting appDirty stay true.
         setDraftAutoModeStart(settings().autoModeStartMs);
         setDraftAutoModeSilence(settings().autoModeSilenceMs);
+        setDraftAutoModeInterval(settings().autoModeIntervalMs);
         const freshPrep = meetingPrepSections();
         setPrepDraft(
           freshPrep.length > 0
@@ -1143,6 +1151,7 @@ export const SettingsView: Component = () => {
       || draftAutoMode() !== s.autoModeEnabled
       || draftAutoModeStart() !== s.autoModeStartMs
       || draftAutoModeSilence() !== s.autoModeSilenceMs
+      || draftAutoModeInterval() !== s.autoModeIntervalMs
     );
   });
   /**
@@ -2352,6 +2361,10 @@ export const SettingsView: Component = () => {
             void onSave();
           }}
         >
+            <div class="config-section-divider" role="separator">
+              <span>Basics</span>
+            </div>
+
             <label class="field">
               <span class="field-label">Response language</span>
               <select
@@ -2373,12 +2386,84 @@ export const SettingsView: Component = () => {
                 <For each={BUFFER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
               </select>
               <span class="field-hint">
-                Longer buffers capture more conversation but cost more per request.
+                How much past audio each analysis includes. Longer captures more conversation
+                but sends a bigger payload to the provider.
               </span>
             </label>
 
+            <div class="config-section-divider" role="separator">
+              <span>Audio</span>
+            </div>
+
             <div class="field">
-              <span class="field-label">Voice detection sensitivity</span>
+              <span class="field-label">Auto mode</span>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftAutoMode()}
+                  onChange={(e) => setDraftAutoMode(e.currentTarget.checked)}
+                />
+                <span>Analyze when I stop speaking</span>
+              </label>
+              <Show when={draftAutoMode()}>
+                <div class="slider-row" style={{ 'margin-top': '0.5rem' }}>
+                  <input
+                    type="range"
+                    min={AUTO_MODE_START_MS_MIN}
+                    max={AUTO_MODE_START_MS_MAX}
+                    step={AUTO_MODE_STEP_MS}
+                    value={draftAutoModeStart()}
+                    onInput={(e) => setDraftAutoModeStart(Number(e.currentTarget.value))}
+                  />
+                  {/* Pinned to the same min-width as the other two auto-mode rows so all
+                      three slider tracks line up — otherwise the longer "Trailing silence"
+                      label squeezes its own slider narrower than the rest. */}
+                  <span class="slider-value" style={{ 'min-width': '10rem' }}>
+                    Min voice {(draftAutoModeStart() / 1000).toFixed(2)} s
+                  </span>
+                </div>
+                <div class="slider-row">
+                  <input
+                    type="range"
+                    min={AUTO_MODE_SILENCE_MS_MIN}
+                    max={AUTO_MODE_SILENCE_MS_MAX}
+                    step={AUTO_MODE_STEP_MS}
+                    value={draftAutoModeSilence()}
+                    onInput={(e) => setDraftAutoModeSilence(Number(e.currentTarget.value))}
+                  />
+                  <span class="slider-value" style={{ 'min-width': '10rem' }}>
+                    Trailing silence {(draftAutoModeSilence() / 1000).toFixed(2)} s
+                  </span>
+                </div>
+                <div class="slider-row">
+                  <input
+                    type="range"
+                    min={AUTO_MODE_INTERVAL_MS_MIN}
+                    max={AUTO_MODE_INTERVAL_MS_MAX}
+                    step={AUTO_MODE_INTERVAL_STEP_MS}
+                    value={draftAutoModeInterval()}
+                    onInput={(e) => setDraftAutoModeInterval(Number(e.currentTarget.value))}
+                  />
+                  <span class="slider-value" style={{ 'min-width': '10rem' }}>
+                    Max interval {(draftAutoModeInterval() / 1000).toFixed(0)} s
+                  </span>
+                </div>
+                <Show when={draftTranscriptMode() === 'off'}>
+                  <span class="field-hint" style={{ 'margin-top': '0.4rem', 'font-style': 'italic' }}>
+                    Tip: turn on <strong>Live transcript</strong> below so Auto can skip moments it
+                    has already answered.
+                  </span>
+                </Show>
+              </Show>
+              <span class="field-hint">
+                Analyzes automatically when you finish speaking — no tap needed. The sliders tune
+                how long you have to talk, how long a pause counts as "done", and the longest it
+                will wait if you never pause.
+              </span>
+            </div>
+
+            <div class="field">
+              <span class="field-label">Voice sensitivity</span>
               <div class="slider-row">
                 <input
                   type="range"
@@ -2393,77 +2478,25 @@ export const SettingsView: Component = () => {
                 </span>
               </div>
               <span class="field-hint">
-                RMS floor below which a frame counts as silence. <strong>0</strong> turns the gate off
-                (every tap is sent to the LLM); <strong>200</strong> is the historical default. Lower
-                if quiet speech is being misclassified, higher if background noise is leaking through.
-                <br />
-                <strong>○</strong> no voice / silence
-                <br />
-                <strong>~</strong> too noisy to pick up voice
+                How loud audio must be before the app treats it as speech. <strong>0</strong> sends
+                every tap to the LLM. Raise it if background noise leaks in, lower it if quiet
+                speech is being missed.
               </span>
             </div>
 
             <div class="field">
-              <span class="field-label">Auto mode</span>
-              <label class="toggle-row">
-                <input
-                  type="checkbox"
-                  checked={draftAutoMode()}
-                  onChange={(e) => setDraftAutoMode(e.currentTarget.checked)}
-                />
-                <span>Auto-analyze when you finish speaking</span>
-              </label>
-              <Show when={draftAutoMode()}>
-                <div class="slider-row" style={{ 'margin-top': '0.5rem' }}>
-                  <input
-                    type="range"
-                    min={AUTO_MODE_START_MS_MIN}
-                    max={AUTO_MODE_START_MS_MAX}
-                    step={AUTO_MODE_STEP_MS}
-                    value={draftAutoModeStart()}
-                    onInput={(e) => setDraftAutoModeStart(Number(e.currentTarget.value))}
-                  />
-                  <span class="slider-value">
-                    Min voice {(draftAutoModeStart() / 1000).toFixed(2)} s
-                  </span>
-                </div>
-                <div class="slider-row">
-                  <input
-                    type="range"
-                    min={AUTO_MODE_SILENCE_MS_MIN}
-                    max={AUTO_MODE_SILENCE_MS_MAX}
-                    step={AUTO_MODE_STEP_MS}
-                    value={draftAutoModeSilence()}
-                    onInput={(e) => setDraftAutoModeSilence(Number(e.currentTarget.value))}
-                  />
-                  <span class="slider-value">
-                    Trailing silence {(draftAutoModeSilence() / 1000).toFixed(2)} s
-                  </span>
-                </div>
-              </Show>
-              <span class="field-hint">
-                Watches the mic for voice activity. After you speak for at least the <strong>min
-                voice</strong> duration and then go silent for the <strong>trailing silence</strong>
-                duration, an analysis fires automatically — no tap required. Short mid-sentence
-                pauses don't trigger. The HUD shows <strong>AUTO</strong> in the corner while
-                this is active. Uses the same voice-detection sensitivity setting above.
-              </span>
-            </div>
-
-            <div class="field">
-              <span class="field-label">Trim non-speech audio</span>
+              <span class="field-label">Trim silence</span>
               <label class="toggle-row">
                 <input
                   type="checkbox"
                   checked={draftVoiceTrim()}
                   onChange={(e) => setDraftVoiceTrim(e.currentTarget.checked)}
                 />
-                <span>Strip silence before sending to the LLM</span>
+                <span>Strip silence before upload</span>
               </label>
               <span class="field-hint">
-                Crops the upload to detected speech segments — smaller payload, less noise for the
-                model. Turn off if you want the model to hear ambient sound (music, scene, room tone).
-                Has no effect when Silero VAD is unavailable.
+                Cuts silent gaps out of the audio before sending — smaller, cleaner request. Turn
+                off if you want the model to hear ambient sound (music, room tone).
               </span>
             </div>
 
@@ -2478,94 +2511,100 @@ export const SettingsView: Component = () => {
                 <span>Hide the hint row while listening</span>
               </label>
               <span class="field-hint">
-                Shows only a small recording dot; double-tap reveals the answer until hidden via the menu.
+                Shows only a small recording dot on the glasses. Double-tap to reveal the answer.
               </span>
             </div>
 
+            <div class="config-section-divider" role="separator">
+              <span>Memory</span>
+            </div>
+
             <div class="field">
-              <span class="field-label">Conversation memory</span>
+              <span class="field-label">Session memory</span>
               <label class="toggle-row">
                 <input
                   type="checkbox"
                   checked={draftAutoEnabled()}
                   onChange={(e) => setDraftAutoEnabled(e.currentTarget.checked)}
                 />
-                <span>Remember earlier moments &amp; summarise the session</span>
+                <span>Remember this session</span>
               </label>
+              <span class="field-hint">
+                Keeps track of earlier moments in this session and writes a summary to History
+                when you exit, so the lens can refer back to what was already said.
+              </span>
               <Show when={draftAutoEnabled()}>
                 <span class="field-hint warning">
-                  Remembers earlier moments in this session and writes a summary to History on exit.
                   ⚠ Sends a provider request periodically while listening (silent ticks skipped).
                 </span>
-              </Show>
-              <Show when={draftAutoEnabled()}>
                 <label class="toggle-row" style="margin-top: 8px;">
                   <input
                     type="checkbox"
                     checked={draftCrossSessionRecall()}
                     onChange={(e) => setDraftCrossSessionRecall(e.currentTarget.checked)}
                   />
-                  <span>Carry summaries across sessions</span>
+                  <span>Also carry across sessions</span>
                 </label>
                 <span class="field-hint">
-                  Seeds each new session with short summaries of your last 2 sessions, so the
-                  model keeps long-running context across reloads. Helpful for ongoing
-                  conversations; skip it for one-off lookups.
+                  Seeds each new session with summaries of your last 2 sessions, so long-running
+                  conversations keep context across reloads.
                 </span>
                 <Show when={draftCrossSessionRecall()}>
                   <span class="field-hint warning">
-                    ⚠ Past-session summaries are sent to your provider in every prompt.
+                    ⚠ Those past summaries are sent to your provider in every prompt.
                   </span>
                 </Show>
               </Show>
             </div>
 
             <div class="field">
-              <span class="field-label">Conversation transcript</span>
+              <span class="field-label">Live transcript</span>
               <label class="toggle-row">
                 <input
                   type="checkbox"
                   checked={draftTranscriptMode() !== 'off'}
                   onChange={(e) => setDraftTranscriptMode(e.currentTarget.checked ? 'on' : 'off')}
                 />
-                <span>Capture who-said-what across the last ~120 s &amp; inject into every lens</span>
+                <span>Tag who said what (last ~120 s)</span>
               </label>
               <Show when={draftTranscriptMode() !== 'off'}>
                 <span class="field-hint">
-                  Each analysis appends a `[wearer]` / `[other]` tagged segment so the model can
-                  attribute claims to the right speaker and skip re-answering. Separate from
-                  auto-summary above — that's a high-level recap, this is per-turn context.
+                  Marks each segment as you vs. the other speaker and feeds it to every lens, so
+                  it can attribute claims correctly and skip re-answering what it already heard.
                 </span>
                 <Show when={settings().provider === 'gemini' || settings().openaiBaseUrl === 'https://openrouter.ai/api/v1'}>
                   <span class="field-hint warning">
-                    ⚠ On Gemini / OpenRouter this fires one parallel Whisper call per analysis
-                    against your STT host (≈ $0.0001 / 10 s). No Whisper key set → silently skipped.
+                    ⚠ Gemini/OpenRouter: 1 Whisper call per analysis (~$0.0001 / 10 s). Needs STT key.
                   </span>
                 </Show>
               </Show>
             </div>
 
-            <div class="field">
-              <span class="field-label">HUD status indicators</span>
-              <span class="field-hint">
-                What the glyphs in the glasses' top-right corner mean:
-              </span>
-              <ul class="status-legend">
-                <li><code>OK</code> — idle, ready for a tap</li>
-                <li><code>(dot)</code> — listening</li>
-                <li><code>|</code> <code>/</code> <code>-</code> <code>\</code> — request in flight (spinner)</li>
-                <li><code>...</code> — thinking</li>
-                <li><code>R1/3</code>…<code>R3/3</code> — retrying after a transient error</li>
-                <li><code>ERR</code> — provider error (auto-clears in 5 s)</li>
-                <li><code>T/O</code> — request stalled past its deadline; try again or shrink the buffer</li>
-                <li><code>○</code> / <code>~</code> — no speech / too noisy in the buffer</li>
-              </ul>
+            <div
+              class="lens-row lens-row--expandable lens-row--open"
+              style={{ 'margin-top': '0.75rem' }}
+            >
+              <div
+                class="meeting-prep-inline"
+                style={{ 'border-top': 'none', 'margin-top': '0', 'padding-top': '0' }}
+              >
+                <span class="field-label">HUD glyphs</span>
+                <ul class="status-legend">
+                  <li><code>OK</code> — idle, ready for a tap</li>
+                  <li><code>|</code> <code>/</code> <code>-</code> <code>\</code> — request in flight</li>
+                  <li><code>...</code> — thinking</li>
+                  <li><code>R1/3</code>…<code>R3/3</code> — retrying after a transient error</li>
+                  <li><code>ERR</code> — provider error (auto-clears in 5 s)</li>
+                  <li><code>T/O</code> — request stalled past its deadline</li>
+                  <li><code>○</code> — no voice / silence in the buffer</li>
+                  <li><code>~</code> — too noisy to pick up voice</li>
+                </ul>
+                <p class="field-hint" style={{ 'margin-top': '0.75rem' }}>
+                  Audio stays in memory only. API key is sent with each provider request.
+                  Session log clears on close.
+                </p>
+              </div>
             </div>
-
-          <footer class="privacy">
-            Audio is held in a rolling in-memory buffer, never written to disk. Your API key is sent
-            only as part of the provider request you trigger. Session log is cleared when the app closes.
-          </footer>
         </form>
       </Show>
 
