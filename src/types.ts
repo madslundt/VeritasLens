@@ -670,6 +670,16 @@ export interface Settings {
   /** Trailing silence (ms) after the watcher is armed that triggers analysis. */
   autoModeSilenceMs: number;
   /**
+   * Interval-trigger ceiling (ms). When the watcher has been armed for this
+   * long without a silence trigger firing, the interval trigger fires anyway —
+   * solves the "flowing conversation never pauses, auto-mode never fires"
+   * starvation case. The timer ticks only while in the armed state (after the
+   * initial `autoModeStartMs` voice window has elapsed); it does not run in
+   * idle. Resets on every fire (silence or interval) AND on gate-suppression
+   * so the next 30 s window restarts cleanly. Default 30 s.
+   */
+  autoModeIntervalMs: number;
+  /**
    * Source-language hint for the Translate lens. `'auto'` lets the LLM detect
    * any language; an array (e.g. `['es', 'fr']`) restricts the speaker to one
    * of those codes — useful when the wearer is at a Spanish café and wants the
@@ -691,12 +701,24 @@ export interface Settings {
  *  the fallback when coercing an unparseable / out-of-range persisted entry. */
 export const DEFAULT_AUTO_MODE_START_MS = 1500;
 export const DEFAULT_AUTO_MODE_SILENCE_MS = 2000;
+/** Default interval-trigger ceiling. 30 s matches a comfortable conversational
+ *  beat — long enough that bursty back-and-forth doesn't blow up token spend,
+ *  short enough that flowing speech still gets timely analysis. */
+export const DEFAULT_AUTO_MODE_INTERVAL_MS = 30_000;
 /** Slider clamps for the Settings UI. */
 export const AUTO_MODE_START_MS_MIN = 500;
 export const AUTO_MODE_START_MS_MAX = 5000;
 export const AUTO_MODE_SILENCE_MS_MIN = 500;
 export const AUTO_MODE_SILENCE_MS_MAX = 5000;
+/** Interval clamps. Lower bound 15 s prevents the interval from firing inside
+ *  the silence threshold's natural window; upper bound 120 s keeps a stuck
+ *  conversation from going unanalyzed indefinitely. */
+export const AUTO_MODE_INTERVAL_MS_MIN = 15_000;
+export const AUTO_MODE_INTERVAL_MS_MAX = 120_000;
 export const AUTO_MODE_STEP_MS = 250;
+/** Interval slider uses a coarser step than start/silence so the slider has
+ *  reasonable resolution across the 15–120 s range. */
+export const AUTO_MODE_INTERVAL_STEP_MS = 5_000;
 
 /** Runtime app state. */
 export type AppPhase =

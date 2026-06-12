@@ -17,6 +17,9 @@ const BYTES_PER_TICK = (SAMPLE_RATE * TICK_MS) / 1000 * 2;
 
 const START_MS = 1500;
 const SILENCE_MS = 2000;
+// Comfortably larger than the existing tests' longest voiced run so the
+// pre-existing cases keep their original semantics (no spurious interval fire).
+const INTERVAL_MS = 30_000;
 const RMS_FLOOR = 200;
 
 /** Square wave at ~10 000 amplitude → RMS ≈ 10 000, well above the 200 floor. */
@@ -37,13 +40,21 @@ let buffer: PcmRingBuffer;
 // the wider `Procedure | Constructable` default from vi.fn() with no args.
 let trigger: ReturnType<typeof vi.fn<() => void>>;
 let isAnalyzing = false;
+/**
+ * Per-test gate override. `null` means "omit shouldAnalyze entirely" — the
+ * watcher's gate-pass branch handles the missing-callback case, which is the
+ * behaviour the v3 existing tests expect.
+ */
+let gate: (() => boolean) | null = null;
 
 function defaultConfig() {
   return {
     getStartMs: () => START_MS,
     getSilenceMs: () => SILENCE_MS,
+    getIntervalMs: () => INTERVAL_MS,
     getRmsFloor: () => RMS_FLOOR,
     isAnalyzing: () => isAnalyzing,
+    ...(gate ? { shouldAnalyze: gate } : {}),
     trigger,
   };
 }
@@ -67,6 +78,7 @@ describe('autoMode watcher', () => {
     buffer = new PcmRingBuffer({ durationSec: 30, sampleRate: SAMPLE_RATE });
     trigger = vi.fn<() => void>();
     isAnalyzing = false;
+    gate = null;
   });
 
   afterEach(() => {
@@ -170,6 +182,139 @@ describe('autoMode watcher', () => {
     expect(trigger).not.toHaveBeenCalled();
     isAnalyzing = false;
     feedSilenceTicks(1);
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  // ----- Interval trigger -----
+
+  it('does not tick the interval timer while in the idle (pre-arm) state', () => {
+    // Use a tiny interval so the test would catch a misfire fast if the
+    // timer were running in idle. The watcher never arms (no voice ticks),
+    // so 100 silence ticks (20 s) should produce zero triggers regardless
+    // of the 3 s interval ceiling.
+    startAutoModeWatcher(buffer, {
+      ...defaultConfig(),
+      getIntervalMs: () => 3_000,
+    });
+    feedSilenceTicks(100);
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('fires the interval trigger after continuous voice without a silence trigger', () => {
+    // 3 s interval, 8 s of voice → no mid-pauses, no silence trigger ever
+    // crosses, but the interval fires at the ceiling. Picked 3 s so the test
+    // runs fast.
+    startAutoModeWatcher(buffer, {
+      ...defaultConfig(),
+      getIntervalMs: () => 3_000,
+    });
+    // Arm: 8 voice ticks = 1.6 s ≥ 1.5 s start threshold.
+    feedVoiceTicks(8);
+    expect(trigger).not.toHaveBeenCalled();
+    // 15 more voice ticks = 3 s armed → interval crosses.
+    feedVoiceTicks(15);
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('interval timer resets after the silence trigger fires', () => {
+    // After a normal silence fire, the next utterance must rebuild its own
+    // interval window from scratch — a stale interval counter from before
+    // the fire mustn't carry over and cause the next utterance to fire
+    // prematurely on a sub-interval voice run.
+    startAutoModeWatcher(buffer, {
+      ...defaultConfig(),
+      getIntervalMs: () => 3_000,
+    });
+    feedVoiceTicks(8);
+    feedSilenceTicks(10); // silence trigger fires
+    expect(trigger).toHaveBeenCalledTimes(1);
+    // New utterance, 2 s armed → still under the 3 s ceiling. No second fire
+    // unless the interval timer reset cleanly.
+    feedVoiceTicks(8);    // arms
+    feedVoiceTicks(8);    // 1.6 s armed
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('interval timer resets after its own fire and re-arms cleanly', () => {
+    startAutoModeWatcher(buffer, {
+      ...defaultConfig(),
+      getIntervalMs: () => 3_000,
+    });
+    feedVoiceTicks(8);
+    feedVoiceTicks(15);    // interval fire 1
+    expect(trigger).toHaveBeenCalledTimes(1);
+    // Second utterance: must arm + cross the interval ceiling fresh, not
+    // immediately on next voice tick.
+    feedVoiceTicks(8);
+    feedVoiceTicks(15);
+    expect(trigger).toHaveBeenCalledTimes(2);
+  });
+
+  it('interval trigger queues a catch-up fire when an analysis is in flight', () => {
+    // Same coalescing contract as the silence trigger — the interval path
+    // must also defer through pendingFire when isAnalyzing is true.
+    startAutoModeWatcher(buffer, {
+      ...defaultConfig(),
+      getIntervalMs: () => 3_000,
+    });
+    isAnalyzing = true;
+    feedVoiceTicks(8);
+    feedVoiceTicks(15);    // interval threshold crossed in-flight
+    expect(trigger).not.toHaveBeenCalled();
+    isAnalyzing = false;
+    feedSilenceTicks(1);    // drain
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  // ----- Relevance gate -----
+
+  it('suppresses the silence trigger when the gate returns false', () => {
+    gate = () => false;
+    startAutoModeWatcher(buffer, defaultConfig());
+    feedVoiceTicks(8);
+    feedSilenceTicks(10);  // would normally fire
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('gate suppression resets the state machine — next utterance re-arms fresh', () => {
+    // Critical: if the watcher doesn't reset state on suppression, the next
+    // silence tick after threshold would immediately re-evaluate the gate
+    // every 200 ms. Tested by toggling gate from false→true and verifying
+    // that one fresh utterance fires exactly once.
+    let pass = false;
+    gate = () => pass;
+    startAutoModeWatcher(buffer, defaultConfig());
+    feedVoiceTicks(8);
+    feedSilenceTicks(10);  // suppressed
+    expect(trigger).not.toHaveBeenCalled();
+    // No spurious fires from re-evaluation on subsequent silence ticks.
+    feedSilenceTicks(20);
+    expect(trigger).not.toHaveBeenCalled();
+    // Gate flips to pass; new utterance fires normally.
+    pass = true;
+    feedVoiceTicks(8);
+    feedSilenceTicks(10);
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('gate suppression also covers the interval trigger', () => {
+    gate = () => false;
+    startAutoModeWatcher(buffer, {
+      ...defaultConfig(),
+      getIntervalMs: () => 3_000,
+    });
+    feedVoiceTicks(8);
+    feedVoiceTicks(15);    // interval threshold crossed
+    expect(trigger).not.toHaveBeenCalled();
+  });
+
+  it('omitting shouldAnalyze keeps the v3 default-fire behaviour', () => {
+    // Test the optionality contract — when shouldAnalyze is undefined, the
+    // watcher behaves as if every fire passed the gate. Same as the pre-gate
+    // baseline. gate is null in beforeEach so the helper omits the field.
+    startAutoModeWatcher(buffer, defaultConfig());
+    feedVoiceTicks(8);
+    feedSilenceTicks(10);
     expect(trigger).toHaveBeenCalledTimes(1);
   });
 

@@ -2,12 +2,16 @@
 import { createSignal } from 'solid-js';
 import type { DeviceStatus } from '@evenrealities/even_hub_sdk';
 import {
+  AUTO_MODE_INTERVAL_MS_MAX,
+  AUTO_MODE_INTERVAL_MS_MIN,
+  AUTO_MODE_INTERVAL_STEP_MS,
   AUTO_MODE_SILENCE_MS_MAX,
   AUTO_MODE_SILENCE_MS_MIN,
   AUTO_MODE_START_MS_MAX,
   AUTO_MODE_START_MS_MIN,
   AUTO_MODE_STEP_MS,
   CLAUDE_MODELS,
+  DEFAULT_AUTO_MODE_INTERVAL_MS,
   DEFAULT_AUTO_MODE_SILENCE_MS,
   DEFAULT_AUTO_MODE_START_MS,
   DEFAULT_CLAUDE_MODEL,
@@ -97,6 +101,7 @@ const SETTINGS_KEY_AUTO_DISABLED_LENSES = 'veritaslens.autoDisabledLenses';
 const SETTINGS_KEY_AUTO_MODE_ENABLED = 'veritaslens.autoModeEnabled';
 const SETTINGS_KEY_AUTO_MODE_START_MS = 'veritaslens.autoModeStartMs';
 const SETTINGS_KEY_AUTO_MODE_SILENCE_MS = 'veritaslens.autoModeSilenceMs';
+const SETTINGS_KEY_AUTO_MODE_INTERVAL_MS = 'veritaslens.autoModeIntervalMs';
 const SETTINGS_KEY_TRANSLATION_SOURCE_LANGS = 'veritaslens.translationSourceLanguages';
 const SETTINGS_KEY_TRANSLATION_MODE = 'veritaslens.translationMode';
 /** Default RMS floor when neither the new nor legacy key is set. */
@@ -107,12 +112,20 @@ export const VOICE_GATE_RMS_STEP = 50;
 export const VOICE_GATE_RMS_MAX = 1000;
 
 /** Parse a persisted auto-mode threshold (in ms), snap to step, and clamp to
- *  the published [min, max] range. Falls back to `fallback` on empty/invalid. */
-function coerceAutoModeMs(raw: string, fallback: number, min: number, max: number): number {
+ *  the published [min, max] range. Falls back to `fallback` on empty/invalid.
+ *  The step is parameterized so the interval slider (5 s step) can reuse the
+ *  same helper as the start/silence sliders (250 ms step). */
+function coerceAutoModeMs(
+  raw: string,
+  fallback: number,
+  min: number,
+  max: number,
+  step: number = AUTO_MODE_STEP_MS,
+): number {
   if (raw === '') return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
-  const snapped = Math.round(n / AUTO_MODE_STEP_MS) * AUTO_MODE_STEP_MS;
+  const snapped = Math.round(n / step) * step;
   return Math.min(max, Math.max(min, snapped));
 }
 
@@ -211,6 +224,7 @@ const [settings, setSettings] = createSignal<Settings>({
   autoModeEnabled: false,
   autoModeStartMs: DEFAULT_AUTO_MODE_START_MS,
   autoModeSilenceMs: DEFAULT_AUTO_MODE_SILENCE_MS,
+  autoModeIntervalMs: DEFAULT_AUTO_MODE_INTERVAL_MS,
   // Default to auto-detect so the Translate lens works for any conversation
   // without configuration; the user can pin a subset from Settings later.
   translationSourceLanguages: 'auto',
@@ -258,6 +272,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_AUTO_MODE_ENABLED),
       safeGet(SETTINGS_KEY_AUTO_MODE_START_MS),
       safeGet(SETTINGS_KEY_AUTO_MODE_SILENCE_MS),
+      safeGet(SETTINGS_KEY_AUTO_MODE_INTERVAL_MS),
       safeGet(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS),
       safeGet(SETTINGS_KEY_TRANSLATION_MODE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_MODE),
@@ -290,6 +305,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoModeEnabled,
     rawAutoModeStartMs,
     rawAutoModeSilenceMs,
+    rawAutoModeIntervalMs,
     rawTranslationSourceLangs,
     rawTranslationMode,
     rawTranscriptMode,
@@ -350,6 +366,13 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       DEFAULT_AUTO_MODE_SILENCE_MS,
       AUTO_MODE_SILENCE_MS_MIN,
       AUTO_MODE_SILENCE_MS_MAX,
+    ),
+    autoModeIntervalMs: coerceAutoModeMs(
+      rawAutoModeIntervalMs,
+      DEFAULT_AUTO_MODE_INTERVAL_MS,
+      AUTO_MODE_INTERVAL_MS_MIN,
+      AUTO_MODE_INTERVAL_MS_MAX,
+      AUTO_MODE_INTERVAL_STEP_MS,
     ),
     translationSourceLanguages: coerceTranslationSourceLanguages(rawTranslationSourceLangs),
     translationMode: coerceTranslationMode(rawTranslationMode),
@@ -546,9 +569,18 @@ export async function saveAutoModeSilenceMs(setLs: SetLs, ms: number): Promise<b
   return saveSetting(setLs, SETTINGS_KEY_AUTO_MODE_SILENCE_MS, 'autoModeSilenceMs', clamped);
 }
 
+export async function saveAutoModeIntervalMs(setLs: SetLs, ms: number): Promise<boolean> {
+  const snapped = Math.round(ms / AUTO_MODE_INTERVAL_STEP_MS) * AUTO_MODE_INTERVAL_STEP_MS;
+  const clamped = Math.min(AUTO_MODE_INTERVAL_MS_MAX, Math.max(AUTO_MODE_INTERVAL_MS_MIN, snapped));
+  return saveSetting(setLs, SETTINGS_KEY_AUTO_MODE_INTERVAL_MS, 'autoModeIntervalMs', clamped);
+}
+
 // Re-export the thresholds + step so SettingsView can render a consistent
 // slider without hard-coding magic numbers.
 export {
+  AUTO_MODE_INTERVAL_MS_MAX,
+  AUTO_MODE_INTERVAL_MS_MIN,
+  AUTO_MODE_INTERVAL_STEP_MS,
   AUTO_MODE_SILENCE_MS_MAX,
   AUTO_MODE_SILENCE_MS_MIN,
   AUTO_MODE_START_MS_MAX,

@@ -137,8 +137,10 @@ import type { GeminiModel, LanguageCode, LensResult, MeetingPrepSection, Setting
 import {
   appendSegment as appendTranscriptSegment,
   formatForPrompt as formatTranscriptForPrompt,
+  getRecent as getRecentTranscriptSegments,
   resetTranscript,
 } from './transcript';
+import { GATE_TAIL_SEGMENTS, shouldAnalyze } from './relevanceGate';
 import { runWhisperSidecar, shouldRunWhisperSidecar } from './transcriptSource';
 
 /**
@@ -941,8 +943,19 @@ function syncAutoModeWatcher(): void {
     startAutoModeWatcher(buffer!, {
       getStartMs: () => settings().autoModeStartMs,
       getSilenceMs: () => settings().autoModeSilenceMs,
+      getIntervalMs: () => settings().autoModeIntervalMs,
       getRmsFloor: () => settings().voiceGateRmsFloor,
       isAnalyzing: () => analyzing,
+      shouldAnalyze: () => {
+        // Wearer-speak is a deliberate "I'm about to say something" recording
+        // — silently dropping it because the surrounding transcript is filler
+        // would feel broken. Bypass the gate entirely in that mode.
+        if (wearerSpeakActive) return true;
+        // Transcript mode off → no signal to gate on. Preserves today's
+        // behaviour so privacy-conscious users don't lose auto-mode.
+        if (settings().transcriptMode === 'off') return true;
+        return shouldAnalyze(getRecentTranscriptSegments(GATE_TAIL_SEGMENTS), activePersona());
+      },
       trigger: () => {
         // Branch on wearer-speak state. When the wearer is on the
         // wearer-speak page in recording mode, the next speech-end boundary

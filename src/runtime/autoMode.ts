@@ -39,10 +39,24 @@ export interface AutoModeConfig {
   getStartMs: () => number;
   /** Trailing silence (ms) after arming that fires the trigger. */
   getSilenceMs: () => number;
+  /**
+   * Interval-trigger ceiling (ms). After the watcher has been armed for this
+   * long without a silence trigger firing, the interval trigger fires anyway —
+   * solves the "flowing conversation never pauses, auto-mode never fires"
+   * starvation case. Re-read on every tick so live slider changes apply.
+   */
+  getIntervalMs: () => number;
   /** Active VAD threshold (int16 RMS). 0 -> use FALLBACK_RMS_FLOOR. */
   getRmsFloor: () => number;
   /** True when an analysis is already in flight (suppresses firing). */
   isAnalyzing: () => boolean;
+  /**
+   * Relevance gate. Called synchronously just before `trigger()` would run;
+   * `false` suppresses the fire silently (no LLM call, no HUD change) but
+   * still resets the state machine — so the same window doesn't re-evaluate
+   * the gate every tick. Default behaviour when omitted is "always fire".
+   */
+  shouldAnalyze?: () => boolean;
   /** Fired when start+silence thresholds are satisfied. */
   trigger: () => void;
 }
@@ -55,6 +69,14 @@ let activeConfig: AutoModeConfig | null = null;
 let lastByteOffset = 0;
 let voicedMs = 0;
 let silenceMs = 0;
+/**
+ * Time spent in the `armed` state since the last fire (or gate-suppression).
+ * Ticked unconditionally while armed — both voice and sub-silence-threshold
+ * silence ticks count. Reset to 0 when the watcher arms, on every silence
+ * trigger, on every interval trigger, and on every gate-suppression. Tests
+ * verify all four reset paths.
+ */
+let intervalMs = 0;
 let state: WatcherState = 'idle';
 /**
  * When `true`, an utterance completed its silence threshold while a previous
@@ -84,6 +106,7 @@ export function startAutoModeWatcher(buffer: PcmRingBuffer, config: AutoModeConf
   lastByteOffset = buffer.bytesProduced;
   voicedMs = 0;
   silenceMs = 0;
+  intervalMs = 0;
   state = 'idle';
   pendingFire = false;
   timer = setInterval(tick, TICK_MS);
@@ -98,6 +121,7 @@ export function stopAutoModeWatcher(): void {
   lastByteOffset = 0;
   voicedMs = 0;
   silenceMs = 0;
+  intervalMs = 0;
   state = 'idle';
   pendingFire = false;
 }
@@ -128,9 +152,16 @@ function tick(): void {
   // lifecycle uses `lastAnalysisByteOffset` to crop the catch-up's audio
   // to "everything captured since the previous call's snapshot", so the
   // missed window is what gets sent.
+  //
+  // The relevance gate also applies to the catch-up. The transcript tail
+  // at drain time reflects current state, not the missed-window content,
+  // so this slightly under-fires when the missed window had substance but
+  // current speech is filler. That trade-off is accepted as cost-conservative;
+  // the gate is a heuristic. If suppressed, drop pendingFire silently —
+  // resetting it so it can't double-drain on the next tick.
   if (pendingFire && !config.isAnalyzing()) {
     pendingFire = false;
-    config.trigger();
+    if (gatePass(config)) config.trigger();
     return;
   }
 
@@ -163,11 +194,17 @@ function onVoice(config: AutoModeConfig): void {
     if (voicedMs >= config.getStartMs()) {
       state = 'armed';
       silenceMs = 0;
+      intervalMs = 0;
     }
-  } else {
-    // Armed: any voice resets the silence accumulator so mid-utterance
-    // pauses below the silence threshold don't fire.
-    silenceMs = 0;
+    return;
+  }
+  // Armed: any voice resets the silence accumulator so mid-utterance
+  // pauses below the silence threshold don't fire.
+  silenceMs = 0;
+  intervalMs += TICK_MS;
+  if (intervalMs >= config.getIntervalMs()) {
+    // Flowing conversation that never paused — fire the interval trigger.
+    fireOrSuppress(config);
   }
 }
 
@@ -179,27 +216,54 @@ function onSilence(config: AutoModeConfig): void {
     voicedMs = 0;
     return;
   }
+  intervalMs += TICK_MS;
   silenceMs += TICK_MS;
-  if (silenceMs < config.getSilenceMs()) return;
+  if (silenceMs >= config.getSilenceMs()) {
+    fireOrSuppress(config);
+    return;
+  }
+  if (intervalMs >= config.getIntervalMs()) {
+    // Long sub-threshold pauses (lots of half-second breaths in a row) can
+    // accumulate past the interval ceiling without ever hitting the silence
+    // trigger. Fire the interval anyway so the wearer still gets analysis.
+    fireOrSuppress(config);
+  }
+}
 
-  // Threshold met. Reset the state machine BEFORE firing so the next
-  // utterance must build up start+silence from scratch ("continuous
-  // re-arm").
+/**
+ * Centralized fire entry. Resets the state machine BEFORE evaluating in-flight
+ * + gate so:
+ *   - the next utterance must build up start+silence from scratch (continuous
+ *     re-arm);
+ *   - a gate-suppression resets the interval timer too, so the gate doesn't
+ *     re-evaluate every tick after the threshold crosses;
+ *   - the queue-depth-1 catch-up logic stays unchanged from v3.
+ */
+function fireOrSuppress(config: AutoModeConfig): void {
   state = 'idle';
   voicedMs = 0;
   silenceMs = 0;
+  intervalMs = 0;
   // If an analysis is already in flight, queue exactly one catch-up fire
   // instead of dropping. The next tick that observes `analyzing` false
-  // will drain it via the check at the top of `tick()`. Coalesces
-  // multiple missed utterances into a single catch-up — the lifecycle's
-  // `lastAnalysisByteOffset` ensures the catch-up payload covers the full
-  // missed window. Bounds queue depth at 1 so a stuck in-flight call
-  // can't snowball into a flood of catch-up fires when it finally
-  // resolves.
+  // will drain it (and re-evaluate the gate then). Bounds queue depth at 1
+  // so a stuck in-flight call can't snowball into a flood of catch-up fires.
   if (config.isAnalyzing()) {
     pendingFire = true;
     return;
   }
+  if (!gatePass(config)) return;
   config.trigger();
+}
+
+/** Evaluate the relevance gate. Missing callback = pass. Throwing callback
+ *  = pass, so a bug in the gate can never silently kill auto-mode. */
+function gatePass(config: AutoModeConfig): boolean {
+  if (!config.shouldAnalyze) return true;
+  try {
+    return config.shouldAnalyze();
+  } catch {
+    return true;
+  }
 }
 
