@@ -161,8 +161,12 @@ export type MenuItem = { id: string; label: string; disabled?: boolean };
 let builtMenuItems: MenuItem[] = MENU_OPTIONS.map((o) => ({ id: o.id, label: o.label }));
 
 export const EXIT_LABEL_WITH_SUMMARY = 'Exit - generate summary';
+export const EXIT_LABEL_WITHOUT_SUMMARY = 'Exit - no summary';
 // Captured at showMenuPage() time; consumed by buildMenuPage() so the Exit row
-// reflects whether leaveActiveSession will fire a final summary.
+// reflects whether leaveActiveSession will fire a final summary. When true the
+// static `exit` row is expanded into two rows so the wearer can explicitly
+// pick "with summary" vs "without summary"; when false a single plain `Exit`
+// row is shown (no summary is possible to generate either way).
 let exitGeneratesSummary = false;
 
 // Line-aware pagination constants. The body container is the only scrollable
@@ -384,10 +388,22 @@ export async function showActivePage(persona: Persona): Promise<void> {
 export async function showMenuPage(opts: { exitGeneratesSummary?: boolean; dynamicItems?: MenuItem[] } = {}): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showMenuPage().');
   exitGeneratesSummary = opts.exitGeneratesSummary === true;
-  const staticItems = MENU_OPTIONS.map((o): MenuItem => ({
-    id: o.id,
-    label: o.id === 'exit' && exitGeneratesSummary ? EXIT_LABEL_WITH_SUMMARY : o.label,
-  }));
+  const staticItems = MENU_OPTIONS.flatMap((o): MenuItem[] => {
+    if (o.id !== 'exit') return [{ id: o.id, label: o.label }];
+    // When a summary CAN be generated, give the wearer an explicit choice:
+    // the existing "Exit - generate summary" row PLUS a new "Exit - no summary"
+    // row that tears the session down without running the stop-time summary
+    // chain. When a summary CAN'T be generated (auto-summary disabled, or no
+    // intermediate tick fired yet) a single plain "Exit" row is shown — there's
+    // nothing to opt out of, so a second row would just be confusing.
+    if (exitGeneratesSummary) {
+      return [
+        { id: 'exit', label: EXIT_LABEL_WITH_SUMMARY },
+        { id: 'exit-no-summary', label: EXIT_LABEL_WITHOUT_SUMMARY },
+      ];
+    }
+    return [{ id: o.id, label: o.label }];
+  });
   // Dynamic items (mid-summary view/refresh/loading) sit between fact-check
   // and history so they read as session actions alongside their peers.
   const historyIdx = staticItems.findIndex((i) => i.id === 'history');
@@ -972,7 +988,7 @@ export type SummaryBadgeState = 'idle' | 'generating' | 'ready';
 let summaryBadgeReadyTimer: ReturnType<typeof setTimeout> | null = null;
 
 function summaryBadgeBaseline(): string {
-  return settings().autoSummaryEnabled ? 'Summary on' : '';
+  return '';
 }
 
 /**
@@ -980,8 +996,8 @@ function summaryBadgeBaseline(): string {
  * No-op when the picker isn't on screen; safe to call from lifecycle hooks.
  *
  * - 'generating' → "Generating…"
- * - 'ready'      → "Summary ready!", auto-reverts to baseline after 2.5 s
- * - 'idle'       → baseline ("Summary on" if enabled, blank otherwise)
+ * - 'ready'      → "Summary ready!", auto-reverts to blank after 2.5 s
+ * - 'idle'       → blank
  *
  * Badge container is 180 px wide; strings are sized to fit (≤14 chars).
  *

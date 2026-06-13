@@ -816,6 +816,11 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
       case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
       case 'exit': await leaveActiveSession(); break;
+      // Symmetric to 'exit' but tells leaveActiveSession to skip the
+      // stop-time summary chain. Only surfaced by showMenuPage when a
+      // summary could actually be generated, so it's never a confusing
+      // no-op alternative to plain 'exit'.
+      case 'exit-no-summary': await leaveActiveSession({ skipSummary: true }); break;
       case 'translation-reply': {
         const result = getLastTranslationResult();
         if (result) await showTranslationPickerPage(result);
@@ -987,9 +992,13 @@ function syncAutoModeWatcher(): void {
 // teardown + stop-time-summary chain. Set on entry, cleared on exit.
 let leavingActiveSession = false;
 
-async function leaveActiveSession(): Promise<void> {
+async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise<void> {
   if (leavingActiveSession) return;
   leavingActiveSession = true;
+  // Wearer-driven opt-out from the stop-time summary chain (menu's
+  // "Exit - no summary" row). Forced teardowns (settings change, runtime
+  // stop) keep the default false so a summary still lands when possible.
+  const skipSummary = opts.skipSummary === true;
   try {
     // Cancel any analysis still in flight so the answer doesn't arrive into a
     // session that no longer exists (which would set lensResult / pendingActive
@@ -1030,7 +1039,10 @@ async function leaveActiveSession(): Promise<void> {
     // Snapshot the inputs for the stop-time summaries (last-tick + final
     // synthesis) while the buffer and session id are still live. Both calls
     // run in the background so the user is returned to the picker immediately.
-    const stopTimeInputs = captureStopTimeInputs();
+    // When the wearer explicitly opted out via "Exit - no summary" we skip
+    // the snapshot entirely — keeps a multi-MB WAV closure from being pinned
+    // until GC for a chain we're about to discard anyway.
+    const stopTimeInputs = skipSummary ? null : captureStopTimeInputs();
     intermediateSummaries = [];
     buffer?.clear();
     buffer = null;

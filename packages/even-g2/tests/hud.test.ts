@@ -322,7 +322,7 @@ describe('setSummaryBadgeState', () => {
     expect(badgeWrites()).toEqual(['Generating…']);
   });
 
-  it('flashes "Summary ready!" then reverts to "Summary on" after 2.5s', async () => {
+  it('flashes "Summary ready!" then reverts to blank after 2.5s', async () => {
     vi.useFakeTimers();
     try {
       await saveAutoSummaryEnabled(fakeSetLs, true);
@@ -332,7 +332,7 @@ describe('setSummaryBadgeState', () => {
       expect(badgeWrites()).toEqual(['Summary ready!']);
       vi.advanceTimersByTime(2500);
       await Promise.resolve();
-      expect(badgeWrites()).toEqual(['Summary ready!', 'Summary on']);
+      expect(badgeWrites()).toEqual(['Summary ready!', '']);
     } finally {
       vi.useRealTimers();
     }
@@ -1967,6 +1967,30 @@ describe('dynamic menu', () => {
     expect(menuOptionAtIndex(3)).toBe('mid-summary-refresh');
     expect(menuOptionAtIndex(4)).toBe('history');
     expect(menuOptionAtIndex(5)).toBe('exit');
+  });
+
+  it('exitGeneratesSummary=true splits the Exit row into "generate summary" + "no summary"', async () => {
+    await bootstrapHud('picker');
+    const persona = getPersona('fact-checker')!;
+    await showActivePage(persona);
+    await showMenuPage({ exitGeneratesSummary: true });
+    // back, fact-check, history, exit (with summary), exit-no-summary
+    expect(menuOptionAtIndex(0)).toBe('back');
+    expect(menuOptionAtIndex(1)).toBe('fact-check');
+    expect(menuOptionAtIndex(2)).toBe('history');
+    expect(menuOptionAtIndex(3)).toBe('exit');
+    expect(menuOptionAtIndex(4)).toBe('exit-no-summary');
+  });
+
+  it('exitGeneratesSummary=false leaves a single plain Exit row (no "no summary" alternative)', async () => {
+    await bootstrapHud('picker');
+    const persona = getPersona('fact-checker')!;
+    await showActivePage(persona);
+    await showMenuPage({ exitGeneratesSummary: false });
+    expect(menuOptionAtIndex(3)).toBe('exit');
+    // No fifth row — the no-summary alternative is only meaningful when a
+    // summary could actually be generated.
+    expect(menuOptionAtIndex(4)).toBe('back');
   });
 
   it('list container itemCount matches total dynamic + static items', async () => {
