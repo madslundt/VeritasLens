@@ -134,55 +134,67 @@ describe('autoMode watcher', () => {
     expect(trigger).not.toHaveBeenCalled();
   });
 
-  it('queues a single catch-up fire when an utterance ends while a prior analysis is in flight', () => {
-    // Replaces the v2 "skip + require fresh arm" semantics. v3 catch-up:
-    // when an utterance hits the silence threshold during an in-flight
-    // analysis, set pendingFire instead of dropping. As soon as the watcher
-    // observes `isAnalyzing` false, the next tick drains the pending fire.
-    // Critical for listen-in mode so back-to-back utterances aren't silently
-    // lost — the lifecycle's `lastAnalysisByteOffset` makes sure the
-    // catch-up payload covers the audio captured during the missed window.
+  it('freezes — no voice/silence accumulation — while an analysis is in flight', () => {
+    // While `isAnalyzing()` returns true the watcher must NOT credit voice
+    // ticks toward arming. This is the core of the fix: voice captured while
+    // the wearer is reading a prior result must not arm auto-mode to snap-
+    // fire the instant the stream resolves.
     startAutoModeWatcher(buffer, defaultConfig());
     isAnalyzing = true;
-    feedVoiceTicks(8);
-    feedSilenceTicks(10); // threshold met but analysis in flight → defer
-    expect(trigger).not.toHaveBeenCalled();
-    // Now the analysis releases. The very next tick should drain the
-    // pending fire — no new utterance required.
-    isAnalyzing = false;
-    feedSilenceTicks(1);
-    expect(trigger).toHaveBeenCalledTimes(1);
-    // Subsequent silence must NOT fire again (only one catch-up per
-    // missed utterance — no double-fire on each idle tick).
+    // Far more voice + silence than would normally fire.
+    feedVoiceTicks(20);
     feedSilenceTicks(20);
-    expect(trigger).toHaveBeenCalledTimes(1);
-    // A fresh utterance after catch-up still fires normally.
+    expect(trigger).not.toHaveBeenCalled();
+    // Release. No drain — pendingFire is gone. A pure silence tick must
+    // not fire either.
+    isAnalyzing = false;
+    feedSilenceTicks(5);
+    expect(trigger).not.toHaveBeenCalled();
+    // Wearer must speak fresh and pause for the next fire.
     feedVoiceTicks(8);
     feedSilenceTicks(10);
-    expect(trigger).toHaveBeenCalledTimes(2);
+    expect(trigger).toHaveBeenCalledTimes(1);
   });
 
-  it('coalesces multiple in-flight utterances into a single catch-up fire', () => {
-    // If three utterances all complete while an analysis is in flight, the
-    // watcher must NOT fire three catch-ups when the analysis releases —
-    // it must coalesce them into one. The lifecycle's byte-offset cropping
-    // hands the one catch-up call all the audio captured during the missed
-    // window, which is the right behaviour.
+  it('resets armed state when isAnalyzing flips true mid-utterance', () => {
+    // The watcher may already be armed with high silenceMs when an analysis
+    // begins (e.g. manual tap right at the tail of an utterance). The guard
+    // must drop that state to idle so the post-analysis baseline is clean.
     startAutoModeWatcher(buffer, defaultConfig());
+    feedVoiceTicks(8);  // armed
+    feedSilenceTicks(5); // 1000 ms silence accumulated
+    expect(trigger).not.toHaveBeenCalled();
+    // Manual tap: analysis begins.
     isAnalyzing = true;
-    // Utterance 1
+    feedSilenceTicks(1);
+    // Analysis completes — at this point state must be idle with all timers
+    // at zero. We verify by feeding fewer voice ticks than startMs and
+    // confirming no fire.
+    isAnalyzing = false;
+    feedVoiceTicks(7); // 1.4 s < 1.5 s startMs — must not arm
+    feedSilenceTicks(15);
+    expect(trigger).not.toHaveBeenCalled();
+    // 8 voice ticks from idle = 1.6 s — only NOW does it arm.
     feedVoiceTicks(8);
     feedSilenceTicks(10);
-    // Utterance 2
+    expect(trigger).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not fire on analyzing release even if interval threshold would have crossed', () => {
+    // Same contract as the silence trigger: the interval path must also be
+    // suppressed by the analyzing-guard. No catch-up fire when isAnalyzing
+    // flips false.
+    startAutoModeWatcher(buffer, {
+      ...defaultConfig(),
+      getIntervalMs: () => 3_000,
+    });
+    isAnalyzing = true;
     feedVoiceTicks(8);
-    feedSilenceTicks(10);
-    // Utterance 3
-    feedVoiceTicks(8);
-    feedSilenceTicks(10);
+    feedVoiceTicks(15);    // would cross interval threshold if not frozen
     expect(trigger).not.toHaveBeenCalled();
     isAnalyzing = false;
     feedSilenceTicks(1);
-    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(trigger).not.toHaveBeenCalled();
   });
 
   // ----- Interval trigger -----
@@ -250,22 +262,6 @@ describe('autoMode watcher', () => {
     expect(trigger).toHaveBeenCalledTimes(2);
   });
 
-  it('interval trigger queues a catch-up fire when an analysis is in flight', () => {
-    // Same coalescing contract as the silence trigger — the interval path
-    // must also defer through pendingFire when isAnalyzing is true.
-    startAutoModeWatcher(buffer, {
-      ...defaultConfig(),
-      getIntervalMs: () => 3_000,
-    });
-    isAnalyzing = true;
-    feedVoiceTicks(8);
-    feedVoiceTicks(15);    // interval threshold crossed in-flight
-    expect(trigger).not.toHaveBeenCalled();
-    isAnalyzing = false;
-    feedSilenceTicks(1);    // drain
-    expect(trigger).toHaveBeenCalledTimes(1);
-  });
-
   // ----- Relevance gate -----
 
   it('suppresses the silence trigger when the gate returns false', () => {
@@ -318,20 +314,4 @@ describe('autoMode watcher', () => {
     expect(trigger).toHaveBeenCalledTimes(1);
   });
 
-  it('clears pending catch-up on stopAutoModeWatcher', () => {
-    // A pending fire must not survive a session tear-down: if the watcher
-    // is stopped (session exit, settings toggle), no spurious catch-up
-    // should fire when isAnalyzing flips false after restart.
-    startAutoModeWatcher(buffer, defaultConfig());
-    isAnalyzing = true;
-    feedVoiceTicks(8);
-    feedSilenceTicks(10); // pending fire queued
-    stopAutoModeWatcher();
-    isAnalyzing = false;
-    // Restart in a fresh session; first tick must not fire from the prior
-    // queued state.
-    startAutoModeWatcher(buffer, defaultConfig());
-    feedSilenceTicks(5);
-    expect(trigger).not.toHaveBeenCalled();
-  });
 });

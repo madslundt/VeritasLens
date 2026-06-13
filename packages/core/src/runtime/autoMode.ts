@@ -78,16 +78,6 @@ let silenceMs = 0;
  */
 let intervalMs = 0;
 let state: WatcherState = 'idle';
-/**
- * When `true`, an utterance completed its silence threshold while a previous
- * analysis was still in flight. Cleared and fired the next time `tick()`
- * observes `isAnalyzing() === false`. Only one pending fire is held — if a
- * third utterance arrives before the in-flight call returns it coalesces
- * onto the existing pending fire rather than queueing N deep. The catch-up
- * call uses `lastAnalysisByteOffset` on the lifecycle side, so the audio
- * captured during the missed window is what gets sent.
- */
-let pendingFire = false;
 
 /**
  * Begin polling. Idempotent — repeated calls with the same buffer reset the
@@ -108,7 +98,6 @@ export function startAutoModeWatcher(buffer: PcmRingBuffer, config: AutoModeConf
   silenceMs = 0;
   intervalMs = 0;
   state = 'idle';
-  pendingFire = false;
   timer = setInterval(tick, TICK_MS);
 }
 
@@ -123,7 +112,6 @@ export function stopAutoModeWatcher(): void {
   silenceMs = 0;
   intervalMs = 0;
   state = 'idle';
-  pendingFire = false;
 }
 
 /** True iff the watcher is currently polling. Exposed for the lifecycle's
@@ -145,23 +133,20 @@ function tick(): void {
   const config = activeConfig;
   if (!buffer || !config) return;
 
-  // Catch-up fire: if an utterance completed during a previous analysis,
-  // drain it as soon as `analyzing` flips false. Done BEFORE the new-bytes
-  // read so the catch-up always fires within one tick of the prior call
-  // releasing, not behind the next utterance's classification work. The
-  // lifecycle uses `lastAnalysisByteOffset` to crop the catch-up's audio
-  // to "everything captured since the previous call's snapshot", so the
-  // missed window is what gets sent.
-  //
-  // The relevance gate also applies to the catch-up. The transcript tail
-  // at drain time reflects current state, not the missed-window content,
-  // so this slightly under-fires when the missed window had substance but
-  // current speech is filler. That trade-off is accepted as cost-conservative;
-  // the gate is a heuristic. If suppressed, drop pendingFire silently —
-  // resetting it so it can't double-drain on the next tick.
-  if (pendingFire && !config.isAnalyzing()) {
-    pendingFire = false;
-    if (gatePass(config)) config.trigger();
+  // Freeze while an analysis (manual tap, auto fire, Translate, Lens Game…)
+  // is in flight. Resetting on every analyzing tick — rather than just
+  // early-returning — keeps the post-analysis baseline clean: voice captured
+  // while the wearer is reading a result must not credit toward the next
+  // arm-up, otherwise auto-mode snaps another analysis the instant the
+  // stream resolves. After analysis releases, the wearer must produce a
+  // fresh `getStartMs()` of voice + `getSilenceMs()` of silence — the
+  // existing Settings sliders are the cooldown.
+  if (config.isAnalyzing()) {
+    state = 'idle';
+    voicedMs = 0;
+    silenceMs = 0;
+    intervalMs = 0;
+    lastByteOffset = buffer.bytesProduced;
     return;
   }
 
@@ -231,27 +216,23 @@ function onSilence(config: AutoModeConfig): void {
 }
 
 /**
- * Centralized fire entry. Resets the state machine BEFORE evaluating in-flight
- * + gate so:
+ * Centralized fire entry. Resets the state machine BEFORE evaluating the gate
+ * so:
  *   - the next utterance must build up start+silence from scratch (continuous
  *     re-arm);
  *   - a gate-suppression resets the interval timer too, so the gate doesn't
- *     re-evaluate every tick after the threshold crosses;
- *   - the queue-depth-1 catch-up logic stays unchanged from v3.
+ *     re-evaluate every tick after the threshold crosses.
+ *
+ * `isAnalyzing()` is intentionally not checked here — the `tick()` analyzing-
+ * guard short-circuits before `onVoice`/`onSilence` can reach this function
+ * during an in-flight analysis, so by the time we're here `isAnalyzing()` is
+ * guaranteed false.
  */
 function fireOrSuppress(config: AutoModeConfig): void {
   state = 'idle';
   voicedMs = 0;
   silenceMs = 0;
   intervalMs = 0;
-  // If an analysis is already in flight, queue exactly one catch-up fire
-  // instead of dropping. The next tick that observes `analyzing` false
-  // will drain it (and re-evaluate the gate then). Bounds queue depth at 1
-  // so a stuck in-flight call can't snowball into a flood of catch-up fires.
-  if (config.isAnalyzing()) {
-    pendingFire = true;
-    return;
-  }
   if (!gatePass(config)) return;
   config.trigger();
 }

@@ -2966,10 +2966,22 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
         autoSelected: result.autoSelected,
       }));
     }
-    case 'devils-advocate':
-      return [result];
-    case 'companion':
-      return [result];
+    case 'devils-advocate': {
+      if (result.claims.length <= 1) return [result];
+      return result.claims.map((c) => ({
+        type: 'devils-advocate' as const,
+        claims: [c],
+        autoSelected: result.autoSelected,
+      }));
+    }
+    case 'companion': {
+      if (result.claims.length <= 1) return [result];
+      return result.claims.map((c) => ({
+        type: 'companion' as const,
+        claims: [c],
+        autoSelected: result.autoSelected,
+      }));
+    }
     case 'game':
       return [result];
     case 'translation':
