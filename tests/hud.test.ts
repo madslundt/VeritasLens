@@ -1027,6 +1027,56 @@ describe('session-wide swipe scroll', () => {
     expect(outcome).toBe('revealed');
     expect(lastUpgradeByName('vl-reason')).toContain('B');
   });
+
+  function companionEntry(opts: { id: string; sessionId?: string; headline: string; kind?: 'fact' | 'stat' | 'story' | 'connection' }): HistoryEntry {
+    const kind = opts.kind ?? 'fact';
+    return {
+      id: opts.id, timestamp: 1, sessionId: opts.sessionId ?? 's',
+      lensId: 'companion', lensName: 'Companion', question: opts.headline,
+      badge: kind.toUpperCase(), quote: '',
+      result: { type: 'companion', claims: [{ quote: '', kind, headline: opts.headline, detail: `${opts.headline}-detail` }] },
+    };
+  }
+
+  it('Companion: every tidbit across analyses is reachable via swipe-up', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('companion')!);
+
+    // Analysis 1 produced 3 tidbits; after the per-claim split each is its
+    // own session entry.
+    const c1 = companionEntry({ id: 'c1', headline: 'TIDBIT-A' });
+    const c2 = companionEntry({ id: 'c2', headline: 'TIDBIT-B' });
+    const c3 = companionEntry({ id: 'c3', headline: 'TIDBIT-C' });
+    await setLensResult(c3.result, { sessionEntries: [c1, c2, c3], newEntryIds: new Set(['c1', 'c2', 'c3']) });
+
+    // Analysis 2 produced 2 new tidbits, also split per claim.
+    const c4 = companionEntry({ id: 'c4', headline: 'TIDBIT-D' });
+    const c5 = companionEntry({ id: 'c5', headline: 'TIDBIT-E' });
+    await setLensResult(c5.result, {
+      sessionEntries: [c1, c2, c3, c4, c5],
+      newEntryIds: new Set(['c4', 'c5']),
+    });
+
+    // Cursor lands on the first tidbit of the latest analysis (TIDBIT-D).
+    expect(lastUpgradeByName('vl-reason')).toContain('TIDBIT-D');
+
+    // Swipe up walks back through every prior tidbit, including the ones
+    // from the earlier analysis (the user's reported bug).
+    const seen: string[] = [];
+    for (const expected of ['TIDBIT-C', 'TIDBIT-B', 'TIDBIT-A']) {
+      bridge.textContainerUpgrade.mockClear();
+      const outcome = await scrollActiveReason(-1);
+      expect(outcome).toBe('scrolled');
+      const body = lastUpgradeByName('vl-reason') ?? '';
+      seen.push(body);
+      expect(body).toContain(expected);
+    }
+    expect(seen).toHaveLength(3);
+
+    // One more swipe up at the very first tidbit is a no-op.
+    const noop = await scrollActiveReason(-1);
+    expect(noop).toBe('noop');
+  });
 });
 
 describe('menu spinner', () => {
@@ -2137,6 +2187,49 @@ describe('blankActiveForThinking', () => {
 
     expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
     expect(isActiveHidden()).toBe(true);
+  });
+});
+
+describe('splitResultByClaim parity (lifecycle ↔ hud synthesis)', () => {
+  // Locks the rule that lifecycle's storage-time split and hud.ts's synthesis
+  // path agree for every multi-claim lens. A divergence is what caused the
+  // Devils-Advocate bug fixed alongside the Companion scroll work.
+  it('Companion: splits per claim when >1 so each tidbit is its own session entry', async () => {
+    const { splitResultByClaim } = await import('../src/runtime/lifecycle');
+    const result: LensResult = {
+      type: 'companion',
+      claims: [
+        { quote: '', kind: 'fact', headline: 'A', detail: 'a' },
+        { quote: '', kind: 'stat', headline: 'B', detail: 'b' },
+        { quote: '', kind: 'story', headline: 'C', detail: 'c' },
+      ],
+    };
+    const split = splitResultByClaim(result);
+    expect(split).toHaveLength(3);
+    expect(split.every((r) => r.type === 'companion' && r.claims.length === 1)).toBe(true);
+  });
+
+  it('Devils-Advocate: splits per claim (was the latent lifecycle/synthesis divergence)', async () => {
+    const { splitResultByClaim } = await import('../src/runtime/lifecycle');
+    const result: LensResult = {
+      type: 'devils-advocate',
+      claims: [
+        { quote: '', counterpoint: 'P1', rationale: 'R1' },
+        { quote: '', counterpoint: 'P2', rationale: 'R2' },
+      ],
+    };
+    const split = splitResultByClaim(result);
+    expect(split).toHaveLength(2);
+    expect(split.every((r) => r.type === 'devils-advocate' && r.claims.length === 1)).toBe(true);
+  });
+
+  it('Single-claim results pass through unchanged', async () => {
+    const { splitResultByClaim } = await import('../src/runtime/lifecycle');
+    const result: LensResult = {
+      type: 'companion',
+      claims: [{ quote: '', kind: 'fact', headline: 'only', detail: 'd' }],
+    };
+    expect(splitResultByClaim(result)).toEqual([result]);
   });
 });
 

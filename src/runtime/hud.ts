@@ -660,7 +660,8 @@ function splitForSynthesis(result: LensResult): LensResult[] {
       return result.claims.length <= 1 ? [result]
         : result.claims.map((c) => ({ type: 'devils-advocate' as const, claims: [c], autoSelected: result.autoSelected }));
     case 'companion':
-      return [result];
+      return result.claims.length <= 1 ? [result]
+        : result.claims.map((c) => ({ type: 'companion' as const, claims: [c], autoSelected: result.autoSelected }));
     case 'game':
       return [result];
     case 'translation':
