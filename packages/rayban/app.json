@@ -1,0 +1,45 @@
+{
+  "expo": {
+    "name": "VeritasLens",
+    "slug": "veritaslens-rayban",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#000000"
+    },
+    "ios": {
+      "bundleIdentifier": "com.veritaslens.rayban",
+      "deploymentTarget": "17.0",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "VeritasLens captures audio to transcribe and analyse your conversations.",
+        "NSCameraUsageDescription": "VeritasLens accesses the Meta Ray-Ban camera to capture photos for analysis.",
+        "NSBluetoothAlwaysUsageDescription": "VeritasLens connects to Meta Ray-Ban glasses via Bluetooth.",
+        "NSBluetoothPeripheralUsageDescription": "VeritasLens connects to Meta Ray-Ban glasses via Bluetooth.",
+        "UIBackgroundModes": ["audio", "bluetooth-central", "bluetooth-peripheral"]
+      }
+    },
+    "android": {
+      "package": "com.veritaslens.rayban",
+      "minSdkVersion": 29,
+      "targetSdkVersion": 34,
+      "permissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.CAMERA",
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.BLUETOOTH_SCAN",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.FOREGROUND_SERVICE_CAMERA"
+      ]
+    },
+    "plugins": [
+      "expo-modules-core"
+    ]
+  }
+}

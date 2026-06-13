@@ -1,0 +1,20 @@
+// Expo Modules API generates the bulk of this file. The lines below are the
+// project-specific additions: Meta DAT SDK dependencies (camera + core).
+//
+// The Meta Wearables Maven repo lives at
+//   https://maven.pkg.github.com/facebook/meta-wearables-dat-android
+// and requires a personal GitHub token with `read:packages` scope. The token
+// must be set as either an env var (GITHUB_TOKEN) or a Gradle property
+// (gpr.token). The `allprojects { repositories { ... } }` block in the
+// host app's `android/build.gradle` is the right place to declare the repo
+// (see PREBUILD_NOTES.md alongside this file).
+
+apply plugin: 'expo-module-gradle-plugin'
+
+group = 'expo.modules.metacamera'
+version = '0.1.0'
+
+dependencies {
+  implementation 'com.meta.wearable.dat:core:0.7.0'
+  implementation 'com.meta.wearable.dat:camera:0.7.0'
+}

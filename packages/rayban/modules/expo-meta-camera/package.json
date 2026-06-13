@@ -1,0 +1,9 @@
+{
+  "name": "expo-meta-camera",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.ts",
+  "dependencies": {
+    "expo-modules-core": "~2.0.0"
+  }
+}

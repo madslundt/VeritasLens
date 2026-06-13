@@ -1,0 +1,9 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["ExpoMetaCameraModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.metacamera.ExpoMetaCameraModule"]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "platforms": ["ios", "android"],
+  "ios": {
+    "modules": ["ExpoBluetoothAudioModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.bluetoothaudio.ExpoBluetoothAudioModule"]
+  }
+}

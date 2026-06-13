@@ -1,33 +1,10 @@
 {
-  "name": "veritaslens",
+  "name": "veritaslens-monorepo",
   "private": true,
-  "version": "0.16.0",
-  "type": "module",
-  "description": "Silent Intelligence layer for Even Realities G2 — fact-check the last 30 seconds with a gesture.",
+  "workspaces": ["packages/*"],
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "lint": "tsc --noEmit",
-    "pack": "evenhub pack app.json ./dist -o veritaslens.ehpk",
-    "qr": "evenhub qr -p 5173",
-    "sim": "evenhub-simulator http://localhost:5173 --automation-port 9898"
-  },
-  "dependencies": {
-    "@evenrealities/even_hub_sdk": "^0.0.10",
-    "@ricky0123/vad-web": "^0.0.30",
-    "onnxruntime-web": "^1.26.0",
-    "solid-js": "^1.9.3"
-  },
-  "devDependencies": {
-    "@evenrealities/evenhub-cli": "^0.1.13",
-    "@evenrealities/evenhub-simulator": "^0.7.3",
-    "@evenrealities/pretext": "^0.1.4",
-    "typescript": "^5.9.3",
-    "vite": "^8.0.14",
-    "vite-plugin-solid": "^2.11.12",
-    "vitest": "^4.1.7"
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "lint": "npm run lint --workspaces --if-present"
   }
 }
