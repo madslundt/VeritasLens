@@ -68,15 +68,17 @@ Plus a built-in **Lens Game** mode (`personas/game.ts`, `runtime/gameHistory.ts`
 
 Bring your own key — one per provider, stored on-device. The chat host and audio path differ per provider; routing lives in `core/src/llm/index.ts`.
 
-| Provider | Chat host | Audio path | Notes |
-|---|---|---|---|
-| **Gemini** (default) | `generativelanguage.googleapis.com` | Inline `generateContent` audio | Only provider with `google_search` grounding. |
-| **Claude** | `api.anthropic.com` | STT sidecar → tool-use streaming | Borrows STT from a `SttHost` (Groq Whisper or OpenAI Whisper). |
-| **OpenAI** | `api.openai.com/v1` | `/audio/transcriptions` (whisper-1) → `/chat/completions` | Self-transcribes. |
-| **Groq** | `api.groq.com/openai/v1` | `/audio/transcriptions` (whisper-large-v3) → `/chat/completions` | Self-transcribes; recommended STT for Claude / chat-only hosts. |
-| **OpenRouter** | `openrouter.ai/api/v1` | Inline `input_audio` content part | Model picker filters to audio-capable models. |
-| **DeepSeek** | `api.deepseek.com/v1` | Borrowed STT → chat completions | Needs a separate key for the chosen STT host. |
-| **Perplexity** | `api.perplexity.ai` | Borrowed STT → chat completions | Same chat-only pattern as DeepSeek. |
+| Provider | Chat host | Audio path | Web search | Notes |
+|---|---|---|---|---|
+| **Gemini** (default) | `generativelanguage.googleapis.com` | Inline `generateContent` audio | `google_search` tool | Default provider. |
+| **Claude** | `api.anthropic.com` | STT sidecar → tool-use streaming | `web_search_20250305` tool | Borrows STT from a `SttHost` (Groq Whisper or OpenAI Whisper). |
+| **OpenAI** | `api.openai.com/v1` | `/audio/transcriptions` (whisper-1) → `/chat/completions` | Switches to `/v1/responses` with `web_search` for grounded lenses (gpt-5* / gpt-4.1* / gpt-4o*) | Self-transcribes. |
+| **Groq** | `api.groq.com/openai/v1` | `/audio/transcriptions` (whisper-large-v3) → `/chat/completions` | Overrides to `groq/compound` (Tavily-backed) | Self-transcribes; recommended STT for Claude / chat-only hosts. |
+| **OpenRouter** | `openrouter.ai/api/v1` | Inline `input_audio` content part | `:online` model suffix | Model picker filters to audio-capable models. |
+| **DeepSeek** | `api.deepseek.com/v1` | Borrowed STT → chat completions | Borrows your Perplexity key for a pre-search call to `api.perplexity.ai/search` | Needs a separate key for the chosen STT host. |
+| **Perplexity** | `api.perplexity.ai` | Borrowed STT → chat completions | Native via `sonar-*` models | Same chat-only pattern as DeepSeek. |
+
+Grounded lenses (Fact Check, Trivia, Devil's Advocate, Companion, Meeting Prep with web grounding on) automatically pull fresh web results before answering, and the history detail page shows a `Sources: …` sub-page with up to 5 source domains. When the active provider/model can't ground (e.g. DeepSeek without a Perplexity key, OpenAI pinned to a reasoning model), the badge picks up a trailing `°` glyph so the wearer knows the answer came from training data alone.
 
 The **Test** button in Settings runs `runSelfTest()` against the active draft, so an unsaved key/model surfaces failures before first real use.
 
