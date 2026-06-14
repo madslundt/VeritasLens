@@ -1777,10 +1777,9 @@ export const SettingsView: Component = () => {
                                 onChange={(e) => setDraftMeetingPrepWebGrounding(e.currentTarget.checked)}
                               />
                               <span class="meeting-prep-web-grounding-text">
-                                <strong>Verify public claims with web search</strong>
+                                <strong>Enable web search</strong>
                                 <span class="field-hint">
-                                  Lets the lens cross-check what the other party says against current web results.
-                                  Web-sourced answers show <code>Web · domain</code> in history.
+                                  Cross-check claims against current web results.
                                 </span>
                                 {(() => {
                                   const provider = draftProvider();
