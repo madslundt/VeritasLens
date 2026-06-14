@@ -42,9 +42,22 @@ export function coerceConfidence(v: unknown): ClaimConfidence | undefined {
   return undefined;
 }
 
+/**
+ * Collapse markdown link syntax `[label](url)` to just `label`. Web-grounded
+ * providers (notably OpenAI Responses with `web_search`) sometimes inline
+ * `[Tesla blog](https://tesla.com/...)` into answer text; the HUD renders
+ * raw strings and has no markdown layer, so the bare URL leaks onto the
+ * display. Bare URLs are left alone — they may legitimately appear in a
+ * translation transcript or a user-quoted source.
+ */
+export function stripMarkdownLinks(text: string): string {
+  return text.replace(/\[([^\]]+)\]\(\s*[a-z][a-z0-9+.-]*:\/\/[^)\s]+\s*\)/gi, '$1');
+}
+
 export function trimTo(text: string, max: number): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max - 1)}…`;
+  const cleaned = stripMarkdownLinks(text);
+  if (cleaned.length <= max) return cleaned;
+  return `${cleaned.slice(0, max - 1)}…`;
 }
 
 /** Coerce an unknown JSON value into a trimmed quote string. */

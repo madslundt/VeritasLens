@@ -2,6 +2,11 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.16.4] — 2026-06-14
+
+### Fixed
+- **Markdown link URLs no longer leak onto the HUD.** Web-grounded providers — most visibly OpenAI's `/v1/responses` path with the built-in `web_search` tool — sometimes inline `[Tesla blog](https://tesla.com/...)` markdown into a lens's answer text. The HUD renders raw strings with no markdown layer, so the wearer saw the bare URL alongside the label. Fixed at the choke point: a new `stripMarkdownLinks` helper in `personas/_utils.ts` collapses `[label](url)` → `label`, and `trimTo` runs it before any length check — so fact-check, trivia, ELI5, Meeting Prep, Companion, Devil's Advocate, Key Questions, Logical Fallacy, and Session Summary all benefit without touching their individual parsers. Bare URLs (no bracket+paren wrapper) are intentionally left alone — translation transcripts can legitimately quote a URL the speaker said aloud.
+
 ## [0.16.3] — 2026-06-14
 
 ### Added
