@@ -158,6 +158,11 @@ const GAME_FORMATS: readonly GameFormat[] = ['quiz-mc', 'true-false', 'riddle'];
 const GAME_DIFFICULTIES: readonly GameDifficulty[] = ['easy', 'medium', 'hard'];
 
 const MEETING_PREP_KEY = 'veritaslens.meetingPrep';
+/** Per-Meeting-Prep opt-in for web search. Kept in its own key (rather than
+ *  versioning the `MEETING_PREP_KEY` blob) so adding the toggle requires no
+ *  migration path for existing prep payloads. Default off — wearer must
+ *  explicitly opt in, since web grounding sends inferred topic words off-device. */
+const MEETING_PREP_WEB_GROUNDING_KEY = 'veritaslens.meetingPrepWebGrounding';
 /** Total UTF-8 byte cap for the meeting-prep payload (label+body across all sections). */
 export const MEETING_PREP_BYTE_BUDGET = 50 * 1024;
 /** Per-label character cap, applied at write time. */
@@ -190,6 +195,10 @@ export const [deviceStatus, setDeviceStatus] = createSignal<DeviceStatus | null>
 export const [errorMessage, setErrorMessage] = createSignal<string | null>(null);
 export const [sessionHistory, setSessionHistory] = createSignal<HistoryEntry[]>([]);
 export const [meetingPrepSections, setMeetingPrepSectionsSignal] = createSignal<MeetingPrepSection[]>([]);
+/** True when the wearer has opted Meeting Prep into web grounding for the
+ *  current configuration. Read at every Meeting Prep tap (live, not snapshotted)
+ *  so a mid-session toggle takes effect on the next analysis. */
+export const [meetingPrepWebGrounding, setMeetingPrepWebGroundingSignal] = createSignal<boolean>(false);
 export const [gamePresets, setGamePresetsSignal] = createSignal<GamePreset[]>([]);
 
 const [settings, setSettings] = createSignal<Settings>({
@@ -989,6 +998,37 @@ export async function saveMeetingPrepSections(
 /** True when at least one section has a non-empty body — required for the lens to run. */
 export function meetingPrepIsConfigured(): boolean {
   return meetingPrepSections().some((s) => s.body.trim().length > 0);
+}
+
+/**
+ * Load the persisted Meeting Prep web-grounding flag. Quietly defaults to
+ * `false` for any missing / non-boolean / non-`'true'`-string value so a
+ * corrupted KV cell can never leave grounding stuck-on when the wearer
+ * expects it off.
+ */
+export async function loadMeetingPrepWebGrounding(
+  getLocalStorage: (k: string) => Promise<string>,
+): Promise<void> {
+  try {
+    const raw = await getLocalStorage(MEETING_PREP_WEB_GROUNDING_KEY);
+    setMeetingPrepWebGroundingSignal(raw === 'true');
+  } catch (err) {
+    pushDebugEvent({
+      label: 'meeting-prep-web-grounding-load-fail',
+      detail: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/** Persist the Meeting Prep web-grounding flag and update the in-memory signal
+ *  on success so the editor's draft and the live runtime stay in lockstep. */
+export async function saveMeetingPrepWebGrounding(
+  setLs: SetLs,
+  value: boolean,
+): Promise<boolean> {
+  const ok = await setLs(MEETING_PREP_WEB_GROUNDING_KEY, value ? 'true' : 'false');
+  if (ok) setMeetingPrepWebGroundingSignal(value);
+  return ok;
 }
 
 /**

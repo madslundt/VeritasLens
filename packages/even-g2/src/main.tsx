@@ -8,6 +8,7 @@ import {
   loadGamePresets,
   loadHistory,
   loadMeetingPrepSections,
+  loadMeetingPrepWebGrounding,
   loadSettings,
   setAppMode,
   setAppPhase,
@@ -62,6 +63,7 @@ async function bootstrap(): Promise<void> {
     configureCoreDebugEvents(setDebugEvents);
     await loadHistory((k) => bridge.getLocalStorage(k));
     await loadMeetingPrepSections((k) => bridge.getLocalStorage(k));
+    await loadMeetingPrepWebGrounding((k) => bridge.getLocalStorage(k));
     await loadGamePresets((k) => bridge.getLocalStorage(k));
 
     // Picker starts with just the persisted model. Live model-list fetches

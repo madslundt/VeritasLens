@@ -51,6 +51,7 @@ import {
 } from '@veritaslens/core';
 import type {
   GeminiModel,
+  GroundingMode,
   LanguageCode,
   LensResult,
   MeetingPrepSection,
@@ -132,6 +133,7 @@ import {
   loadHistory,
   meetingPrepIsConfigured,
   meetingPrepSections,
+  meetingPrepWebGrounding,
   pushDebugEvent,
   pushHistoryEntries,
   pushHistoryEntry,
@@ -1288,8 +1290,9 @@ function buildMeetingPromptWithContext(
   _persona: Persona,
   lang: LanguageCode,
   sections: MeetingPrepSection[],
+  opts: { webGrounding: boolean },
 ): string {
-  const base = buildMeetingPrepPrompt(lang, sections);
+  const base = buildMeetingPrepPrompt(lang, sections, { webGrounding: opts.webGrounding });
   const recent = buildAlreadyAnsweredLines();
   const recall = buildRecallContextLines(intermediateSummaries, settings().autoSummaryEnabled);
   const memory = buildRecentMemoryLines();
@@ -1553,9 +1556,22 @@ async function runAnalysis(): Promise<void> {
     // suggestions, not standalone facts.
     if (persona.id === MEETING_PREP_ID) {
       const sections = meetingPrepSections();
-      const meetingPrompt = buildMeetingPromptWithContext(persona, lang, sections);
-      const meetingSchema = buildMeetingPrepSchema(sections);
+      // Read the toggle once per analysis — a mid-flight settings save can't
+      // half-apply (the schema's `Web` enum and the resolver's tools array
+      // need to agree on the same call). Snapshotting here keeps that
+      // coherent without cross-thread synchronisation.
+      const webGrounding = meetingPrepWebGrounding();
+      const meetingPrompt = buildMeetingPromptWithContext(persona, lang, sections, { webGrounding });
+      const meetingSchema = buildMeetingPrepSchema(sections, { webGrounding });
       const meetingContext = buildContextBlock(persona.name);
+      // Mirror the generic runAnalysis path: a `groundless` resolver verdict
+      // means the wearer toggled on grounding but the active provider can't
+      // supply it. The `°` badge marks that on the HUD and the history row.
+      // Annotated as the imported alias rather than the inline literal union
+      // so TypeScript treats it as opaque and doesn't narrow it to 'grounded'
+      // through the await + callback path below.
+      let groundingMode: GroundingMode = 'grounded';
+      setLensGroundingMode('grounded');
       // Meeting Prep's schema is built dynamically from the user's prepared
       // sections — we can't preconfigure `streamHeading` on the persona record
       // (the answer field is the wearer's payload but the schema isn't known
@@ -1569,6 +1585,11 @@ async function runAnalysis(): Promise<void> {
         schema: meetingSchema,
         signal: controller.signal,
         onRetry,
+        grounding: webGrounding ? 'web_search' : undefined,
+        onGroundingMode: (mode) => {
+          groundingMode = mode;
+          setLensGroundingMode(mode);
+        },
         watchValueKeys: new Set<string>(['answer']),
         onPartialString: (name, partial) => {
           if (name !== 'answer') return;
@@ -1578,18 +1599,36 @@ async function runAnalysis(): Promise<void> {
         },
       });
       clearLensStreamingHeading();
-      const result = parseMeetingPrepResponse(rawText, sections);
+      const result = parseMeetingPrepResponse(rawText, sections, { webGrounding });
       await stopSpinner();
       setStateResult(result);
+      // Decorate the badge with a trailing `°` when grounding was requested
+      // but the provider couldn't supply it — mirror of the generic path's
+      // `decorateBadge`. Only persist `groundingMode` when grounding was
+      // actually requested, otherwise leave the field absent so the history
+      // row reads as "grounding-agnostic" rather than "groundless".
+      const badge = extractBadge(result);
+      // Launder past TS's control-flow narrowing: `groundingMode` mutates
+      // inside the onGroundingMode callback, which TS can't trace, so the
+      // local would otherwise stay typed as the literal `'grounded'`. The
+      // existing generic path doesn't hit this because its `let` is declared
+      // in a wider scope — ours sits in this MEETING_PREP_ID branch where
+      // TS aggressively narrows. Cast through GroundingMode to restore the
+      // union and re-enable the comparison.
+      const effectiveGroundingMode = groundingMode as GroundingMode;
+      const decoratedBadge =
+        effectiveGroundingMode === 'groundless' && webGrounding ? `${badge}°` : badge;
+      const persistedGroundingMode = webGrounding ? effectiveGroundingMode : undefined;
       const newEntryId = await pushHistoryEntry({
         sessionId: currentSessionId,
         lensId: persona.id,
         lensName: persona.name,
         question: extractQuestion(result),
-        badge: extractBadge(result),
+        badge: decoratedBadge,
         quote: extractQuote(result),
         result,
         tags: extractTags(result),
+        ...(persistedGroundingMode ? { groundingMode: persistedGroundingMode } : {}),
       }, (k, v) => getBridge().setLocalStorage(k, v));
       await reloadHistoryFromStorage();
       // Pass the full session context so multiple Meeting Prep questions in

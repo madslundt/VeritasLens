@@ -11,6 +11,7 @@ import {
   deviceStatus,
   gamePresets,
   meetingPrepSections,
+  meetingPrepWebGrounding,
   modelsLoading,
   newGamePresetId,
   newSectionId,
@@ -41,6 +42,7 @@ import {
   saveClaudeKey,
   saveClaudeModel,
   saveMeetingPrepSections,
+  saveMeetingPrepWebGrounding,
   saveOpenaiBaseUrl,
   saveOpenaiKeys,
   saveOpenaiModel,
@@ -283,7 +285,12 @@ function formatResultText(result: LensResult): string {
       const followUp = result.claims.find((c) => c.kind === 'followup');
       const blocks: string[] = [];
       if (primary?.detail) blocks.push(primary.detail);
-      if (primary?.source) blocks.push(`From: ${primary.source}`);
+      // sourceMeta is the domain when source === 'Web'; for attachment sources
+      // it stays undefined, so the join collapses to just the attachment label.
+      if (primary?.source) {
+        const tail = primary.sourceMeta ? ` · ${primary.sourceMeta}` : '';
+        blocks.push(`From: ${primary.source}${tail}`);
+      }
       if (evidence) {
         const src = evidence.source ? ` · From: ${evidence.source}` : '';
         blocks.push(`"${evidence.text}"${src}`);
@@ -472,6 +479,12 @@ export const SettingsView: Component = () => {
   // shown inline next to the meter. Cleared on the next successful save.
   const [prepError, setPrepError] = createSignal('');
   const [prepExpanded, setPrepExpanded] = createSignal(false);
+  // Draft for the per-Meeting-Prep web-grounding toggle. Mirrors the persisted
+  // signal at mount, drifts on user input, snaps back to the persisted value
+  // after a successful global save (same pattern as the other lens drafts).
+  const [draftMeetingPrepWebGrounding, setDraftMeetingPrepWebGrounding] = createSignal<boolean>(
+    meetingPrepWebGrounding(),
+  );
   const [autoConfigExpanded, setAutoConfigExpanded] = createSignal(false);
   const [translationConfigExpanded, setTranslationConfigExpanded] = createSignal(false);
   // Auto-lens enable list is now draft-only — toggles update the local
@@ -1030,6 +1043,7 @@ export const SettingsView: Component = () => {
         translationSourceLangs,
         transcriptMode,
         prepResult,
+        prepWebGrounding,
       ] = await Promise.all([
         saveProvider(setLs, draftProvider()),
         saveGeminiKey(setLs, draftKey().trim()),
@@ -1063,6 +1077,7 @@ export const SettingsView: Component = () => {
         saveTranslationSourceLanguages(setLs, resolveTranslationSourceLangs()),
         saveTranscriptMode(setLs, draftTranscriptMode()),
         saveMeetingPrepSections(setLs, prepDraft()),
+        saveMeetingPrepWebGrounding(setLs, draftMeetingPrepWebGrounding()),
       ]);
       if (prepResult.ok) setPrepError('');
       else setPrepError(prepResult.error ?? 'Could not save meeting prep.');
@@ -1071,7 +1086,7 @@ export const SettingsView: Component = () => {
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
         language, buffer, autoSummary, crossSessionRecall, discreet, voiceGate, voiceTrim,
         autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
-        translationSourceLangs, transcriptMode,
+        translationSourceLangs, transcriptMode, prepWebGrounding,
       ].every(Boolean) && prepResult.ok;
       if (allOk) {
         // Re-seed the draft signals from the persisted store. The store may
@@ -1091,6 +1106,10 @@ export const SettingsView: Component = () => {
             ? freshPrep
             : [{ id: newSectionId(), label: '', body: '' }],
         );
+        // Snap the toggle's draft back to the persisted value so `lensDirty`
+        // clears even when the save was a no-op (e.g. the wearer toggled then
+        // toggled back before pressing Save).
+        setDraftMeetingPrepWebGrounding(meetingPrepWebGrounding());
         setSaveState('saved');
         if (savedFadeTimer) clearTimeout(savedFadeTimer);
         savedFadeTimer = setTimeout(() => setSaveState('idle'), 1500);
@@ -1199,6 +1218,7 @@ export const SettingsView: Component = () => {
         || draftPrep[i]!.body !== persistedPrep[i]!.body
       ) return true;
     }
+    if (draftMeetingPrepWebGrounding() !== meetingPrepWebGrounding()) return true;
     return false;
   });
 
@@ -1746,6 +1766,44 @@ export const SettingsView: Component = () => {
                               <strong class="meeting-prep-hint-strong">Attachments</strong> are labeled chunks
                               (contracts, prepared questions, source documents) the assistant can cite.
                             </p>
+                            {/* Web grounding opt-in. Reuses `resolveProviderGrounding`
+                                against the drafted provider so the inline note
+                                tracks the same capability surface the live
+                                runtime will see when the wearer hits Save. */}
+                            <label class="meeting-prep-web-grounding">
+                              <input
+                                type="checkbox"
+                                checked={draftMeetingPrepWebGrounding()}
+                                onChange={(e) => setDraftMeetingPrepWebGrounding(e.currentTarget.checked)}
+                              />
+                              <span class="meeting-prep-web-grounding-text">
+                                <strong>Verify public claims with web search</strong>
+                                <span class="field-hint">
+                                  Lets the lens cross-check what the other party says against current web results.
+                                  Web-sourced answers show <code>Web · domain</code> in history.
+                                </span>
+                                {(() => {
+                                  const provider = draftProvider();
+                                  const model = provider === 'gemini'
+                                    ? draftModel()
+                                    : provider === 'claude'
+                                      ? draftClaudeModel()
+                                      : draftOpenaiModel();
+                                  const resolved = resolveProviderGrounding(
+                                    provider,
+                                    provider === 'openai-compatible' ? draftOpenaiBaseUrl() : undefined,
+                                    'web_search',
+                                    model,
+                                  );
+                                  return resolved.mode === 'groundless' && draftMeetingPrepWebGrounding() ? (
+                                    <span class="field-hint" style={{ color: 'var(--c-warn, #b35900)' }}>
+                                      This host has no web search; answers will fall back to training data
+                                      and pick up a trailing <code>°</code> on the badge.
+                                    </span>
+                                  ) : null;
+                                })()}
+                              </span>
+                            </label>
                             <ul class="meeting-prep-list">
                               {/* General context — fixed first slot, no label,
                                   cannot be removed (only cleared). */}

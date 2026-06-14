@@ -133,11 +133,20 @@ export interface MeetingPrepClaim {
   /**
    * Attachment label this draws from — constrained to the user's attachment
    * labels via a dynamic enum in the response schema. Empty on follow-ups and
-   * when the answer is not grounded in a specific attachment.
+   * when the answer is not grounded in a specific attachment. When web
+   * grounding is on, may also be the sentinel value `'Web'`.
    */
   source: string;
   /** Optional supporting line. Only set on the answer claim. */
   detail: string;
+  /**
+   * Optional extra source descriptor. When `source === 'Web'`, holds the bare
+   * source domain (e.g. `nationalbanken.dk`) the model drew from. Surfaces in
+   * the SettingsView history detail as `From: Web · nationalbanken.dk`.
+   * Kept generic (rather than `webDomain`) so future source-shape extensions
+   * can reuse the slot without another schema bump.
+   */
+  sourceMeta?: string;
 }
 
 /** Result union — every built-in lens returns one of these shapes. */

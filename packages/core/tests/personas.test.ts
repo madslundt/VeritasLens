@@ -957,6 +957,144 @@ describe('meeting-prep / parseMeetingPrepResponse', () => {
   });
 });
 
+describe('meeting-prep / web grounding option', () => {
+  it('does not change schema enum or add webSourceDomain when webGrounding is false (default)', () => {
+    // Snapshot the un-grounded shape so a future webGrounding=false caller
+    // sees identical schema to the legacy two-arg call site — guards against
+    // accidental cross-contamination from the grounded branch.
+    const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO, {}) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const source = props['source'] as Record<string, unknown>;
+    expect(source['enum']).toEqual(['Bank contract', 'Questions']);
+    expect(props['webSourceDomain']).toBeUndefined();
+  });
+
+  it('adds "Web" to the top-level source enum and a webSourceDomain field when webGrounding is on', () => {
+    const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO, { webGrounding: true }) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const source = props['source'] as Record<string, unknown>;
+    expect(source['enum']).toEqual(['Bank contract', 'Questions', 'Web']);
+    expect(props['webSourceDomain']).toBeDefined();
+    const webProp = props['webSourceDomain'] as Record<string, unknown>;
+    expect(webProp['type']).toBe('string');
+  });
+
+  it('keeps evidence.source bound to attachments only — Web is never valid there', () => {
+    // Evidence excerpts are reserved for verbatim attachment text. A web fact
+    // surfaces on the top-level source + webSourceDomain — never the evidence
+    // block. The schema must not invite the model to set Web here.
+    const schema = buildMeetingPrepSchema(GENERAL_PLUS_TWO, { webGrounding: true }) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const evidence = props['evidence'] as Record<string, unknown>;
+    const evidenceProps = evidence['properties'] as Record<string, unknown>;
+    const evSource = evidenceProps['source'] as Record<string, unknown>;
+    expect(evSource['enum']).toEqual(['Bank contract', 'Questions']);
+  });
+
+  it('exposes only "Web" as a source when grounding is on and the user has no attachments', () => {
+    const schema = buildMeetingPrepSchema(GENERAL_ONLY, { webGrounding: true }) as Record<string, unknown>;
+    const props = schema['properties'] as Record<string, unknown>;
+    const source = props['source'] as Record<string, unknown>;
+    expect(source['enum']).toEqual(['Web']);
+    // No attachments means no evidence block — Web facts don't go there.
+    expect(props['evidence']).toBeUndefined();
+    expect(props['webSourceDomain']).toBeDefined();
+  });
+
+  it('appends grounding rules and example C to the prompt only when webGrounding is on', () => {
+    const off = buildMeetingPrepPrompt('en', GENERAL_PLUS_TWO, { webGrounding: false });
+    const on = buildMeetingPrepPrompt('en', GENERAL_PLUS_TWO, { webGrounding: true });
+    expect(off).not.toContain('WEB SEARCH IS AVAILABLE');
+    expect(off).not.toContain('EXAMPLE C');
+    expect(on).toContain('WEB SEARCH IS AVAILABLE');
+    expect(on).toContain('EXAMPLE C');
+    expect(on).toContain('webSourceDomain');
+    // Source-label heading should reflect the wider enum, not just attachments.
+    expect(on).toContain('SOURCE LABELS');
+    expect(on).toContain('"Web"');
+  });
+
+  it('parses a Web-sourced answer with webSourceDomain into claims[0].sourceMeta', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'Public base rate is 1.75%, not 4.8% — the discount claim is wrong.',
+        detail: 'Your contract is 4.8% but the public reference rate is far lower.',
+        source: 'Web',
+        webSourceDomain: 'nationalbanken.dk',
+      }),
+      GENERAL_PLUS_TWO,
+      { webGrounding: true },
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims[0]!.source).toBe('Web');
+      expect(result.claims[0]!.sourceMeta).toBe('nationalbanken.dk');
+    }
+  });
+
+  it('rejects "Web" as source when grounding is off — even if the model returns it', () => {
+    // Belt and suspenders: the schema's enum should keep this out, but the
+    // parser is the final guard. A model that ignores the enum doesn't get to
+    // poison the claim with a sentinel the consumer doesn't expect.
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({ answer: 'X', source: 'Web', webSourceDomain: 'example.com' }),
+      GENERAL_PLUS_TWO,
+      // webGrounding defaults to false
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims[0]!.source).toBe('');
+      expect(result.claims[0]!.sourceMeta).toBeUndefined();
+    }
+  });
+
+  it('strips https:// and trailing path/query from a misbehaving webSourceDomain', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'X',
+        source: 'Web',
+        webSourceDomain: 'https://www.NationalBanken.dk/en/statistics?series=base',
+      }),
+      GENERAL_PLUS_TWO,
+      { webGrounding: true },
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims[0]!.sourceMeta).toBe('www.nationalbanken.dk');
+    }
+  });
+
+  it('drops a webSourceDomain that looks like garbage (no dot, control chars, too long)', () => {
+    const inputs = ['notadomain', 'no spaces.tld', 'a'.repeat(120) + '.com', '12345', ''];
+    for (const bad of inputs) {
+      const result = parseMeetingPrepResponse(
+        JSON.stringify({ answer: 'X', source: 'Web', webSourceDomain: bad }),
+        GENERAL_PLUS_TWO,
+        { webGrounding: true },
+      );
+      if (result.type === 'meeting-prep') {
+        expect(result.claims[0]!.sourceMeta).toBeUndefined();
+      }
+    }
+  });
+
+  it('omits sourceMeta when source is an attachment label — domain is meaningful only for Web', () => {
+    const result = parseMeetingPrepResponse(
+      JSON.stringify({
+        answer: 'A',
+        source: 'Bank contract',
+        // A model that mistakenly fills webSourceDomain for an attachment-sourced
+        // answer should NOT leak the value onto sourceMeta — attachment label
+        // already carries the attribution.
+        webSourceDomain: 'nationalbanken.dk',
+      }),
+      GENERAL_PLUS_TWO,
+      { webGrounding: true },
+    );
+    if (result.type === 'meeting-prep') {
+      expect(result.claims[0]!.source).toBe('Bank contract');
+      expect(result.claims[0]!.sourceMeta).toBeUndefined();
+    }
+  });
+});
+
 describe('key-questions', () => {
   it('parses a two-question response', () => {
     const result = parseKeyQuestionsResponse(JSON.stringify({

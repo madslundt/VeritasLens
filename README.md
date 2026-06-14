@@ -56,7 +56,7 @@ Pick one in the picker, or let **Auto** decide. Every lens streams structured JS
 | **Key Questions** | Open / unanswered questions ranked `CRITICAL / IMPORTANT / NICE`. | — |
 | **Companion** | Up to 5 short tidbits — facts, stats, anecdotes, or unexpected connections. | ✓ |
 | **Translate** | Listens to a foreign-language speaker, shows their words + translation, and (Converse mode) suggests 3 reply starters. Auto mode = hands-free continuous translation. | — |
-| **Meeting Prep** | Real-time answers grounded in notes + labeled attachments you wrote on your phone beforehand. Every answer carries a verbatim **evidence** excerpt; an opt-in **follow-up** fires only when prep is silent on a decision-changing detail. | — |
+| **Meeting Prep** | Real-time answers grounded in notes + labeled attachments you wrote on your phone beforehand. Every answer carries a verbatim **evidence** excerpt; an opt-in **follow-up** fires only when prep is silent on a decision-changing detail. Opt-in **"Verify public claims with web search"** checkbox lets the lens cross-check what the other party says against current web results — web-sourced answers show `Web · domain` attribution. | opt-in |
 
 Each lens also returns a self-rated `HIGH / MED / LOW` confidence per claim and a verbatim ≤140-char `quote` from the audio.
 
