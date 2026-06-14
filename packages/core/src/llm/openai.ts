@@ -14,10 +14,11 @@
 // false` and that every property appear in `required`. `toStrictSchema`
 // recurses the schema and injects both.
 import { encodePcmToWav } from '@/runtime/audioBuffer';
-import { OPENAI_INLINE_AUDIO_HOSTS, OPENAI_TRANSCRIBE_MODELS, openaiHostLabel, type OpenAiBaseUrl } from '@/types';
+import { OPENAI_INLINE_AUDIO_HOSTS, OPENAI_TRANSCRIBE_MODELS, openaiHostLabel, type OpenAiBaseUrl, type WebCitation } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
 import { StreamingJsonParser } from './streamingJsonParser';
+import { buildCitation, dedupeCitations } from './citations';
 
 // Per-attempt deadlines for the OpenAI-compatible path. STT gets a longer
 // ceiling because a 5-minute WAV (≈ 9.6 MB) takes meaningful upload time on
@@ -80,6 +81,15 @@ export interface CallOpenAiLensOptions {
    * passes this field — no breaking change.
    */
   imageData?: string;
+  /**
+   * Perplexity Search API key used to pre-fetch web results before the chat
+   * call. Only set by the facade when the active host is DeepSeek and the
+   * wearer has a Perplexity key on file — DeepSeek has no native chat search,
+   * so we borrow Perplexity's standalone `/search` endpoint the same way
+   * chat-only hosts borrow STT. When omitted, the chat call runs without
+   * augmentation. Empty string disables pre-fetch even on DeepSeek.
+   */
+  prefetchSearchApiKey?: string;
 }
 
 /**
@@ -372,11 +382,99 @@ export interface CallOpenAiLensStreamOptions extends CallOpenAiLensOptions {
   onPartialString?: (name: string, partial: string) => void;
   /** Fires as soon as `"noSpeech": true` is visible in the accumulating buffer. */
   onNoSpeech?: () => void;
+  /** Fires once at end-of-stream with deduplicated citations harvested from
+   *  whichever provider-native shape was present on the response chunks
+   *  (annotations / search_results / executed_tools). Quiet on hosts that
+   *  don't return citations. */
+  onCitations?: (citations: WebCitation[]) => void;
+}
+
+interface UrlCitationAnnotation {
+  type?: string;
+  url_citation?: { url?: string; title?: string; snippet?: string };
+  url?: string;
+  title?: string;
+  snippet?: string;
+}
+
+interface SearchResultEntry {
+  url?: string;
+  title?: string;
+  snippet?: string;
+  date?: string;
+}
+
+interface ExecutedTool {
+  search_results?: SearchResultEntry[];
 }
 
 interface ChatCompletionsChunk {
-  choices?: Array<{ delta?: { content?: string } }>;
+  choices?: Array<{
+    delta?: { content?: string; annotations?: UrlCitationAnnotation[] };
+    message?: { content?: string; annotations?: UrlCitationAnnotation[] };
+  }>;
+  /** Perplexity: top-level `search_results[]` arrives on the final SSE chunk
+   *  with structured `{title, url, snippet, date}` entries. Older Sonar
+   *  responses use `citations[]` (URL-only) which we accept as a fallback. */
+  search_results?: SearchResultEntry[];
+  citations?: Array<string | SearchResultEntry>;
+  /** Groq compound: `executed_tools[]` carries one entry per Tavily search
+   *  with its `search_results[]` nested inside. */
+  executed_tools?: ExecutedTool[];
   error?: { message?: string };
+}
+
+/**
+ * Extract citations from a single OpenAI-compatible response chunk. Covers
+ * every shape the codebase's chat-completions hosts return:
+ *
+ *   - OpenRouter `:online` — `choices[0].delta.annotations[]` (streaming) or
+ *     `choices[0].message.annotations[]` (final aggregated chunk) of
+ *     `{type: 'url_citation', url_citation: {url, title}}`.
+ *   - Perplexity Sonar — top-level `search_results[]` (preferred) or
+ *     `citations[]` (older shape, URLs only).
+ *   - Groq compound — top-level `executed_tools[].search_results[]`.
+ *
+ * Empty arrays return empty arrays — caller accumulates across chunks then
+ * dedupes once at end-of-stream.
+ */
+function extractOpenAiCitations(payload: ChatCompletionsChunk): WebCitation[] {
+  const out: WebCitation[] = [];
+  // Annotation shape (OpenRouter, OpenAI Responses fallback).
+  for (const choice of payload.choices ?? []) {
+    const anns = choice.delta?.annotations ?? choice.message?.annotations ?? [];
+    for (const ann of anns) {
+      // The shape is `{type: 'url_citation', url_citation: {...}}` per spec,
+      // but some hosts inline the fields directly on the annotation. Accept
+      // both.
+      const src = ann.url_citation ?? ann;
+      const cit = buildCitation({ url: src.url, title: src.title, snippet: src.snippet });
+      if (cit) out.push(cit);
+    }
+  }
+  // Perplexity structured shape.
+  for (const r of payload.search_results ?? []) {
+    const cit = buildCitation({ url: r.url, title: r.title, snippet: r.snippet });
+    if (cit) out.push(cit);
+  }
+  // Perplexity legacy citations[] — sometimes URL strings, sometimes objects.
+  for (const c of payload.citations ?? []) {
+    if (typeof c === 'string') {
+      const cit = buildCitation({ url: c });
+      if (cit) out.push(cit);
+    } else {
+      const cit = buildCitation({ url: c.url, title: c.title, snippet: c.snippet });
+      if (cit) out.push(cit);
+    }
+  }
+  // Groq compound executed_tools shape.
+  for (const tool of payload.executed_tools ?? []) {
+    for (const r of tool.search_results ?? []) {
+      const cit = buildCitation({ url: r.url, title: r.title, snippet: r.snippet });
+      if (cit) out.push(cit);
+    }
+  }
+  return out;
 }
 
 /**
@@ -441,6 +539,45 @@ export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): P
     try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
   }
 
+  // DeepSeek-grounded path: pre-fetch web results via the wearer's Perplexity
+  // key, inject as a `[Web search results]` block into the system prompt, and
+  // emit the citations via `onCitations` so the HUD's sources sub-page picks
+  // them up. Failures degrade silently — the wearer still gets an answer
+  // sourced from training data alone, and the `°` glyph already flagged the
+  // groundless fallback in the facade.
+  let effectivePrompt = opts.prompt;
+  if (opts.prefetchSearchApiKey) {
+    const transcriptForSearch = (() => {
+      if (typeof userContent === 'string') return userContent;
+      // Inline-audio host content arrays don't carry a transcript — DeepSeek
+      // isn't inline-audio (it's chat-only), so this branch never fires in
+      // production, but the typesafe extraction handles future hosts.
+      return '';
+    })();
+    if (transcriptForSearch.trim().length > 0) {
+      try {
+        const { perplexitySearch, buildSearchQueryFromTranscript } = await import('./perplexitySearch');
+        const query = buildSearchQueryFromTranscript(transcriptForSearch);
+        const results = await perplexitySearch({
+          apiKey: opts.prefetchSearchApiKey,
+          query,
+          signal: opts.signal,
+        });
+        if (results.length > 0) {
+          effectivePrompt = `${opts.prompt}\n\n[Web search results — cite the source domain in your output when used]\n${
+            JSON.stringify(
+              results.slice(0, 8).map((r) => ({ domain: r.domain, title: r.title, snippet: r.snippet, url: r.url })),
+            )
+          }`;
+          try { opts.onCitations?.(results); } catch { /* subscriber errors must not break the lens call */ }
+        }
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') throw err;
+        // Swallow — pre-fetch is best-effort.
+      }
+    }
+  }
+
   // Schema-mode state survives the outer retry loop, same as `callOpenAiLens`.
   // The fallback handshake runs before the stream opens, so a schema rejection
   // never lands partial UI on screen.
@@ -461,7 +598,7 @@ export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): P
     for (let phase = 0; phase < 2; phase++) {
       const bodyJson = buildChatBody({
         model: opts.model,
-        prompt: opts.prompt,
+        prompt: effectivePrompt,
         userContent,
         strictSchema: strict,
         useStrictSchema,
@@ -539,6 +676,11 @@ async function consumeOpenAiStream(
   const decoder = new TextDecoder();
   const parser = new StreamingJsonParser({ watchValueKeys: opts.watchValueKeys });
   let pending = '';
+  /** Citations harvested across every SSE chunk this stream delivers — they
+   *  arrive at different points depending on the host (OpenRouter streams
+   *  annotations alongside content; Perplexity puts `search_results` on the
+   *  final chunk). Defensive merge across all chunks; dedupe at end. */
+  const citationAccumulator: WebCitation[] = [];
 
   // See gemini.ts:consumeStream for the rationale — `attemptCtl.cleanup()`
   // already ran, so the fetch-level abort no longer cancels the body reader.
@@ -585,6 +727,7 @@ async function consumeOpenAiStream(
         }
         const delta = payload.choices?.[0]?.delta?.content;
         if (typeof delta === 'string') dispatch(delta);
+        citationAccumulator.push(...extractOpenAiCitations(payload));
       }
     }
     pending += decoder.decode();
@@ -597,6 +740,7 @@ async function consumeOpenAiStream(
         }
         const delta = payload?.choices?.[0]?.delta?.content;
         if (typeof delta === 'string') dispatch(delta);
+        if (payload) citationAccumulator.push(...extractOpenAiCitations(payload));
       }
     }
   } finally {
@@ -609,6 +753,10 @@ async function consumeOpenAiStream(
   parser.end((event) => {
     if (event.type === 'noSpeech') opts.onNoSpeech?.();
   });
+
+  if (citationAccumulator.length > 0 && opts.onCitations) {
+    try { opts.onCitations(dedupeCitations(citationAccumulator)); } catch { /* subscriber errors must not break the lens call */ }
+  }
 
   const text = parser.text;
   if (!text) throw new Error(`${openaiHostLabel(opts.baseUrl)} stream returned no content.`);

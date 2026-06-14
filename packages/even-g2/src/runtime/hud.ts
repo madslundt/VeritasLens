@@ -11,7 +11,7 @@ import {
 import { measureTextWrap } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
 import { getPersona, getPickerPersonas, gameDifficultyLabel, gameFormatLabel } from '@veritaslens/core';
-import type { Persona, GamePreset, GameSession, HistoryEntry, LensResult } from '@veritaslens/core';
+import type { Persona, GamePreset, GameSession, HistoryEntry, LensResult, WebCitation } from '@veritaslens/core';
 import { activePersona, settings } from '@/state/store';
 
 /**
@@ -453,6 +453,7 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
     groundingMode: entry.groundingMode,
+    webCitations: entry.webCitations,
   });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
@@ -484,6 +485,7 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
     groundingMode: entry.groundingMode,
+    webCitations: entry.webCitations,
   });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
@@ -1410,6 +1412,17 @@ function bulletRow(currentIdx: number, total: number): string {
   return dots.join(' ');
 }
 
+/** Sources sub-page text for a grounded history entry. Up to 5 domains
+ *  joined with `·` so the line wraps naturally on the G2's 576px width.
+ *  Plain text — the HUD has no link affordance, the wearer goes to a
+ *  full URL on their phone via the recall context. */
+const MAX_SOURCES_ON_HUD = 5;
+function buildSourcesPageText(citations: ReadonlyArray<WebCitation>): string {
+  const top = citations.slice(0, MAX_SOURCES_ON_HUD).map((c) => c.domain);
+  if (top.length === 0) return '';
+  return `Sources: ${top.join(' · ')}`;
+}
+
 /**
  * Build the paginated page list for one entry, with all indicator chrome
  * applied:
@@ -1434,6 +1447,10 @@ function computePagesForResult(
     sessionTag?: string;
     autoLensLabel?: string;
     groundingMode?: 'grounded' | 'groundless';
+    /** Structured citations from the grounded path. When present and
+     *  non-empty, an extra "Sources: …" sub-page is appended after the body
+     *  pages so the wearer can scroll one more notch to see the domains. */
+    webCitations?: ReadonlyArray<WebCitation>;
   } = {},
 ): PageRef[] {
   const autoSelected = options.autoSelected ?? (result.autoSelected === true);
@@ -1441,6 +1458,10 @@ function computePagesForResult(
   const autoPrefix =
     autoSelected && options.autoLensLabel ? options.autoLensLabel : '';
   const body = formatEntryBody(result, autoSelected, options.groundingMode);
+  const sourcesText = options.webCitations && options.webCitations.length > 0
+    ? buildSourcesPageText(options.webCitations)
+    : '';
+  const hasSourcesPage = sourcesText.length > 0;
 
   // Auto prefix and session tag share the first line, joined by ' · ' so the
   // shape is `Fact Check · 1/3 · <body>`. Either or both may be empty.
@@ -1454,21 +1475,31 @@ function computePagesForResult(
   const firstBudget = Math.max(1, pageLines - prefixOverhead);
   const firstPass = paginateText(body, BODY_INNER_W, firstBudget, firstBudget);
 
-  if (firstPass.length <= 1) {
+  if (firstPass.length <= 1 && !hasSourcesPage) {
     const text = applyPrefix(firstPass[0] ?? '');
     return [{ claimIdx: 0, pageWithinClaim: 0, text }];
   }
 
   // Multi-page: also reserve 2 lines for the bottom bullet row + blank-line
-  // separator, then re-paginate.
+  // separator, then re-paginate. The sources sub-page counts toward the bullet
+  // total so the wearer sees "● ○ ○" with the last dot reserved for sources.
   const finalBudget = Math.max(1, pageLines - prefixOverhead - 2);
   const final = paginateText(body, BODY_INNER_W, finalBudget, finalBudget);
-  const totalPages = final.length;
-  return final.map((chunk, p) => ({
+  const totalPages = final.length + (hasSourcesPage ? 1 : 0);
+  const pages: PageRef[] = final.map((chunk, p) => ({
     claimIdx: 0,
     pageWithinClaim: p,
     text: `${applyPrefix(chunk)}\n\n${bulletRow(p, totalPages)}`,
   }));
+  if (hasSourcesPage) {
+    const sourcesIdx = totalPages - 1;
+    pages.push({
+      claimIdx: 0,
+      pageWithinClaim: sourcesIdx,
+      text: `${applyPrefix(sourcesText)}\n\n${bulletRow(sourcesIdx, totalPages)}`,
+    });
+  }
+  return pages;
 }
 
 function isDiscreetLayout(layout: ActiveLayout): boolean {
@@ -1539,6 +1570,7 @@ function recomputeSessionPages(): void {
       autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
       sessionTag,
       groundingMode: entry.groundingMode,
+      webCitations: entry.webCitations,
     });
     for (const p of pages) {
       out.push({ entryIdx: i, claimIdx: p.claimIdx, pageWithinClaim: p.pageWithinClaim, text: p.text });

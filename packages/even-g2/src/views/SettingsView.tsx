@@ -2053,12 +2053,19 @@ export const SettingsView: Component = () => {
                     : provider === 'claude'
                       ? draftClaudeModel()
                       : draftOpenaiModel();
-                  const resolved = resolveProviderGrounding(
-                    provider,
-                    provider === 'openai-compatible' ? draftOpenaiBaseUrl() : undefined,
-                    'web_search',
-                    model,
-                  );
+                  const baseUrl = provider === 'openai-compatible' ? draftOpenaiBaseUrl() : undefined;
+                  const resolved = resolveProviderGrounding(provider, baseUrl, 'web_search', model);
+                  // DeepSeek borrows the wearer's Perplexity Search key —
+                  // resolver returns `grounded` regardless, but the actual
+                  // runtime downgrades to groundless when no Perplexity key
+                  // is on file. Surface the dependency explicitly so the
+                  // wearer knows what's needed.
+                  if (resolved.prefetchSearch === 'perplexity') {
+                    const pplxKey = (draftOpenaiKeys()['https://api.perplexity.ai'] ?? '').trim();
+                    return pplxKey
+                      ? 'Grounded via your Perplexity key (DeepSeek has no native web search, so VeritasLens reuses Perplexity Search before each grounded lens call).'
+                      : 'Add a Perplexity API key (under the Perplexity provider) to enable web search on DeepSeek. Without it, fact-style lenses run on training data only and the HUD marks them with a trailing °.';
+                  }
                   return resolved.mode === 'grounded'
                     ? 'Grounded: fact-style lenses pull fresh web results before answering.'
                     : 'Groundless: this host has no web search — fact-style lenses run on training data only. The HUD marks groundless answers with a trailing °.';

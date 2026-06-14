@@ -49,6 +49,7 @@ import {
   type LlmProvider,
   type OpenAiBaseUrl,
   type SttHost,
+  type WebCitation,
 } from '@/types';
 
 export { MAX_RETRIES, parseRetryAfterMs, parseGoogleRetryDelayMs, GOOGLE_SEARCH_TOOLS };
@@ -103,6 +104,19 @@ export interface CallLensStreamOptions extends CallLensOptions {
    * Completions). The lifecycle uses this to render a `GROUNDLESS` HUD badge.
    */
   onGroundingMode?: (mode: GroundingMode) => void;
+  /**
+   * Fires once after the active provider's grounded call surfaces its
+   * structured citations. Provider clients normalize their native shape
+   * (Gemini `groundingChunks`, Claude `web_search_tool_result`,
+   * OpenAI/OpenRouter `url_citation`, Perplexity `search_results`,
+   * Groq compound `executed_tools.search_results`) into the shared
+   * `WebCitation` array via helpers in `@/llm/citations`. Never fires on
+   * `groundless` calls or on lenses that didn't declare grounding. The
+   * lifecycle stashes the array on the `HistoryEntry` for the HUD's
+   * sources sub-page; lens parsers don't see this — citations are a
+   * runtime side channel.
+   */
+  onCitations?: (citations: WebCitation[]) => void;
   /**
    * Fires when a complete object inside the first top-level array of the
    * response is parsed. `key` is the array's property name (`claims`,
@@ -292,6 +306,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       watchValueKeys: opts.watchValueKeys,
       onPartialString: opts.onPartialString,
       onNoSpeech: opts.onNoSpeech,
+      onCitations: opts.onCitations,
       imageData: opts.imageData,
     });
   }
@@ -304,8 +319,51 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       );
     }
     const baseModel = opts.model ?? s.openaiModel;
-    const grounding = resolveProviderGrounding('openai-compatible', chatHost, opts.grounding, baseModel);
+    let grounding = resolveProviderGrounding('openai-compatible', chatHost, opts.grounding, baseModel);
+    // DeepSeek grounded path borrows the wearer's Perplexity Search key.
+    // If the key is missing, downgrade to groundless here rather than
+    // throwing mid-stream — the HUD's `°` glyph already communicates the
+    // fallback, and the wearer can add a key without losing the analysis.
+    // The actual pre-search happens inside the OpenAI client *after* STT
+    // so the search query is the wearer's spoken text, not the persona
+    // prompt — `prefetchSearchApiKey` carries the key through.
+    let prefetchSearchApiKey: string | undefined;
+    if (grounding.prefetchSearch === 'perplexity') {
+      const pplxKey = s.openaiApiKeys['https://api.perplexity.ai'] ?? '';
+      if (!pplxKey) {
+        grounding = { mode: 'groundless' };
+      } else {
+        prefetchSearchApiKey = pplxKey;
+      }
+    }
     try { opts.onGroundingMode?.(grounding.mode); } catch { /* subscriber errors must not break the lens call */ }
+    if (grounding.useResponsesApi) {
+      // Grounded OpenAI calls go through the Responses API client, which
+      // knows the built-in `web_search` tool. Chat Completions stays for
+      // non-grounded OpenAI and for every other OpenAI-compatible host.
+      const { callOpenAiResponsesLensStream } = await import('./openaiResponses');
+      return callOpenAiResponsesLensStream({
+        apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
+        baseUrl: chatHost,
+        model: applyModelGrounding(baseModel, grounding),
+        transcribeModel: stt.transcribeModel,
+        transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
+        transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
+        wav: opts.wav,
+        prompt: opts.prompt,
+        schema: opts.schema,
+        signal: opts.signal,
+        onRetry: opts.onRetry,
+        onPartialClaim: opts.onPartialClaim,
+        onPartialField: opts.onPartialField,
+        watchValueKeys: opts.watchValueKeys,
+        onPartialString: opts.onPartialString,
+        onNoSpeech: opts.onNoSpeech,
+        onTranscript: opts.onTranscript,
+        onCitations: opts.onCitations,
+        imageData: opts.imageData,
+      });
+    }
     return callOpenAiLensStream({
       apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
       baseUrl: chatHost,
@@ -325,6 +383,8 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       onPartialString: opts.onPartialString,
       onNoSpeech: opts.onNoSpeech,
       onTranscript: opts.onTranscript,
+      onCitations: opts.onCitations,
+      prefetchSearchApiKey,
       imageData: opts.imageData,
     });
   }
@@ -350,6 +410,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
     watchValueKeys: opts.watchValueKeys,
     onPartialString: opts.onPartialString,
     onNoSpeech: opts.onNoSpeech,
+    onCitations: opts.onCitations,
     imageData: opts.imageData,
   });
 }

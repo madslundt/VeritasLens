@@ -4,9 +4,11 @@ import {
   DEFAULT_GEMINI_MODEL,
   GEMINI_MODEL_PATTERN,
   type GeminiModel,
+  type WebCitation,
 } from '@/types';
 import { withFetchTimeout } from './fetchTimeout';
 import { StreamingJsonParser } from './streamingJsonParser';
+import { buildCitation, dedupeCitations } from './citations';
 
 /**
  * Validate the model name we interpolate into the endpoint URL. Defense in
@@ -30,8 +32,32 @@ interface GenerateContentResponse {
   candidates?: Array<{
     content?: { parts?: Array<{ text?: string }> };
     finishReason?: string;
+    groundingMetadata?: {
+      groundingChunks?: Array<{
+        web?: { uri?: string; title?: string };
+      }>;
+    };
   }>;
   promptFeedback?: { blockReason?: string };
+}
+
+/**
+ * Extract structured citations from Gemini's `groundingMetadata.groundingChunks`.
+ * When Search grounding is on (the `google_search` tool was forwarded), each
+ * candidate carries a list of `{web: {uri, title}}` chunks pointing at the
+ * search results the model considered. The `uri` is often a vertex redirect
+ * (`vertexaisearch.cloud.google.com/...`) — `buildCitation` falls back to the
+ * provided title-bearing string and `normalizeWebDomain` strips any host into
+ * a bare lowercase domain for the HUD.
+ */
+function extractGeminiCitations(payload: GenerateContentResponse): WebCitation[] {
+  const chunks = payload.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [];
+  const out: WebCitation[] = [];
+  for (const chunk of chunks) {
+    const cit = buildCitation({ url: chunk.web?.uri, title: chunk.web?.title });
+    if (cit) out.push(cit);
+  }
+  return dedupeCitations(out);
 }
 
 export interface CallLensOptions {
@@ -246,6 +272,12 @@ export interface CallLensStreamOptions extends CallLensOptions {
    * full-response path could.
    */
   onNoSpeech?: () => void;
+  /**
+   * Fires once at end-of-stream with the deduplicated citation list extracted
+   * from `groundingMetadata.groundingChunks`. Only fires when Search grounding
+   * was on AND the response included chunks — quiet on non-grounded calls.
+   */
+  onCitations?: (citations: WebCitation[]) => void;
 }
 
 /**
@@ -363,6 +395,10 @@ async function consumeStream(
   const parser = new StreamingJsonParser({ watchValueKeys: opts.watchValueKeys });
   let pending = '';
   let blockReason: string | undefined;
+  // Citations accumulate across SSE events — Gemini emits grounding metadata
+  // on the chunk that carries the final text fragment, but a defensive merge
+  // across all chunks costs nothing and survives any future split.
+  const citationAccumulator: WebCitation[] = [];
 
   // Wire the outer abort signal into the body reader. `attemptCtl.cleanup()`
   // ran before this function was called, so the fetch-level signal no longer
@@ -411,6 +447,7 @@ async function consumeStream(
         }
         const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
         if (typeof text === 'string') dispatch(text);
+        citationAccumulator.push(...extractGeminiCitations(payload));
       }
     }
     // Flush any trailing partial event after the loop closes the stream.
@@ -423,6 +460,7 @@ async function consumeStream(
           if (payload.promptFeedback?.blockReason) blockReason = payload.promptFeedback.blockReason;
           const text = payload.candidates?.[0]?.content?.parts?.[0]?.text;
           if (typeof text === 'string') dispatch(text);
+          citationAccumulator.push(...extractGeminiCitations(payload));
         }
       }
     }
@@ -438,6 +476,11 @@ async function consumeStream(
   });
 
   if (blockReason) throw new Error(`Gemini blocked the prompt: ${blockReason}`);
+  // Surface citations after the parser finishes — gives the runtime a single
+  // deduplicated list and stays quiet when grounding was off or empty.
+  if (citationAccumulator.length > 0 && opts.onCitations) {
+    try { opts.onCitations(dedupeCitations(citationAccumulator)); } catch { /* subscriber errors must not break the lens call */ }
+  }
   const text = parser.text;
   if (!text) throw new Error('Gemini stream returned no text candidate.');
   return text;

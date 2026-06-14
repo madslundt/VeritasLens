@@ -35,35 +35,63 @@ describe('resolveProviderGrounding', () => {
   });
 
   describe('openai-compatible', () => {
-    it('groundless on OpenAI', () => {
+    it('grounded on OpenAI via Responses API for gpt-5* / gpt-4.1* / gpt-4o*', () => {
+      for (const model of ['gpt-5', 'gpt-5-mini', 'gpt-4.1', 'gpt-4o', 'gpt-4o-mini']) {
+        const r = resolveProviderGrounding(
+          'openai-compatible',
+          'https://api.openai.com/v1',
+          'web_search',
+          model,
+        );
+        expect(r.mode).toBe('grounded');
+        expect(r.useResponsesApi).toBe(true);
+      }
+    });
+
+    it('groundless on OpenAI for reasoning models the Responses web_search tool does not accept', () => {
       const r = resolveProviderGrounding(
         'openai-compatible',
         'https://api.openai.com/v1',
         'web_search',
-        'gpt-4o-mini',
+        'o1-preview',
       );
       expect(r.mode).toBe('groundless');
-      expect(r.tools).toBeUndefined();
+      expect(r.useResponsesApi).toBeUndefined();
     });
 
-    it('groundless on Groq', () => {
+    it('grounded on Groq via groq/compound model override', () => {
       const r = resolveProviderGrounding(
         'openai-compatible',
         'https://api.groq.com/openai/v1',
         'web_search',
         'llama-3.3-70b',
       );
-      expect(r.mode).toBe('groundless');
+      expect(r.mode).toBe('grounded');
+      expect(r.modelOverride).toBe('groq/compound');
     });
 
-    it('groundless on DeepSeek', () => {
+    it('grounded on Groq without override when model is already groq/compound*', () => {
+      const r = resolveProviderGrounding(
+        'openai-compatible',
+        'https://api.groq.com/openai/v1',
+        'web_search',
+        'groq/compound-mini',
+      );
+      expect(r.mode).toBe('grounded');
+      expect(r.modelOverride).toBeUndefined();
+    });
+
+    it('grounded on DeepSeek via Perplexity prefetch (facade downgrades to groundless when key absent)', () => {
       const r = resolveProviderGrounding(
         'openai-compatible',
         'https://api.deepseek.com/v1',
         'web_search',
         'deepseek-chat',
       );
-      expect(r.mode).toBe('groundless');
+      expect(r.mode).toBe('grounded');
+      expect(r.prefetchSearch).toBe('perplexity');
+      expect(r.tools).toBeUndefined();
+      expect(r.modelOverride).toBeUndefined();
     });
 
     it('grounded on OpenRouter via :online suffix when model lacks it', () => {

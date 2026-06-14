@@ -22,10 +22,12 @@ import {
   CLAUDE_MODELS,
   DEFAULT_CLAUDE_MODEL,
   type ClaudeModel,
+  type WebCitation,
 } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
 import { StreamingJsonParser } from './streamingJsonParser';
+import { buildCitation, dedupeCitations } from './citations';
 
 export const CLAUDE_ENDPOINT = 'https://api.anthropic.com/v1/messages';
 export const CLAUDE_API_VERSION = '2023-06-01';
@@ -244,14 +246,50 @@ export interface CallClaudeLensStreamOptions extends CallClaudeLensOptions {
   onPartialString?: (name: string, partial: string) => void;
   /** Fires as soon as `"noSpeech": true` is visible in the accumulating buffer. */
   onNoSpeech?: () => void;
+  /** Fires once at end-of-stream with the deduplicated citation list parsed
+   *  from any `web_search_tool_result` content blocks. Quiet when the
+   *  `web_search_20250305` tool wasn't forwarded or no search ran. */
+  onCitations?: (citations: WebCitation[]) => void;
+}
+
+interface ClaudeWebSearchResultItem {
+  type?: string;
+  url?: string;
+  title?: string;
+  page_age?: string;
 }
 
 interface ClaudeStreamEvent {
   type: string;
   index?: number;
-  content_block?: { type?: string; name?: string };
+  content_block?: {
+    type?: string;
+    name?: string;
+    /** Present on `web_search_tool_result` blocks — inline list of search
+     *  results delivered with `content_block_start`. */
+    content?: ClaudeWebSearchResultItem[];
+  };
   delta?: { type?: string; partial_json?: string; stop_reason?: string };
   error?: { type?: string; message?: string };
+}
+
+/**
+ * Translate Anthropic's `web_search_tool_result` content array into
+ * `WebCitation[]`. The shared `buildCitation` normalizes the URL into a
+ * lowercase domain — entries with junk URLs are dropped rather than
+ * persisted. `page_age` is interesting (lets the HUD show "3d ago") but
+ * not yet rendered; kept out of the WebCitation shape until there's UI
+ * for it so the persisted blob stays small.
+ */
+function extractClaudeCitations(items: ClaudeWebSearchResultItem[] | undefined): WebCitation[] {
+  if (!items) return [];
+  const out: WebCitation[] = [];
+  for (const item of items) {
+    if (item.type && item.type !== 'web_search_result') continue;
+    const cit = buildCitation({ url: item.url, title: item.title });
+    if (cit) out.push(cit);
+  }
+  return out;
 }
 
 /**
@@ -367,6 +405,9 @@ async function consumeClaudeStream(
   let pending = '';
   let toolBlockIndex: number | undefined;
   let saw_tool_use = false;
+  /** Citations harvested from any `web_search_tool_result` content blocks
+   *  the stream delivers before/alongside the lens-output tool call. */
+  const citationAccumulator: WebCitation[] = [];
 
   // See gemini.ts:consumeStream for the rationale — `attemptCtl.cleanup()`
   // already ran, so the fetch-level abort no longer cancels the body reader.
@@ -416,6 +457,14 @@ async function consumeClaudeStream(
           saw_tool_use = true;
           continue;
         }
+        if (evt.type === 'content_block_start' && evt.content_block?.type === 'web_search_tool_result') {
+          // Web search results arrive inline on the start event — no delta
+          // accumulation needed. Anthropic caps each call to `max_uses: 3`,
+          // so we typically see one block; defensive accumulation handles
+          // multi-search cases without re-emitting.
+          citationAccumulator.push(...extractClaudeCitations(evt.content_block.content));
+          continue;
+        }
         if (evt.type === 'content_block_delta'
             && evt.delta?.type === 'input_json_delta'
             && typeof evt.delta.partial_json === 'string'
@@ -450,6 +499,9 @@ async function consumeClaudeStream(
 
   if (!saw_tool_use) {
     throw new Error('Anthropic stream returned no tool_use content.');
+  }
+  if (citationAccumulator.length > 0 && opts.onCitations) {
+    try { opts.onCitations(dedupeCitations(citationAccumulator)); } catch { /* subscriber errors must not break the lens call */ }
   }
   const text = parser.text;
   if (!text) throw new Error('Anthropic stream returned no tool-input fragments.');

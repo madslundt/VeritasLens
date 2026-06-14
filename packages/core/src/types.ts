@@ -308,6 +308,30 @@ export type LensGrounding = 'web_search' | 'google_search';
 export type GroundingMode = 'grounded' | 'groundless';
 
 /**
+ * One structured web citation surfaced by a grounded lens call. Providers
+ * return citations in incompatible shapes (Gemini `groundingChunks`, Claude
+ * `web_search_tool_result`, OpenAI/OpenRouter `url_citation` annotations,
+ * Perplexity `search_results`, Groq compound `executed_tools.search_results`)
+ * — each provider client normalizes into this shared shape and emits via the
+ * `onCitations` callback on the streaming facade. The runtime stashes them on
+ * the `HistoryEntry` for the history detail page; lens parsers are not
+ * affected.
+ */
+export interface WebCitation {
+  /** Bare lowercase domain (no protocol, no path). Required — when missing
+   *  the provider extractor drops the entry rather than persisting `''`. */
+  domain: string;
+  /** Full URL when the provider supplied one. Anthropic and OpenAI do;
+   *  Gemini's `groundingChunks` sometimes use a vertex redirect URL — those
+   *  are kept as-is, not resolved client-side. */
+  url?: string;
+  /** Page title or result heading when the provider supplied one. */
+  title?: string;
+  /** Short blurb / search-result snippet when the provider supplied one. */
+  snippet?: string;
+}
+
+/**
  * One labeled context block the user prepared before a meeting, e.g. pasted
  * contract text or questions to ask. Persisted under `veritaslens.meetingPrep`.
  */
@@ -350,6 +374,14 @@ export interface HistoryEntry {
    * grounding work. Drives the trailing `°` glyph on the badge column.
    */
   groundingMode?: GroundingMode;
+  /**
+   * Structured citations returned by the active provider's native web-search
+   * tool, normalized via `WebCitation`. Optional for back-compat — rows
+   * persisted before the citation work and rows from `groundless` calls have
+   * the field absent. Rendered on the HUD's history-detail page as a third
+   * sub-page listing up to 5 domains.
+   */
+  webCitations?: WebCitation[];
 }
 
 /** Curated Gemini models we know accept inline audio input. Used as the

@@ -7,6 +7,7 @@ import type {
 } from '@/types';
 import { LANGUAGES } from '@/types';
 import { isRecord, parseJsonResponse, trimTo } from './_utils';
+import { normalizeWebDomain } from '@/llm/citations';
 
 export const MEETING_PREP_ID = 'meeting-prep';
 
@@ -351,36 +352,10 @@ function coerceSource(value: unknown, validLabels: Set<string>): string {
   return validLabels.has(trimmed) ? trimmed : '';
 }
 
-/**
- * Normalise a model-supplied `webSourceDomain` into a bare lowercase domain.
- * Defensive against a misbehaving model that emits a full URL, mixed case, a
- * trailing slash, or surrounding whitespace; returns '' for any
- * recognisably-invalid input (numeric, no dot, control chars, runaway length)
- * so the parser drops it rather than persisting garbage onto `sourceMeta`.
- *
- * Intentionally NOT a full RFC-3986 validator — the HUD renders this string,
- * it isn't used for navigation, so the only real risk is visual noise.
- */
-function normalizeWebDomain(value: unknown): string {
-  if (typeof value !== 'string') return '';
-  let s = value.trim();
-  if (!s) return '';
-  // Strip a leading protocol if the model slipped one in.
-  s = s.replace(/^[a-z]+:\/\//i, '');
-  // Drop any path / query / fragment — domain only.
-  const slash = s.indexOf('/');
-  if (slash >= 0) s = s.slice(0, slash);
-  const q = s.indexOf('?');
-  if (q >= 0) s = s.slice(0, q);
-  const h = s.indexOf('#');
-  if (h >= 0) s = s.slice(0, h);
-  s = s.toLowerCase();
-  if (s.length === 0 || s.length > MAX_SOURCE_META_CHARS) return '';
-  // Must contain a dot and at least one alphabetic TLD character — rules out
-  // raw IPs and obvious placeholder garbage like "example" without a TLD.
-  if (!/^[a-z0-9.-]+\.[a-z][a-z0-9-]*$/.test(s)) return '';
-  return s;
-}
+/** Re-export the shared normalizer so the curated test file (which imports
+ *  it from this module) keeps working without touching its imports. The
+ *  shared module is the single source of truth. */
+export { normalizeWebDomain };
 
 /**
  * Placeholder buildPrompt / parse used in the Persona record. Meeting Prep is

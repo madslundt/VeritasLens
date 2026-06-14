@@ -2,6 +2,25 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.16.3] — 2026-06-14
+
+### Added
+- **Native web search on OpenAI, Groq, and DeepSeek** — closing the three remaining `groundless` providers. OpenAI routes grounded calls through the new `/v1/responses` endpoint with the built-in `{type: 'web_search'}` tool (gpt-5*/gpt-4.1*/gpt-4o* only); Groq overrides to the Tavily-backed `groq/compound` family; DeepSeek borrows the wearer's existing Perplexity Search key to pre-fetch results before each chat call, mirroring the existing `sttHost` cross-host borrow pattern.
+- **Structured citations from every grounded provider** — `WebCitation` type (`{domain, url?, title?, snippet?}`) plus a new `onCitations` side-channel on `callLensStream`. Every provider client normalises its native citation shape (Gemini `groundingChunks`, Claude `web_search_tool_result`, OpenAI/OpenRouter `url_citation`, Perplexity `search_results`, Groq compound `executed_tools.search_results`) via the shared `citations.ts` helpers.
+- **Sources sub-page on the HUD history detail** — when an entry has citations, the wearer can scroll one more notch to see up to 5 deduplicated source domains.
+- New OpenAI Responses client (`openaiResponses.ts`) and Perplexity Search bolt-on (`perplexitySearch.ts`), both code-split via dynamic import so wearers who don't use those paths pay no bundle cost.
+
+### Changed
+- `resolveProviderGrounding` gains `useResponsesApi` and `prefetchSearch` fields plus a Groq compound model-override branch.
+- `HistoryEntry` gains an optional `webCitations?: WebCitation[]` field, populated by the lifecycle when the grounded provider returned anything.
+- `normalizeWebDomain` promoted from `personas/meetingPrep.ts` into the shared `llm/citations.ts` so every provider's extractor uses the same defensive normalisation.
+- Meeting Prep now backfills `claims[0].sourceMeta` from the first real provider citation when the model returned `source: "Web"` but omitted `webSourceDomain` — closes the silent-no-citation failure mode.
+- The Settings grounding-capability hint surfaces DeepSeek's borrow dependency explicitly, prompting the wearer to add a Perplexity key when one isn't on file.
+
+### Notes
+- **No new hosts in `app.json`** — Perplexity's `/search` endpoint reuses the existing `https://api.perplexity.ai` whitelist entry.
+- **Tests**: new `citations.test.ts` and `perplexitySearch.test.ts`; `grounding.test.ts` updated for the new resolver branches. 487 core tests passing, 187 even-g2 tests passing.
+
 ## [0.16.0] — 2026-06-12
 
 ### Added

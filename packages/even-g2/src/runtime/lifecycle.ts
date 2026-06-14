@@ -58,6 +58,7 @@ import type {
   Settings,
   Persona,
   PersonaId,
+  WebCitation,
 } from '@veritaslens/core';
 import {
   ACTIVE_HINT_DEFAULT,
@@ -1571,6 +1572,12 @@ async function runAnalysis(): Promise<void> {
       // so TypeScript treats it as opaque and doesn't narrow it to 'grounded'
       // through the await + callback path below.
       let groundingMode: GroundingMode = 'grounded';
+      // Structured citations emitted by the active provider's grounded path.
+      // Captured here, persisted on the history entry below — also used to
+      // backfill `claims[0].sourceMeta` when the model returned `Web` as the
+      // source but forgot the `webSourceDomain` field. Closes the "model
+      // said Web but didn't cite" failure mode the Gemini path had.
+      let webCitations: WebCitation[] | undefined;
       setLensGroundingMode('grounded');
       // Meeting Prep's schema is built dynamically from the user's prepared
       // sections — we can't preconfigure `streamHeading` on the persona record
@@ -1590,6 +1597,9 @@ async function runAnalysis(): Promise<void> {
           groundingMode = mode;
           setLensGroundingMode(mode);
         },
+        onCitations: (cites) => {
+          if (cites.length > 0) webCitations = cites;
+        },
         watchValueKeys: new Set<string>(['answer']),
         onPartialString: (name, partial) => {
           if (name !== 'answer') return;
@@ -1600,6 +1610,23 @@ async function runAnalysis(): Promise<void> {
       });
       clearLensStreamingHeading();
       const result = parseMeetingPrepResponse(rawText, sections, { webGrounding });
+      // Backfill the first claim's `sourceMeta` from the provider's
+      // structured citations when the model emitted `source: 'Web'` but
+      // omitted `webSourceDomain`. Only touches Meeting Prep results
+      // (`type === 'meeting-prep'`); other lens types don't carry a
+      // per-claim source meta field. Mutating `result.claims[0]` in place
+      // keeps the existing splitResultByClaim/persist path unchanged.
+      if (
+        webGrounding
+        && webCitations
+        && webCitations.length > 0
+        && result.type === 'meeting-prep'
+        && result.claims.length > 0
+        && result.claims[0].source === 'Web'
+        && !result.claims[0].sourceMeta
+      ) {
+        result.claims[0].sourceMeta = webCitations[0].domain;
+      }
       await stopSpinner();
       setStateResult(result);
       // Decorate the badge with a trailing `°` when grounding was requested
@@ -1629,6 +1656,7 @@ async function runAnalysis(): Promise<void> {
         result,
         tags: extractTags(result),
         ...(persistedGroundingMode ? { groundingMode: persistedGroundingMode } : {}),
+        ...(webCitations && webCitations.length > 0 ? { webCitations } : {}),
       }, (k, v) => getBridge().setLocalStorage(k, v));
       await reloadHistoryFromStorage();
       // Pass the full session context so multiple Meeting Prep questions in
@@ -1757,6 +1785,12 @@ async function runAnalysis(): Promise<void> {
     // from a grounded one. Reset to `'grounded'` here so the previous tap's
     // mode doesn't leak into a fresh analyze that uses a different provider.
     let groundingMode: 'grounded' | 'groundless' = 'grounded';
+    // Structured citations from the active provider's grounded path. Captured
+    // here, persisted on every per-claim history entry below so the HUD's
+    // sources sub-page works regardless of which slice the wearer is looking
+    // at. Only set when grounding was actually requested and the provider
+    // returned at least one usable citation.
+    let webCitations: WebCitation[] | undefined;
     setLensGroundingMode('grounded');
     if (speculativeRawText !== null) {
       rawText = speculativeRawText;
@@ -1827,6 +1861,9 @@ async function runAnalysis(): Promise<void> {
           // displaying frame and the history entry persisted seconds later.
           setLensGroundingMode(mode);
         },
+        onCitations: (cites) => {
+          if (cites.length > 0) webCitations = cites;
+        },
         watchValueKeys,
         onPartialString,
         onTranscript: captureTranscript,
@@ -1872,6 +1909,14 @@ async function runAnalysis(): Promise<void> {
     // straightforward — absence of the field means "irrelevant", not
     // "groundless".
     const persistedGroundingMode = analysisPersona.grounding ? groundingMode : undefined;
+    // Mirror citations onto every per-claim entry the split produces. A
+    // single grounded analysis may emit multiple history rows (one per
+    // claim) and the wearer expects every row to point at the same source
+    // pool — duplicating the small WebCitation list per row is cheaper than
+    // a join across rows at render time.
+    const persistedWebCitations = analysisPersona.grounding && webCitations && webCitations.length > 0
+      ? webCitations
+      : undefined;
     const freshIds = await pushHistoryEntries(
       splitResultByClaim(result).map((single, idx) => ({
         sessionId: currentSessionId,
@@ -1883,6 +1928,7 @@ async function runAnalysis(): Promise<void> {
         result: single,
         tags: extractTags(single),
         ...(persistedGroundingMode ? { groundingMode: persistedGroundingMode } : {}),
+        ...(persistedWebCitations ? { webCitations: persistedWebCitations } : {}),
       })),
       (k, v) => getBridge().setLocalStorage(k, v),
     );
