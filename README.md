@@ -122,54 +122,9 @@ The right-temple touchpad is the primary input. The host normalizes `CLICK_EVENT
 
 ## Architecture
 
-```d2
-direction: right
+![VeritasLens architecture](docs/architecture.svg)
 
-g2: "G2 glasses"
-rayban: "Ray-Ban Meta"
-
-even_app: "Even App (phone)" {
-  webview: "WebView bridge"
-  even_g2: "even-g2 SolidJS app"
-  webview -> even_g2
-}
-
-rn_app: "Expo / RN app (phone)" {
-  modules: "Custom Expo modules" {
-    audio: "expo-bluetooth-audio"
-    camera: "expo-meta-camera"
-  }
-  bridge_rn: "bridge-rn.ts" {
-    kv: "AsyncStorage (KV)"
-    secure: "expo-secure-store"
-  }
-}
-
-core: "@veritaslens/core" {
-  shape: hexagon
-  style.fill: "#f5f5f5"
-}
-
-providers: "LLM providers" {
-  grid-columns: 2
-  gemini: Gemini
-  claude: Claude
-  openai: OpenAI
-  groq: Groq
-  openrouter: OpenRouter
-  deepseek: DeepSeek
-  perplexity: Perplexity
-}
-
-g2 <-> even_app: "BLE 5.2" {style.stroke-dash: 3}
-rayban <-> rn_app.modules: "BLE audio + camera" {style.stroke-dash: 3}
-
-even_app.even_g2 -> core
-rn_app.bridge_rn -> core
-rn_app.modules -> core: "PCM frames"
-
-core -> providers: "fetch (streaming)"
-```
+> Source: [`docs/architecture.d2`](docs/architecture.d2) — regenerate with `d2 docs/architecture.d2 docs/architecture.svg`.
 
 ### `@veritaslens/core`
 
