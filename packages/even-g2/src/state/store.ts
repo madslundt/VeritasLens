@@ -35,6 +35,7 @@ import type {
   AppMode,
   AppPhase,
   BufferDuration,
+  CachedLocation,
   ClaudeModel,
   GameDifficulty,
   GameFormat,
@@ -107,6 +108,8 @@ const SETTINGS_KEY_AUTO_MODE_SILENCE_MS = 'veritaslens.autoModeSilenceMs';
 const SETTINGS_KEY_AUTO_MODE_INTERVAL_MS = 'veritaslens.autoModeIntervalMs';
 const SETTINGS_KEY_TRANSLATION_SOURCE_LANGS = 'veritaslens.translationSourceLanguages';
 const SETTINGS_KEY_TRANSLATION_MODE = 'veritaslens.translationMode';
+const SETTINGS_KEY_LOCATION_ENABLED = 'veritaslens.locationEnabled';
+const SETTINGS_KEY_CACHED_LOCATION = 'veritaslens.cachedLocation';
 /** Default RMS floor when neither the new nor legacy key is set. */
 const DEFAULT_VOICE_GATE_RMS_FLOOR = 200;
 /** Slider granularity exposed in the Settings UI. */
@@ -242,6 +245,11 @@ const [settings, setSettings] = createSignal<Settings>({
   // full UX (reply starters); the wearer can switch to listen-in from the
   // Settings → Translate section when they want passive eavesdropping.
   translationMode: 'converse',
+  // Location on by default per the app.json permission flow: declining the OS
+  // prompt makes the probe yield 'unavailable' anyway, so this toggle is only
+  // the kill-switch for wearers who later change their mind.
+  locationEnabled: true,
+  cachedLocation: null,
 });
 export { settings };
 
@@ -287,6 +295,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_TRANSLATION_MODE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_MODE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED_LEGACY),
+      safeGet(SETTINGS_KEY_LOCATION_ENABLED),
+      safeGet(SETTINGS_KEY_CACHED_LOCATION),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -320,6 +330,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawTranslationMode,
     rawTranscriptMode,
     rawTranscriptEnabledLegacy,
+    rawLocationEnabled,
+    rawCachedLocation,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -386,7 +398,42 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     ),
     translationSourceLanguages: coerceTranslationSourceLanguages(rawTranslationSourceLangs),
     translationMode: coerceTranslationMode(rawTranslationMode),
+    // Default to enabled when the key is unset (new install): the manifest-level
+    // OS prompt is the gate, so a silent fall-through to disabled would hide
+    // location context behind a Settings toggle the wearer didn't know existed.
+    locationEnabled: rawLocationEnabled === '' ? true : rawLocationEnabled !== 'false',
+    cachedLocation: coerceCachedLocation(rawCachedLocation),
   });
+}
+
+function coerceCachedLocation(raw: string): CachedLocation | null {
+  // Tolerant parse: a corrupt KV blob must never block boot. Returns null
+  // (= "no cache yet, the resolver will refresh") rather than throwing, and
+  // requires `resolvedAt` + `source` + lat/lon — anything missing those means
+  // the entry wouldn't be safe to inject and gets dropped.
+  if (!raw) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    const p = parsed as Record<string, unknown>;
+    if (typeof p.resolvedAt !== 'number' || !Number.isFinite(p.resolvedAt)) return null;
+    if (p.source !== 'navigator' && p.source !== 'callEvenApp') return null;
+    if (typeof p.latitude !== 'number' || !Number.isFinite(p.latitude)) return null;
+    if (typeof p.longitude !== 'number' || !Number.isFinite(p.longitude)) return null;
+    const out: CachedLocation = {
+      resolvedAt: p.resolvedAt,
+      source: p.source,
+      latitude: p.latitude,
+      longitude: p.longitude,
+    };
+    if (typeof p.accuracy === 'number' && Number.isFinite(p.accuracy)) out.accuracy = p.accuracy;
+    if (typeof p.city === 'string' && p.city.trim()) out.city = p.city.trim();
+    if (typeof p.country === 'string' && p.country.trim()) out.country = p.country.trim();
+    if (typeof p.countryCode === 'string' && p.countryCode.trim()) out.countryCode = p.countryCode.trim();
+    return out;
+  } catch {
+    return null;
+  }
 }
 
 function coerceTranslationMode(raw: string): 'converse' | 'listen-in' {
@@ -527,6 +574,32 @@ export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<
 
 export const saveCrossSessionRecallEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_CROSS_SESSION_RECALL, 'crossSessionRecallEnabled', enabled);
+
+export async function saveLocationEnabled(setLs: SetLs, enabled: boolean): Promise<boolean> {
+  const ok = await setLs(SETTINGS_KEY_LOCATION_ENABLED, enabled ? 'true' : 'false');
+  if (!ok) return false;
+  if (!enabled) {
+    // Toggling off also clears the cache immediately so a re-enable later
+    // triggers a fresh probe rather than restoring a stale entry. Best-effort
+    // — a failed clear writes the toggle but logs nothing; the next boot will
+    // notice the toggle and skip injection regardless.
+    await setLs(SETTINGS_KEY_CACHED_LOCATION, '');
+    setSettings({ ...settings(), locationEnabled: false, cachedLocation: null });
+  } else {
+    setSettings({ ...settings(), locationEnabled: true });
+  }
+  return true;
+}
+
+export async function saveCachedLocation(
+  setLs: SetLs,
+  location: CachedLocation | null,
+): Promise<boolean> {
+  const serialized = location ? JSON.stringify(location) : '';
+  const ok = await setLs(SETTINGS_KEY_CACHED_LOCATION, serialized);
+  if (ok) setSettings({ ...settings(), cachedLocation: location });
+  return ok;
+}
 
 export const saveTranscriptMode = (setLs: SetLs, mode: TranscriptMode): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_TRANSCRIPT_MODE, 'transcriptMode', mode);

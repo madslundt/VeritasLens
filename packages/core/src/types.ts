@@ -736,6 +736,46 @@ export interface Settings {
    * transcript + translation, no numbered starter block.
    */
   translationMode: 'converse' | 'listen-in';
+  /**
+   * When true, the runtime probes the device for an approximate location at
+   * boot and injects `Coords` / `Country` lines into every lens prompt so
+   * answers reflect the wearer's locale (currency, units, nearby places).
+   * Defaults to `true` — the manifest-level OS prompt is the real gate, and
+   * declining it makes the probe fall through to "unavailable" anyway. This
+   * toggle is the kill-switch for wearers who accepted the OS prompt but
+   * later change their mind. When `false`, no location lines are added to
+   * the context block and `cachedLocation` is cleared.
+   */
+  locationEnabled: boolean;
+  /**
+   * Last successful location probe result, persisted so the next launch has
+   * context immediately instead of waiting for `navigator.geolocation`. The
+   * resolver refreshes opportunistically; the cache survives boot crashes.
+   */
+  cachedLocation: CachedLocation | null;
+}
+
+export interface CachedLocation {
+  /** Epoch ms when this entry was written. */
+  resolvedAt: number;
+  /** Which probe branch resolved — useful for diagnostics in Settings. */
+  source: 'navigator' | 'callEvenApp';
+  /** Decimal degrees. */
+  latitude: number;
+  longitude: number;
+  /** Reported accuracy in metres; only present from `navigator`. */
+  accuracy?: number;
+  /**
+   * Reverse-geocoded labels via BigDataCloud's free `reverse-geocode-client`
+   * endpoint. Optional because the geocode call may fail (offline, host
+   * unreachable, BigDataCloud rate-limited); the cache still serves coords
+   * in that case, just without the readable labels.
+   */
+  city?: string;
+  /** Human-readable country name, e.g. "Denmark". */
+  country?: string;
+  /** ISO-3166 alpha-2 code, e.g. "DK". */
+  countryCode?: string;
 }
 
 /** Defaults for the auto-mode thresholds. Used as initial values and as

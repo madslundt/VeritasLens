@@ -2,7 +2,7 @@
   "package_id": "com.veritaslens.app",
   "edition": "202601",
   "name": "VeritasLens",
-  "version": "0.16.4",
+  "version": "0.16.5",
   "min_app_version": "2.0.0",
   "min_sdk_version": "0.0.10",
   "entrypoint": "index.html",
@@ -17,12 +17,17 @@
         "https://openrouter.ai",
         "https://api.deepseek.com",
         "https://api.perplexity.ai",
-        "https://api.anthropic.com"
+        "https://api.anthropic.com",
+        "https://api.bigdatacloud.net"
       ]
     },
     {
       "name": "g2-microphone",
       "desc": "VeritasLens listens to a rolling in-memory buffer of nearby audio (30 seconds to 5 minutes, configurable). Audio is never written to disk and is dropped immediately after each analysis."
+    },
+    {
+      "name": "location",
+      "desc": "Sends your coordinates to BigDataCloud (~once per 30 min) to look up your city and country, and includes coords, city, and country in each lens prompt so answers reflect where you are. Coords stay in live calls — never written to History or transcripts. Toggle off in Settings."
     }
   ],
   "supported_languages": [

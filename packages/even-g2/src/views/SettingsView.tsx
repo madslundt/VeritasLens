@@ -17,6 +17,7 @@ import {
   newSectionId,
   saveAutoSummaryEnabled,
   saveCrossSessionRecallEnabled,
+  saveLocationEnabled,
   saveGamePresets,
   saveAutoModeEnabled,
   saveAutoModeStartMs,
@@ -62,6 +63,7 @@ import {
 } from '@/state/store';
 import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
+import { probeAndCacheLocation } from '@/runtime/location';
 import {
   resolveProviderGrounding,
   fetchAvailableModels,
@@ -434,6 +436,7 @@ export const SettingsView: Component = () => {
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftCrossSessionRecall, setDraftCrossSessionRecall] = createSignal(settings().crossSessionRecallEnabled);
+  const [draftLocationEnabled, setDraftLocationEnabled] = createSignal(settings().locationEnabled);
   const [draftTranscriptMode, setDraftTranscriptMode] = createSignal<TranscriptMode>(settings().transcriptMode);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
@@ -1031,6 +1034,7 @@ export const SettingsView: Component = () => {
         buffer,
         autoSummary,
         crossSessionRecall,
+        locationEnabled,
         discreet,
         voiceGate,
         voiceTrim,
@@ -1065,6 +1069,7 @@ export const SettingsView: Component = () => {
         saveBufferDuration(setLs, draftBuffer()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
         saveCrossSessionRecallEnabled(setLs, draftCrossSessionRecall()),
+        saveLocationEnabled(setLs, draftLocationEnabled()),
         saveDiscreet(setLs, draftDiscreet()),
         saveVoiceGateRmsFloor(setLs, draftVoiceGate()),
         saveVoiceTrimEnabled(setLs, draftVoiceTrim()),
@@ -1084,7 +1089,7 @@ export const SettingsView: Component = () => {
       const allOk = [
         provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
-        language, buffer, autoSummary, crossSessionRecall, discreet, voiceGate, voiceTrim,
+        language, buffer, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim,
         autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
         translationSourceLangs, transcriptMode, prepWebGrounding,
       ].every(Boolean) && prepResult.ok;
@@ -1113,6 +1118,15 @@ export const SettingsView: Component = () => {
         setSaveState('saved');
         if (savedFadeTimer) clearTimeout(savedFadeTimer);
         savedFadeTimer = setTimeout(() => setSaveState('idle'), 1500);
+        // Re-probe whenever location is on after a save. The probe is a
+        // no-op when already cached recently — `navigator.geolocation`'s
+        // `maximumAge` returns the same fix without burning the GPS — so the
+        // common case (toggle untouched) costs nothing. The case that matters:
+        // toggle just flipped off→on, and the wearer expects to see their
+        // resolved location appear below the toggle without a reload.
+        if (draftLocationEnabled()) {
+          void probeAndCacheLocation(setLs);
+        }
         if (!isHudRunning()) await startHudRuntime();
         else await refreshHudPage();
       } else {
@@ -1164,6 +1178,7 @@ export const SettingsView: Component = () => {
       || draftBuffer() !== s.bufferDuration
       || draftAutoEnabled() !== s.autoSummaryEnabled
       || draftCrossSessionRecall() !== s.crossSessionRecallEnabled
+      || draftLocationEnabled() !== s.locationEnabled
       || draftTranscriptMode() !== s.transcriptMode
       || draftDiscreet() !== s.discreet
       || draftVoiceGate() !== s.voiceGateRmsFloor
@@ -2641,6 +2656,42 @@ export const SettingsView: Component = () => {
                     ⚠ Gemini/OpenRouter: 1 Whisper call per analysis (~$0.0001 / 10 s). Needs STT key.
                   </span>
                 </Show>
+              </Show>
+            </div>
+
+            <div class="field">
+              <span class="field-label">Location</span>
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftLocationEnabled()}
+                  onChange={(e) => setDraftLocationEnabled(e.currentTarget.checked)}
+                />
+                <span>Send my location to the lens</span>
+              </label>
+              <span class="field-hint">
+                Adds your coordinates (and country, when available) to every prompt so answers
+                reflect local currency, units, nearby places, and "here" / "this country".
+                Coordinates are sent only with live analysis calls — they are not written to
+                History or the live transcript.
+              </span>
+              <Show when={draftLocationEnabled()}>
+                {(() => {
+                  const loc = settings().cachedLocation;
+                  if (!loc) return null;
+                  const accuracy = loc.accuracy !== undefined
+                    ? ` (±${Math.round(loc.accuracy)} m)`
+                    : '';
+                  const place = [loc.city, loc.country].filter(Boolean).join(', ');
+                  return (
+                    <span class="field-hint">
+                      Resolved via <code>{loc.source}</code>:
+                      {' '}
+                      {place ? <>{place} · </> : null}
+                      {loc.latitude.toFixed(4)}, {loc.longitude.toFixed(4)}{accuracy}
+                    </span>
+                  );
+                })()}
               </Show>
             </div>
 

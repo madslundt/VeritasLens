@@ -1,6 +1,6 @@
 {
   "name": "@veritaslens/even-g2",
-  "version": "0.16.4",
+  "version": "0.16.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,15 +17,15 @@
   "dependencies": {
     "@veritaslens/core": "*",
     "@evenrealities/even_hub_sdk": "^0.0.10",
-    "solid-js": "^1.9.3"
+    "solid-js": "^1.9.13"
   },
   "devDependencies": {
     "@evenrealities/evenhub-cli": "^0.1.13",
     "@evenrealities/evenhub-simulator": "^0.7.3",
     "@evenrealities/pretext": "^0.1.4",
     "typescript": "^5.9.3",
-    "vite": "^8.0.14",
+    "vite": "^8.0.16",
     "vite-plugin-solid": "^2.11.12",
-    "vitest": "^4.1.7"
+    "vitest": "^4.1.9"
   }
 }

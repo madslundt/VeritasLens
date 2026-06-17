@@ -4,6 +4,7 @@ import { App } from './App';
 import { initBridge } from './runtime/bridge';
 import { attachBootstrapTeardown } from './runtime/bootstrap';
 import { startHudRuntime } from './runtime/lifecycle';
+import { probeAndCacheLocation } from './runtime/location';
 import {
   loadGamePresets,
   loadHistory,
@@ -72,6 +73,13 @@ async function bootstrap(): Promise<void> {
     // — past submissions were rejected for unsolicited 4xx responses from a
     // stale persisted key.
     setAvailableModels([settings().geminiModel]);
+
+    // Fire-and-forget: the probe runs `navigator.geolocation` (may take up to
+    // 5 s on a cold WebView) and falls back through `callEvenApp` → user
+    // profile. We never block boot on it — a slow GPS would freeze the picker.
+    // If it lands after the wearer has already triggered an analysis, the next
+    // tap picks up the fresh cache via `buildContextBlock`.
+    void probeAndCacheLocation((k, v) => bridge.setLocalStorage(k, v));
 
     setAppPhase('idle');
 

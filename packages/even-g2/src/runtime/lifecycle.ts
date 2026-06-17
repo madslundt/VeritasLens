@@ -1,5 +1,6 @@
 // src/runtime/lifecycle.ts
 import { getBridge } from './bridge';
+import { isLocationFresh, kickOffLocationRefresh } from './location';
 import {
   PcmRingBuffer,
   encodePcmToWav,
@@ -1323,15 +1324,48 @@ function buildContextBlock(personaName: string): string {
   const count = sessionHistory().length;
   const mins = Math.floor((Date.now() - sessionStartTime) / 60_000);
 
-  return [
+  const parts: string[] = [
     '# CONTEXT',
     `Date: ${date}`,
     `Time: ${time} (local)`,
     `Audio: ${audioSecs}s buffered`,
     `Session: ${mins}m active, ${count} ${count === 1 ? 'analysis' : 'analyses'}, ${personaName} lens`,
-    '',
-    'When the audio uses relative time references ("today", "tomorrow", "yesterday", "in N days", "until X", "how long until Y", "how long ago was Z"), resolve them against the Date and Time fields above as ground truth. If the audio asks a question whose answer requires calendar or clock arithmetic from "now", compute it and give a direct answer rather than skipping the question.',
-  ].join('\n');
+  ];
+
+  const s = settings();
+  // Fire-and-forget refresh on every prompt so the next analysis picks up a
+  // movement. Deduped to ~10 s in the helper, so back-to-back classifier +
+  // analysis calls share one probe. Wrapped in try/catch because very early
+  // in boot the bridge may not be ready yet — never let a missing bridge
+  // break prompt assembly.
+  try {
+    const bridge = getBridge();
+    kickOffLocationRefresh((k, v) => bridge.setLocalStorage(k, v));
+  } catch {
+    /* bridge not ready yet */
+  }
+  // Stale fixes are dropped from the prompt — better no location than a
+  // location the wearer left hours ago.
+  const loc = s.locationEnabled && isLocationFresh(s.cachedLocation) ? s.cachedLocation : null;
+  if (loc) {
+    const accuracy = loc.accuracy !== undefined && Number.isFinite(loc.accuracy)
+      ? ` (±${Math.round(loc.accuracy)} m)`
+      : '';
+    parts.push(`Coords: ${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)}${accuracy}`);
+    if (loc.city) parts.push(`City: ${loc.city}`);
+    if (loc.country) {
+      parts.push(loc.countryCode ? `Country: ${loc.country} (${loc.countryCode})` : `Country: ${loc.country}`);
+    }
+  }
+
+  parts.push('');
+  parts.push('When the audio uses relative time references ("today", "tomorrow", "yesterday", "in N days", "until X", "how long until Y", "how long ago was Z"), resolve them against the Date and Time fields above as ground truth. If the audio asks a question whose answer requires calendar or clock arithmetic from "now", compute it and give a direct answer rather than skipping the question.');
+  if (loc) {
+    parts.push('');
+    parts.push('When the audio references local prices, currency, distance units, language register, nearby places, "here", or "this country", resolve them against the City / Country / Coords fields above as ground truth. Use Coords for fine-grained "nearest X" reasoning; treat the accuracy radius as the uncertainty.');
+  }
+
+  return parts.join('\n');
 }
 
 /**
