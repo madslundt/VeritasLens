@@ -15,6 +15,7 @@ import { createSignal } from 'solid-js';
 import {
   callGame,
   RANDOM_GAME_PRESET_ID,
+  RANDOM_LOCATION_GAME_PRESET_ID,
   GAME_RESPONSE_SCHEMA,
   buildGameResult,
   buildGamePrompt,
@@ -25,6 +26,7 @@ import {
   extractRecentRandomTopics,
 } from '@veritaslens/core';
 import type {
+  CachedLocation,
   GameFormat,
   GamePreset,
   GameSession,
@@ -92,6 +94,31 @@ export function materializeRandomPreset(): GamePreset {
     id: RANDOM_GAME_PRESET_ID,
     format: fmt,
     topic: '',
+    difficulty: 'medium',
+    saveToHistory: true,
+  };
+}
+
+/**
+ * Materialize a concrete `GamePreset` for the "Random — near me" entry. Same
+ * format/difficulty shape as the generic Random roll, but the topic is locked
+ * to the wearer's current locale (city, country, or — as a last resort — the
+ * raw coordinates) so the LLM generates questions about local history,
+ * landmarks, food, geography, or famous people instead of an unrelated topic.
+ *
+ * Caller responsibility: only invoke when a fresh `CachedLocation` exists
+ * (`settings().locationEnabled && cachedLocation && isLocationFresh(...)`).
+ * The picker click handler in `lifecycle.ts` enforces this and surfaces a
+ * friendly error message when the precondition fails.
+ */
+export function materializeRandomLocationPreset(location: CachedLocation): GamePreset {
+  const fmt = FORMATS[Math.floor(Math.random() * FORMATS.length)]!;
+  const place = [location.city, location.country].filter(Boolean).join(', ');
+  const anchor = place || `near ${location.latitude.toFixed(2)}, ${location.longitude.toFixed(2)}`;
+  return {
+    id: RANDOM_LOCATION_GAME_PRESET_ID,
+    format: fmt,
+    topic: `Local trivia about ${anchor}`,
     difficulty: 'medium',
     saveToHistory: true,
   };

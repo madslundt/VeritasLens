@@ -1,6 +1,6 @@
 // src/runtime/lifecycle.ts
 import { getBridge } from './bridge';
-import { isLocationFresh, kickOffLocationRefresh } from './location';
+import { isLocationFresh, kickOffLocationRefresh, probeAndCacheLocation } from './location';
 import {
   PcmRingBuffer,
   encodePcmToWav,
@@ -98,6 +98,7 @@ import {
   showHistoryDetailPage,
   showHistoryListPage,
   getHistoryListEntries,
+  showGamesPickerPage,
   showMenuPage,
   showMidSummaryPage,
   showPickerPage,
@@ -122,6 +123,7 @@ import {
   saveCurrentRandomAsPreset,
   getLastGameOptionIndex,
   materializeRandomPreset,
+  materializeRandomLocationPreset,
   openGamesPicker,
   selectAnswer as gameSelectAnswer,
   setLastGameOptionIndex,
@@ -132,6 +134,7 @@ import {
 import {
   activePersona,
   appPhase,
+  gamePresets,
   loadHistory,
   meetingPrepIsConfigured,
   meetingPrepSections,
@@ -150,7 +153,7 @@ import {
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import { createEffect, createRoot, on } from 'solid-js';
+import { createEffect, createMemo, createRoot, on } from 'solid-js';
 
 /**
  * Pick the Gemini Auto-classifier model from the current settings, or
@@ -606,6 +609,38 @@ async function handleGamesPickerEvent(g: Gesture): Promise<void> {
     }
     if (entry.kind === 'random') {
       await startGame(materializeRandomPreset());
+      return;
+    }
+    if (entry.kind === 'random-location') {
+      const s = settings();
+      if (!s.locationEnabled) {
+        await showGamesPickerPage(gamePresets(), {
+          errorMessage: 'Location is disabled — turn it on in phone Settings',
+        });
+        return;
+      }
+      // Probe at tap time, not before. The picker hint becomes the loading
+      // surface — `showGameLoadingPage` doesn't render until the probe lands
+      // (so there's no flash of a wrong-topic loading frame). Worst case the
+      // wearer stares at "Locating…" for ~5 s (the navigator timeout); if
+      // the probe gets cached coords from the OS it returns in < 100 ms.
+      await showGamesPickerPage(gamePresets(), { errorMessage: 'Locating…' });
+      const beforeResolvedAt = s.cachedLocation?.resolvedAt ?? 0;
+      const loc = await probeAndCacheLocation(
+        (k, v) => getBridge().setLocalStorage(k, v),
+      );
+      // probeAndCacheLocation returns the existing cache on failure, so we
+      // detect "no fresh fix this time" by comparing resolvedAt rather than
+      // the null-vs-cached identity. A stale cache from earlier in the
+      // session would still be returned but we want this game to reflect
+      // where the wearer is *now*.
+      if (!loc || loc.resolvedAt <= beforeResolvedAt) {
+        await showGamesPickerPage(gamePresets(), {
+          errorMessage: 'Could not get your location — try again',
+        });
+        return;
+      }
+      await startGame(materializeRandomLocationPreset(loc));
       return;
     }
     await startGame(entry.preset);
@@ -1362,7 +1397,7 @@ function buildContextBlock(personaName: string): string {
   parts.push('When the audio uses relative time references ("today", "tomorrow", "yesterday", "in N days", "until X", "how long until Y", "how long ago was Z"), resolve them against the Date and Time fields above as ground truth. If the audio asks a question whose answer requires calendar or clock arithmetic from "now", compute it and give a direct answer rather than skipping the question.');
   if (loc) {
     parts.push('');
-    parts.push('When the audio references local prices, currency, distance units, language register, nearby places, "here", or "this country", resolve them against the City / Country / Coords fields above as ground truth. Use Coords for fine-grained "nearest X" reasoning; treat the accuracy radius as the uncertainty.');
+    parts.push('When the audio references local prices, currency, distance units, language register, nearby places, "here", or "this country", silently resolve them against the City / Country / Coords fields above. NEVER quote, read out, or repeat the raw Coords (latitude / longitude numbers) back to the wearer — they are context for you to reason from, not content to surface. Refer to the wearer\'s location by City or Country name only. If the question asks for a specific nearby place ("nearest McDonald\'s", "where is the closest pharmacy") and you do not actually know one, say so plainly instead of inventing or echoing the coords.');
   }
 
   return parts.join('\n');
@@ -2342,7 +2377,17 @@ function startSettingsWatcher(): void {
     // identity into a single tracked key. Unrelated fields (responseLanguage,
     // discreet, autoSummaryEnabled) are intentionally omitted so toggling
     // them mid-session does NOT stop recording.
-    const criticalKey = (): string => {
+    //
+    // Memoized so the effect below fires only when the joined string actually
+    // changes — Solid's `on(accessor, ...)` re-runs on every invalidation of
+    // the tracked signal, not on value change. Before this was a memo, any
+    // `setSettings({...settings(), unrelatedField: x})` (e.g. the location
+    // cache write from `saveCachedLocation`) would trigger a fresh `settings`
+    // reference, the effect would re-run, and `leaveActiveSession()` would
+    // tear the session down even though no credential / model / buffer field
+    // had actually changed. The Auto lens revealed this because its longer
+    // classifier + analysis runtime gave the GPS probe time to land mid-flow.
+    const criticalKey = createMemo((): string => {
       const s = settings();
       return [
         s.provider,
@@ -2354,7 +2399,7 @@ function startSettingsWatcher(): void {
         s.openaiModel,
         s.bufferDuration,
       ].join('|');
-    };
+    });
     let initial = true;
     createEffect(on(criticalKey, () => {
       // `on()` fires once on registration with the initial value — skip it so

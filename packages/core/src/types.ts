@@ -286,6 +286,13 @@ export interface GameSession {
 export const RANDOM_GAME_PRESET_ID = '__random__';
 
 /**
+ * Sentinel preset id used by the runtime "Random — near me" entry. Like the
+ * generic Random preset but anchors the topic to the wearer's current city /
+ * country / region so the questions reflect where they are. Never persisted.
+ */
+export const RANDOM_LOCATION_GAME_PRESET_ID = '__random_location__';
+
+/**
  * Provider-agnostic intent for a lens that wants its facts grounded in fresh
  * web results. `src/llm/tools.ts` translates this into the appropriate
  * provider-native shape (Gemini google_search tool, Claude web_search_20250305

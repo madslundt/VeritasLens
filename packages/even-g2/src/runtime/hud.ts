@@ -2044,11 +2044,13 @@ function buildHistoryDetailPage(_entry: HistoryEntry, page: PageRef): RebuildPag
 
 /** Sentinel value indicating the games-picker `← Back` row. */
 const GAMES_PICKER_BACK_KIND = 'back' as const;
+const GAMES_PICKER_RANDOM_LOCATION_KIND = 'random-location' as const;
 /** Sentinel value indicating the runtime-only Random preset row. */
 const GAMES_PICKER_RANDOM_KIND = 'random' as const;
 export type GamesPickerEntry =
   | { kind: typeof GAMES_PICKER_BACK_KIND }
   | { kind: typeof GAMES_PICKER_RANDOM_KIND }
+  | { kind: typeof GAMES_PICKER_RANDOM_LOCATION_KIND }
   | { kind: 'preset'; preset: GamePreset };
 
 let cachedGamesEntries: GamesPickerEntry[] = [];
@@ -2071,6 +2073,7 @@ export async function showGamesPickerPage(
   cachedGamesEntries = [
     { kind: GAMES_PICKER_BACK_KIND },
     { kind: GAMES_PICKER_RANDOM_KIND },
+    { kind: GAMES_PICKER_RANDOM_LOCATION_KIND },
     ...presets.map((p) => ({ kind: 'preset' as const, preset: p })),
   ];
   const ok = await getBridge().rebuildPageContainer(buildGamesPickerPage(presets, opts));
@@ -2082,6 +2085,7 @@ function buildGamesPickerPage(presets: GamePreset[], opts: ShowGamesPickerOpts):
   const itemNames = [
     '← Back',
     'Random — surprise me',
+    'Near me — about where I am',
     ...presets.map((p) => clip(`${p.topic} · ${gameFormatLabel(p.format)}`, 60)),
   ];
   const title = new TextContainerProperty({

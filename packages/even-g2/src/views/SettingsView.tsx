@@ -64,7 +64,6 @@ import {
 import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import { probeAndCacheLocation, probeLocation } from '@/runtime/location';
-import { debugEvents } from '@/state/store';
 import {
   resolveProviderGrounding,
   fetchAvailableModels,
@@ -2724,20 +2723,9 @@ export const SettingsView: Component = () => {
                     </span>
                   )}
                 </Show>
-                <Show when={debugEvents().some((e) => e.label.startsWith('location'))}>
-                  <span class="field-hint">Recent location events:</span>
-                  <ol class="field-hint" style={{ margin: 0, 'padding-left': '1.2rem' }}>
-                    <For each={debugEvents().filter((e) => e.label.startsWith('location')).slice(0, 6)}>
-                      {(e) => (
-                        <li>
-                          <code>{e.label}</code>: {e.detail}
-                        </li>
-                      )}
-                    </For>
-                  </ol>
-                </Show>
               </div>
             </div>
+
 
             <div
               class="lens-row lens-row--expandable lens-row--open"
