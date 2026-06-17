@@ -1,6 +1,11 @@
 import type { CachedLocation } from '@veritaslens/core';
 import { getBridge } from '@/runtime/bridge';
-import { saveCachedLocation, settings } from '@/state/store';
+import { pushDebugEvent, saveCachedLocation, settings } from '@/state/store';
+
+function locationLog(label: string, detail: string): void {
+  pushDebugEvent({ label, detail });
+  if (import.meta.env.DEV) console.info(`[veritaslens ${label}]`, detail);
+}
 
 export type LocationProbe =
   | { kind: 'coords'; latitude: number; longitude: number; accuracy?: number; source: 'navigator' | 'callEvenApp' }
@@ -45,11 +50,18 @@ const ACCURACY_MAX_METERS = 2_000;
 
 export async function probeLocation(): Promise<LocationProbe> {
   const navResult = await tryNavigatorGeolocation();
-  if (navResult) return navResult;
+  if (navResult && navResult.kind === 'coords') {
+    locationLog('location-probe', `navigator ok ${navResult.latitude.toFixed(4)},${navResult.longitude.toFixed(4)} ±${navResult.accuracy ?? '?'}m`);
+    return navResult;
+  }
 
   const hostResult = await tryHostGeolocation();
-  if (hostResult) return hostResult;
+  if (hostResult && hostResult.kind === 'coords') {
+    locationLog('location-probe', `callEvenApp ok ${hostResult.latitude.toFixed(4)},${hostResult.longitude.toFixed(4)}`);
+    return hostResult;
+  }
 
+  locationLog('location-probe', 'unavailable — no branch resolved');
   // Profile country (`bridge.getUserInfo().country`) is intentionally NOT a
   // fallback: it's the wearer's *account* country, which can be Denmark for a
   // wearer currently in Spain. Injecting `Country: DK` would mislead the LLM
@@ -58,7 +70,10 @@ export async function probeLocation(): Promise<LocationProbe> {
 }
 
 function tryNavigatorGeolocation(): Promise<LocationProbe | null> {
-  if (typeof navigator === 'undefined' || !navigator.geolocation) return Promise.resolve(null);
+  if (typeof navigator === 'undefined' || !navigator.geolocation) {
+    locationLog('location-nav', 'navigator.geolocation absent');
+    return Promise.resolve(null);
+  }
   return new Promise((resolve) => {
     let settled = false;
     const finish = (value: LocationProbe | null) => {
@@ -77,6 +92,7 @@ function tryNavigatorGeolocation(): Promise<LocationProbe | null> {
             && Number.isFinite(pos.coords.accuracy)
             && pos.coords.accuracy > ACCURACY_MAX_METERS
           ) {
+            locationLog('location-nav', `dropped, accuracy ${Math.round(pos.coords.accuracy)} m > ${ACCURACY_MAX_METERS} m`);
             finish(null);
             return;
           }
@@ -88,14 +104,18 @@ function tryNavigatorGeolocation(): Promise<LocationProbe | null> {
             source: 'navigator',
           });
         },
-        () => finish(null),
+        (err) => {
+          locationLog('location-nav', `error code ${err.code}: ${err.message || '?'}`);
+          finish(null);
+        },
         {
           enableHighAccuracy: false,
           timeout: NAVIGATOR_TIMEOUT_MS,
           maximumAge: NAVIGATOR_MAX_AGE_MS,
         }
       );
-    } catch {
+    } catch (err) {
+      locationLog('location-nav', `threw: ${err instanceof Error ? err.message : String(err)}`);
       finish(null);
     }
   });
@@ -106,23 +126,29 @@ async function tryHostGeolocation(): Promise<LocationProbe | null> {
   try {
     bridge = getBridge();
   } catch {
+    locationLog('location-host', 'bridge not ready');
     return null;
   }
   try {
     const raw = await bridge.callEvenApp('getLocation');
     const coords = coerceCoords(raw);
-    if (coords) {
-      // Apply the same accuracy cliff as the navigator path when the host
-      // reports accuracy. Hosts that omit accuracy are trusted as-is — we
-      // can't filter what we can't measure, and the host knows its sensor.
-      if (
-        coords.accuracy !== undefined
-        && coords.accuracy > ACCURACY_MAX_METERS
-      ) return null;
-      return { ...coords, source: 'callEvenApp' };
+    if (!coords) {
+      locationLog('location-host', `raw returned but uncoerced: ${typeof raw === 'object' ? JSON.stringify(raw).slice(0, 80) : String(raw)}`);
+      return null;
     }
-  } catch {
-    /* host does not expose this method — fall through */
+    // Apply the same accuracy cliff as the navigator path when the host
+    // reports accuracy. Hosts that omit accuracy are trusted as-is — we
+    // can't filter what we can't measure, and the host knows its sensor.
+    if (
+      coords.accuracy !== undefined
+      && coords.accuracy > ACCURACY_MAX_METERS
+    ) {
+      locationLog('location-host', `dropped, accuracy ${Math.round(coords.accuracy)} m > ${ACCURACY_MAX_METERS} m`);
+      return null;
+    }
+    return { ...coords, source: 'callEvenApp' };
+  } catch (err) {
+    locationLog('location-host', `callEvenApp threw: ${err instanceof Error ? err.message : String(err)}`);
   }
   return null;
 }
@@ -194,9 +220,13 @@ export function kickOffLocationRefresh(
   setLs: (k: string, v: string) => Promise<boolean>,
   now = Date.now(),
 ): void {
-  if (!settings().locationEnabled) return;
+  if (!settings().locationEnabled) {
+    locationLog('location-refresh', 'skipped: disabled');
+    return;
+  }
   if (now - lastRefreshFiredAt < REFRESH_DEDUP_MS) return;
   lastRefreshFiredAt = now;
+  locationLog('location-refresh', 'firing probe');
   void probeAndCacheLocation(setLs);
 }
 
@@ -248,7 +278,10 @@ async function reverseGeocode(
     } finally {
       clearTimeout(timer);
     }
-    if (!res.ok) return null;
+    if (!res.ok) {
+      locationLog('location-geocode', `HTTP ${res.status}`);
+      return null;
+    }
     const data = (await res.json()) as Record<string, unknown>;
     // BigDataCloud's `city` is the principal city; `locality` is the
     // neighbourhood. Prefer city; fall back to locality for very small
@@ -256,9 +289,14 @@ async function reverseGeocode(
     const city = pickString(data.city) ?? pickString(data.locality) ?? undefined;
     const country = pickString(data.countryName) ?? undefined;
     const countryCode = pickString(data.countryCode) ?? undefined;
-    if (!city && !country && !countryCode) return null;
+    if (!city && !country && !countryCode) {
+      locationLog('location-geocode', 'empty labels');
+      return null;
+    }
+    locationLog('location-geocode', `${city ?? '?'}, ${country ?? '?'} (${countryCode ?? '?'})`);
     return { city, country, countryCode };
-  } catch {
+  } catch (err) {
+    locationLog('location-geocode', `threw: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
 }

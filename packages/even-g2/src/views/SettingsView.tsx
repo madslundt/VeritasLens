@@ -63,7 +63,8 @@ import {
 } from '@/state/store';
 import { getBridge } from '@/runtime/bridge';
 import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
-import { probeAndCacheLocation } from '@/runtime/location';
+import { probeAndCacheLocation, probeLocation } from '@/runtime/location';
+import { debugEvents } from '@/state/store';
 import {
   resolveProviderGrounding,
   fetchAvailableModels,
@@ -437,6 +438,21 @@ export const SettingsView: Component = () => {
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftCrossSessionRecall, setDraftCrossSessionRecall] = createSignal(settings().crossSessionRecallEnabled);
   const [draftLocationEnabled, setDraftLocationEnabled] = createSignal(settings().locationEnabled);
+  const [locationTestState, setLocationTestState] = createSignal<{ ts: number; text: string } | null>(null);
+  const runLocationTest = async (): Promise<void> => {
+    setLocationTestState({ ts: Date.now(), text: 'probing…' });
+    try {
+      const probe = await probeLocation();
+      if (probe.kind === 'coords') {
+        const acc = probe.accuracy !== undefined ? ` ±${Math.round(probe.accuracy)} m` : '';
+        setLocationTestState({ ts: Date.now(), text: `OK ${probe.source}: ${probe.latitude.toFixed(4)}, ${probe.longitude.toFixed(4)}${acc}` });
+      } else {
+        setLocationTestState({ ts: Date.now(), text: `unavailable — ${probe.reason}` });
+      }
+    } catch (err) {
+      setLocationTestState({ ts: Date.now(), text: `threw: ${err instanceof Error ? err.message : String(err)}` });
+    }
+  };
   const [draftTranscriptMode, setDraftTranscriptMode] = createSignal<TranscriptMode>(settings().transcriptMode);
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
@@ -2675,6 +2691,10 @@ export const SettingsView: Component = () => {
                 Coordinates are sent only with live analysis calls — they are not written to
                 History or the live transcript.
               </span>
+              <span class="field-hint warning">
+                ⚠ Currently may not work inside the EvenHub app on phone. Use the Test button below
+                to check.
+              </span>
               <Show when={draftLocationEnabled()}>
                 {(() => {
                   const loc = settings().cachedLocation;
@@ -2693,6 +2713,30 @@ export const SettingsView: Component = () => {
                   );
                 })()}
               </Show>
+              <div style={{ 'margin-top': '0.5rem', display: 'flex', 'flex-direction': 'column', gap: '0.35rem' }}>
+                <button type="button" onClick={() => { void runLocationTest(); }} style={{ 'align-self': 'flex-start' }}>
+                  Test location now
+                </button>
+                <Show when={locationTestState()}>
+                  {(state) => (
+                    <span class="field-hint">
+                      <code>{state().text}</code>
+                    </span>
+                  )}
+                </Show>
+                <Show when={debugEvents().some((e) => e.label.startsWith('location'))}>
+                  <span class="field-hint">Recent location events:</span>
+                  <ol class="field-hint" style={{ margin: 0, 'padding-left': '1.2rem' }}>
+                    <For each={debugEvents().filter((e) => e.label.startsWith('location')).slice(0, 6)}>
+                      {(e) => (
+                        <li>
+                          <code>{e.label}</code>: {e.detail}
+                        </li>
+                      )}
+                    </For>
+                  </ol>
+                </Show>
+              </div>
             </div>
 
             <div

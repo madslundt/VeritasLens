@@ -245,10 +245,14 @@ const [settings, setSettings] = createSignal<Settings>({
   // full UX (reply starters); the wearer can switch to listen-in from the
   // Settings → Translate section when they want passive eavesdropping.
   translationMode: 'converse',
-  // Location on by default per the app.json permission flow: declining the OS
-  // prompt makes the probe yield 'unavailable' anyway, so this toggle is only
-  // the kill-switch for wearers who later change their mind.
-  locationEnabled: true,
+  // Off by default: the EvenHub WebView blocks `navigator.geolocation` on
+  // both phone platforms today. Android: host doesn't implement
+  // `onGeolocationPermissionsShowPrompt` (EvenDemoApp issue #50). iOS:
+  // WKWebView doesn't support the Geolocation API natively and the host
+  // doesn't inject a CLLocationManager bridge. Desktop browsers work.
+  // Wearers opt in once a host update lands; the diagnostic UI under the
+  // toggle makes the "still blocked" state legible.
+  locationEnabled: false,
   cachedLocation: null,
 });
 export { settings };
@@ -398,10 +402,11 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     ),
     translationSourceLanguages: coerceTranslationSourceLanguages(rawTranslationSourceLangs),
     translationMode: coerceTranslationMode(rawTranslationMode),
-    // Default to enabled when the key is unset (new install): the manifest-level
-    // OS prompt is the gate, so a silent fall-through to disabled would hide
-    // location context behind a Settings toggle the wearer didn't know existed.
-    locationEnabled: rawLocationEnabled === '' ? true : rawLocationEnabled !== 'false',
+    // Default to OFF when the key is unset (new install): the EvenHub Android
+    // host doesn't yet pass geolocation permission through to the WebView
+    // (EvenDemoApp issue #50), so the probe would silently fail. Wearers can
+    // opt in once the host fix ships; on iOS / desktop browser it works today.
+    locationEnabled: rawLocationEnabled === 'true',
     cachedLocation: coerceCachedLocation(rawCachedLocation),
   });
 }

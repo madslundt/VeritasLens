@@ -257,8 +257,10 @@ describe('cachedLocation coercion', () => {
     const { store } = await importLocationModule();
     await store.loadSettings(ls.get);
     expect(store.settings().cachedLocation).toBeNull();
-    // The toggle default must still be honoured even when the cache is corrupt.
-    expect(store.settings().locationEnabled).toBe(true);
+    // Default-off on new install: the EvenHub Android host doesn't pass
+    // geolocation through to the WebView (EvenDemoApp issue #50), so the
+    // probe would silently fail. Wearers opt in once a host update lands.
+    expect(store.settings().locationEnabled).toBe(false);
   });
 
   it('drops an entry missing the timestamp/source fields', async () => {

@@ -737,14 +737,16 @@ export interface Settings {
    */
   translationMode: 'converse' | 'listen-in';
   /**
-   * When true, the runtime probes the device for an approximate location at
-   * boot and injects `Coords` / `Country` lines into every lens prompt so
+   * When true, the runtime probes the device for an approximate location and
+   * injects `Coords` / `City` / `Country` lines into every lens prompt so
    * answers reflect the wearer's locale (currency, units, nearby places).
-   * Defaults to `true` — the manifest-level OS prompt is the real gate, and
-   * declining it makes the probe fall through to "unavailable" anyway. This
-   * toggle is the kill-switch for wearers who accepted the OS prompt but
-   * later change their mind. When `false`, no location lines are added to
-   * the context block and `cachedLocation` is cleared.
+   * Defaults to `false`: the EvenHub WebView blocks `navigator.geolocation`
+   * on both phone platforms today. On Android the host doesn't wire location
+   * permission through (EvenDemoApp issue #50); on iOS WKWebView doesn't
+   * support the Geolocation API natively and the host doesn't inject a
+   * CLLocationManager bridge. Works in desktop browsers. Wearers opt in once
+   * a host update lands. When `false`, no location lines are added to the
+   * context block and `cachedLocation` is cleared.
    */
   locationEnabled: boolean;
   /**
