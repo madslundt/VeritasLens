@@ -13,6 +13,7 @@ export {
   personas,
   getPersona,
   getPickerPersonas,
+  getSpecializedPersonas,
 } from './src/personas/index';
 export type {
   PersonaId,

@@ -1501,3 +1501,31 @@ describe('companion', () => {
     expect(prompt).toContain('Dansk');
   });
 });
+
+import { personas, getPickerPersonas, getSpecializedPersonas } from '../src/personas/index';
+
+describe('picker / specialized split', () => {
+  it('getPickerPersonas returns exactly the three core lenses in order', () => {
+    expect(getPickerPersonas().map((p) => p.id)).toEqual(['auto', 'translation', 'meeting-prep']);
+  });
+
+  it('getSpecializedPersonas returns the other lenses in BUILTINS order', () => {
+    expect(getSpecializedPersonas().map((p) => p.id)).toEqual([
+      'fact-checker',
+      'trivia',
+      'logical-fallacy',
+      'bias-detector',
+      'eli5',
+      'devils-advocate',
+      'key-questions',
+      'companion',
+    ]);
+  });
+
+  it('core and specialized are disjoint and together cover every persona', () => {
+    const core = getPickerPersonas().map((p) => p.id);
+    const specialized = getSpecializedPersonas().map((p) => p.id);
+    expect(core.filter((id) => specialized.includes(id))).toEqual([]);
+    expect(new Set([...core, ...specialized])).toEqual(new Set(personas().map((p) => p.id)));
+  });
+});

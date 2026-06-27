@@ -99,6 +99,8 @@ import {
   showHistoryListPage,
   getHistoryListEntries,
   showGamesPickerPage,
+  showSpecializedPickerPage,
+  specializedPickerEntryAtIndex,
   showMenuPage,
   showMidSummaryPage,
   showPickerPage,
@@ -529,11 +531,12 @@ function handleEvent(event: EvenHubEvent): void {
       requestHostExitConfirm().catch((err) => logDispatchError('host-exit-fail', err));
       return;
     }
-    if (page === 'games-picker') {
-      // From the games sub-picker, double-tap returns to the main picker —
-      // not host exit, since the wearer is one level down.
+    if (page === 'games-picker' || page === 'specialized-picker') {
+      // From a sub-picker (Games / Specialized), double-tap returns to the
+      // main picker — not host exit, since the wearer is one level down.
       lastGamesPickerIndex = 0;
-      showPickerPage().catch((err) => logDispatchError('games-back-fail', err));
+      lastSpecializedPickerIndex = 0;
+      showPickerPage().catch((err) => logDispatchError('subpicker-back-fail', err));
       return;
     }
     if (
@@ -595,6 +598,7 @@ function handleEvent(event: EvenHubEvent): void {
   else if (page === 'history-list') handleHistoryListGesture(gesture).catch((err) => logDispatchError('history-list-fail', err));
   else if (page === 'history-detail') handleHistoryDetailGesture(gesture).catch((err) => logDispatchError('history-detail-fail', err));
   else if (page === 'mid-summary') handleMidSummaryGesture(gesture).catch((err) => logDispatchError('mid-summary-fail', err));
+  else if (page === 'specialized-picker') handleSpecializedPickerEvent(gesture).catch((err) => logDispatchError('specialized-picker-fail', err));
   else if (page === 'games-picker') handleGamesPickerEvent(gesture).catch((err) => logDispatchError('games-picker-fail', err));
   else if (page === 'game-question') handleGameQuestionEvent(gesture).catch((err) => logDispatchError('game-question-fail', err));
   else if (page === 'game-feedback') handleGameFeedbackEvent(gesture).catch((err) => logDispatchError('game-feedback-fail', err));
@@ -614,6 +618,11 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
       await openGamesPicker();
       return;
     }
+    if (entry.kind === 'specialized') {
+      lastSpecializedPickerIndex = 0;
+      await showSpecializedPickerPage();
+      return;
+    }
     const persona = entry.persona;
     // Block entry into Meeting Prep when no context exists — opening a
     // session would needlessly power the mic and allocate the ring buffer
@@ -624,6 +633,21 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
       return;
     }
     await enterActiveSession(persona.id);
+  }
+}
+
+let lastSpecializedPickerIndex = 0;
+
+async function handleSpecializedPickerEvent(g: Gesture): Promise<void> {
+  if (typeof g.itemIndex === 'number') lastSpecializedPickerIndex = g.itemIndex;
+  if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
+    const entry = specializedPickerEntryAtIndex(lastSpecializedPickerIndex);
+    if (!entry || entry.kind === 'back') {
+      lastSpecializedPickerIndex = 0;
+      await showPickerPage();
+      return;
+    }
+    await enterActiveSession(entry.persona.id);
   }
 }
 

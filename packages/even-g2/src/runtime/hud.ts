@@ -10,7 +10,7 @@ import {
 } from '@evenrealities/even_hub_sdk';
 import { measureTextWrap } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
-import { getPersona, getPickerPersonas, gameDifficultyLabel, gameFormatLabel } from '@veritaslens/core';
+import { getPersona, getPickerPersonas, getSpecializedPersonas, gameDifficultyLabel, gameFormatLabel } from '@veritaslens/core';
 import type { Persona, GamePreset, GameSession, HistoryEntry, LensResult, WebCitation } from '@veritaslens/core';
 import { activePersona, settings } from '@/state/store';
 
@@ -121,6 +121,7 @@ export type HudPage =
   | 'history-list'
   | 'history-detail'
   | 'mid-summary'
+  | 'specialized-picker'
   | 'games-picker'
   | 'game-loading'
   | 'game-question'
@@ -1737,37 +1738,46 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
 }
 
 /**
- * Build the picker item labels. Games is pinned at the BOTTOM so the wearer
- * lands on a lens (the common case) without scrolling, and Games is one
- * scroll-down away. The lifecycle's `pickerEntryAtIndex` keeps this offset
- * in sync — if you reorder here, update that too.
+ * Build the picker item labels. The three core lenses come first, then the
+ * two sub-picker entries pinned at the BOTTOM — Games, then Specialized — so
+ * the wearer lands on a core lens (the common case) without scrolling. The
+ * lifecycle's `pickerEntryAtIndex` keeps these offsets in sync — if you
+ * reorder here, update that too.
  */
 // Chevron suffix telegraphs that tapping this row opens a sub-picker
 // rather than starting a session — mirrors the platform UI convention
 // for "this leads elsewhere".
 const PICKER_GAMES_LABEL = 'Games ›';
+const PICKER_SPECIALIZED_LABEL = 'Specialized ›';
 function buildPickerItemNames(): string[] {
-  return [...getPickerPersonas().map((p) => p.name), PICKER_GAMES_LABEL];
+  return [...getPickerPersonas().map((p) => p.name), PICKER_GAMES_LABEL, PICKER_SPECIALIZED_LABEL];
 }
 
 export type PickerEntry =
   | { kind: 'games' }
+  | { kind: 'specialized' }
   | { kind: 'persona'; persona: Persona };
 
 /**
- * Resolve a picker list index to the entry it represents. Indices `0..N-1`
- * map to the personas (N = `getPickerPersonas().length`); index N is the
- * Games sub-picker entry pinned at the bottom of the list. Out-of-range
- * indices fall back to the first persona — picker should never silently
- * no-op on a tap, and falling back to a lens (rather than Games) matches
- * the typical "I want to ask a question" intent.
+ * Resolve a picker list index to the entry it represents. With
+ * `C = getPickerPersonas().length` (the core lenses), indices `0..C-1` map to
+ * those personas; index `C` is the Games sub-picker and index `C+1` is the
+ * Specialized sub-picker, both pinned at the bottom. Out-of-range indices fall
+ * back to the first persona — picker should never silently no-op on a tap, and
+ * falling back to a lens (rather than a sub-picker) matches the typical "I want
+ * to ask a question" intent.
  */
 export function pickerEntryAtIndex(idx: number | undefined | null): PickerEntry {
   const personas = getPickerPersonas();
   const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
-  if (safe >= personas.length) return { kind: 'games' };
-  const p = personas[safe];
-  return p ? { kind: 'persona', persona: p } : { kind: 'games' };
+  if (safe < personas.length) {
+    const p = personas[safe];
+    if (p) return { kind: 'persona', persona: p };
+  }
+  if (safe === personas.length) return { kind: 'games' };
+  if (safe === personas.length + 1) return { kind: 'specialized' };
+  const first = personas[0];
+  return first ? { kind: 'persona', persona: first } : { kind: 'games' };
 }
 
 function buildMenuPage(): RebuildPageContainer {
@@ -2143,6 +2153,68 @@ function buildGamesPickerPage(presets: GamePreset[], opts: ShowGamesPickerOpts):
     containerID: CONTAINER.gameHint, containerName: NAME.gameHint,
     xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
     borderWidth: 0, paddingLength: 4, content: hintText, isEventCapture: 0,
+  });
+  const listObject = [list];
+  const textObject = [title, hint];
+  return new RebuildPageContainer({
+    containerTotalNum: totalContainers(listObject, textObject),
+    listObject,
+    textObject,
+  });
+}
+
+// ---------- Specialized lens sub-picker ----------
+//
+// Mirrors the Games sub-picker: a second-level list reached from the main
+// picker's "Specialized ›" row. Lists the 8 non-core lenses plus a "← Back"
+// row, and reuses the game* containers (rebuild replaces every container, so
+// sharing IDs across these sibling sub-pages is safe).
+
+export type SpecializedPickerEntry =
+  | { kind: 'back' }
+  | { kind: 'persona'; persona: Persona };
+
+let cachedSpecializedEntries: SpecializedPickerEntry[] = [];
+
+export function specializedPickerEntryAtIndex(idx: number | undefined | null): SpecializedPickerEntry | null {
+  const safe = typeof idx === 'number' && idx >= 0 ? idx : 0;
+  return cachedSpecializedEntries[safe] ?? null;
+}
+
+export async function showSpecializedPickerPage(): Promise<void> {
+  if (!bootstrapped) throw new Error('bootstrapHud() must run before showSpecializedPickerPage().');
+  const specialized = getSpecializedPersonas();
+  cachedSpecializedEntries = [
+    { kind: 'back' },
+    ...specialized.map((p) => ({ kind: 'persona' as const, persona: p })),
+  ];
+  const ok = await getBridge().rebuildPageContainer(buildSpecializedPickerPage(specialized));
+  if (!ok) throw new Error('rebuildPageContainer (specialized-picker) failed.');
+  currentPage = 'specialized-picker';
+}
+
+function buildSpecializedPickerPage(specialized: Persona[]): RebuildPageContainer {
+  const itemNames = ['← Back', ...specialized.map((p) => clip(p.name, 60))];
+  const title = new TextContainerProperty({
+    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
+    xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 36,
+    borderWidth: 0, paddingLength: 4, content: 'Specialized', isEventCapture: 0,
+  });
+  const list = new ListContainerProperty({
+    containerID: CONTAINER.gameList, containerName: NAME.gameList,
+    xPosition: 16, yPosition: 48, width: SCREEN_W - 32, height: 200,
+    borderWidth: 0, paddingLength: 4,
+    itemContainer: new ListItemContainerProperty({
+      itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
+      itemName: itemNames,
+    }),
+    isEventCapture: 1,
+  });
+  const hint = new TextContainerProperty({
+    containerID: CONTAINER.gameHint, containerName: NAME.gameHint,
+    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
+    borderWidth: 0, paddingLength: 4,
+    content: 'Tap a lens · ← Back to top', isEventCapture: 0,
   });
   const listObject = [list];
   const textObject = [title, hint];

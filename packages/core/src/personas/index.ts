@@ -304,11 +304,32 @@ export function getPersona(id: PersonaId): Persona | undefined {
 }
 
 /**
- * Personas shown in the HUD picker. Currently identical to the full list —
- * kept as a separate function so future picker-only filtering has a single
- * call site to update.
+ * Persona ids shown at the top level of the HUD picker, in display order. The
+ * wearer almost always wants one of these three, so they stay one tap away;
+ * every other lens lives behind the "Specialized ›" sub-picker (see
+ * `getSpecializedPersonas`). Order here is the visible picker order.
+ */
+const CORE_PICKER_IDS: readonly PersonaId[] = ['auto', 'translation', MEETING_PREP_ID];
+
+/**
+ * Top-level picker personas — Auto, Translate, Meeting Prep — in
+ * `CORE_PICKER_IDS` order. The 8 remaining lenses are collapsed into the
+ * "Specialized ›" sub-picker fed by `getSpecializedPersonas`. This is the
+ * single call site for picker-only filtering.
  */
 export function getPickerPersonas(): Persona[] {
-  return personasSignal();
+  const all = personasSignal();
+  return CORE_PICKER_IDS
+    .map((id) => all.find((p) => p.id === id))
+    .filter((p): p is Persona => p !== undefined);
+}
+
+/**
+ * Personas shown in the "Specialized ›" sub-picker — every builtin that isn't
+ * a top-level core lens, in BUILTINS order.
+ */
+export function getSpecializedPersonas(): Persona[] {
+  const core = new Set<PersonaId>(CORE_PICKER_IDS);
+  return personasSignal().filter((p) => !core.has(p.id));
 }
 

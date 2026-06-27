@@ -63,6 +63,9 @@ import {
   MENU_OPTIONS,
   menuOptionAtIndex,
   personaAtIndex,
+  pickerEntryAtIndex,
+  showSpecializedPickerPage,
+  specializedPickerEntryAtIndex,
   resetHudSessionState,
   scrollActiveReason,
   scrollHistoryDetail,
@@ -79,7 +82,7 @@ import {
   showUnconfiguredPage,
 } from '../src/runtime/hud';
 import { saveAutoSummaryEnabled, saveDiscreet, setLensResult as setStateLensResult, settings } from '../src/state/store';
-import { getPersona, getPickerPersonas } from '@veritaslens/core';
+import { getPersona, getPickerPersonas, getSpecializedPersonas } from '@veritaslens/core';
 import type { HistoryEntry, LensResult } from '@veritaslens/core';
 
 const fakeSetLs = (_k: string, _v: string): Promise<boolean> => Promise.resolve(true);
@@ -131,6 +134,61 @@ describe('menuOptionAtIndex', () => {
     expect(menuOptionAtIndex(99)).toBe('back');
     expect(menuOptionAtIndex(undefined)).toBe('back');
     expect(menuOptionAtIndex(-1)).toBe('back');
+  });
+});
+
+describe('pickerEntryAtIndex', () => {
+  const core = getPickerPersonas();
+
+  it('maps the leading indices to the core personas', () => {
+    core.forEach((persona, i) => {
+      const entry = pickerEntryAtIndex(i);
+      expect(entry.kind).toBe('persona');
+      if (entry.kind === 'persona') expect(entry.persona.id).toBe(persona.id);
+    });
+  });
+
+  it('maps index C to Games and C+1 to Specialized', () => {
+    expect(pickerEntryAtIndex(core.length)).toEqual({ kind: 'games' });
+    expect(pickerEntryAtIndex(core.length + 1)).toEqual({ kind: 'specialized' });
+  });
+
+  it('falls back to the first core persona for out-of-range / invalid indices', () => {
+    const firstId = core[0]!.id;
+    for (const idx of [core.length + 2, 999, -3, undefined]) {
+      const entry = pickerEntryAtIndex(idx);
+      expect(entry.kind).toBe('persona');
+      if (entry.kind === 'persona') expect(entry.persona.id).toBe(firstId);
+    }
+  });
+});
+
+describe('specialized sub-picker', () => {
+  it('showSpecializedPickerPage rebuilds and enters the specialized-picker page', async () => {
+    await bootstrapHud('picker');
+    await showSpecializedPickerPage();
+    expect(currentHudPage()).toBe('specialized-picker');
+  });
+
+  it('builds a list of "← Back" + every specialized persona', async () => {
+    await bootstrapHud('picker');
+    bridge.rebuildPageContainer.mockClear();
+    await showSpecializedPickerPage();
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { listObject: Array<{ payload: { itemContainer: { payload: { itemCount: number; itemName: string[] } } } }> } }]>;
+    const list = calls[0]![0].payload.listObject[0]!;
+    expect(list.payload.itemContainer.payload.itemCount).toBe(getSpecializedPersonas().length + 1);
+    expect(list.payload.itemContainer.payload.itemName[0]).toBe('← Back');
+  });
+
+  it('specializedPickerEntryAtIndex resolves Back at 0 and personas at 1+', async () => {
+    await bootstrapHud('picker');
+    await showSpecializedPickerPage();
+    expect(specializedPickerEntryAtIndex(0)).toEqual({ kind: 'back' });
+    const specialized = getSpecializedPersonas();
+    const second = specializedPickerEntryAtIndex(1);
+    expect(second?.kind).toBe('persona');
+    if (second?.kind === 'persona') expect(second.persona.id).toBe(specialized[0]!.id);
+    expect(specializedPickerEntryAtIndex(999)).toBeNull();
   });
 });
 
