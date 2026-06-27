@@ -42,6 +42,7 @@ import {
   settings,
 } from '@/state/store';
 import { getBridge } from './bridge';
+import { kickOffLocationRefresh } from './location';
 import {
   showGameEndPage,
   showGameFeedbackPage,
@@ -133,6 +134,11 @@ export async function openGamesPicker(): Promise<void> {
   // Always reset the highlighted option when entering a fresh games view
   // so a stale index from a previous game can't leak into the next session.
   lastGameOptionIndex = 0;
+  // Warm up the GPS the moment the wearer opens this menu so a fix is
+  // acquiring (and the OS cache is fresh) by the time they tap "Near me".
+  // Fire-and-forget; gated on `locationEnabled` and dedup-guarded internally,
+  // so it never prompts when location is off or spams the sensor on re-entry.
+  kickOffLocationRefresh((k, v) => getBridge().setLocalStorage(k, v));
   await showGamesPickerPage(gamePresets());
 }
 

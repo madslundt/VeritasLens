@@ -51,6 +51,7 @@ import {
   resetTranscript,
 } from '@veritaslens/core';
 import type {
+  CachedLocation,
   GeminiModel,
   GroundingMode,
   LanguageCode,
@@ -653,6 +654,17 @@ async function handleSpecializedPickerEvent(g: Gesture): Promise<void> {
 
 let lastGamesPickerIndex = 0;
 
+/** Total wall-clock budget for the "Near me" tap to land a fresh location fix
+ *  before it gives up and shows the retry hint. Long enough for a cold GPS to
+ *  warm up across a couple of probes, short enough that a wearer with no signal
+ *  isn't stranded staring at "Locating…". */
+const LOCATE_BUDGET_MS = 8_000;
+/** Pause between location probes inside the budget — lets the OS sensor settle
+ *  between reads rather than hammering it back-to-back. */
+const LOCATE_RETRY_DELAY_MS = 1_500;
+
+const delay = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 async function handleGamesPickerEvent(g: Gesture): Promise<void> {
   if (typeof g.itemIndex === 'number') lastGamesPickerIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
@@ -675,27 +687,42 @@ async function handleGamesPickerEvent(g: Gesture): Promise<void> {
         return;
       }
       // Probe at tap time, not before. The picker hint becomes the loading
-      // surface — `showGameLoadingPage` doesn't render until the probe lands
-      // (so there's no flash of a wrong-topic loading frame). Worst case the
-      // wearer stares at "Locating…" for ~5 s (the navigator timeout); if
-      // the probe gets cached coords from the OS it returns in < 100 ms.
+      // surface — `showGameLoadingPage` doesn't render until a fix lands (so
+      // there's no flash of a wrong-topic loading frame). A cold GPS often
+      // misses on the first read but warms the sensor, so we retry within a
+      // single tap for up to ~8 s instead of stranding the wearer on
+      // "Locating…" until they tap again. A warm OS cache resolves the very
+      // first attempt in < 100 ms.
       await showGamesPickerPage(gamePresets(), { errorMessage: 'Locating…' });
       const beforeResolvedAt = s.cachedLocation?.resolvedAt ?? 0;
-      const loc = await probeAndCacheLocation(
-        (k, v) => getBridge().setLocalStorage(k, v),
-      );
+      const setLs = (k: string, v: string) => getBridge().setLocalStorage(k, v);
       // probeAndCacheLocation returns the existing cache on failure, so we
-      // detect "no fresh fix this time" by comparing resolvedAt rather than
-      // the null-vs-cached identity. A stale cache from earlier in the
-      // session would still be returned but we want this game to reflect
-      // where the wearer is *now*.
-      if (!loc || loc.resolvedAt <= beforeResolvedAt) {
+      // detect "got a fresh fix this attempt" by comparing resolvedAt rather
+      // than the null-vs-cached identity — a stale cache from earlier in the
+      // session is truthy but we want this game to reflect where the wearer
+      // is *now*.
+      const deadline = Date.now() + LOCATE_BUDGET_MS;
+      let fresh: CachedLocation | null = null;
+      for (;;) {
+        const loc = await probeAndCacheLocation(setLs);
+        if (loc && loc.resolvedAt > beforeResolvedAt) {
+          fresh = loc;
+          break;
+        }
+        if (Date.now() >= deadline) break;
+        await delay(LOCATE_RETRY_DELAY_MS);
+        if (Date.now() >= deadline) break;
+        // Re-assert the hint in case a parallel page push raced in; cheap and
+        // keeps "Locating…" steady across retries.
+        await showGamesPickerPage(gamePresets(), { errorMessage: 'Locating…' });
+      }
+      if (!fresh) {
         await showGamesPickerPage(gamePresets(), {
           errorMessage: 'Could not get your location — try again',
         });
         return;
       }
-      await startGame(materializeRandomLocationPreset(loc));
+      await startGame(materializeRandomLocationPreset(fresh));
       return;
     }
     await startGame(entry.preset);

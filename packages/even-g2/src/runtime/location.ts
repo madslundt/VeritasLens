@@ -14,6 +14,17 @@ export type LocationProbe =
 
 const NAVIGATOR_TIMEOUT_MS = 5_000;
 /**
+ * JS-side backstop on top of the `timeout` option passed to
+ * `getCurrentPosition`. Some embedded WebViews (the Even App is one) ignore
+ * that option and never invoke EITHER the success or error callback when no
+ * fix is available — which would leave our Promise unsettled forever and,
+ * worse, block the `getAppLocation` host fallback from ever running. We give
+ * the native timeout a small grace window, then settle to `null` ourselves so
+ * the probe always makes progress. The buffer keeps a slightly-late-but-real
+ * callback from being pre-empted by the backstop on well-behaved hosts.
+ */
+const NAVIGATOR_HARD_TIMEOUT_MS = NAVIGATOR_TIMEOUT_MS + 500;
+/**
  * How fresh `navigator.geolocation` may serve from its OWN cache before
  * triggering a real GPS read. Kept short (60 s) so a refresh fired before a
  * prompt actually re-polls the sensor instead of returning a half-hour-old
@@ -77,9 +88,14 @@ function tryNavigatorGeolocation(): Promise<LocationProbe | null> {
   }
   return new Promise((resolve) => {
     let settled = false;
+    const backstop = setTimeout(() => {
+      locationLog('location-nav', `hard timeout after ${NAVIGATOR_HARD_TIMEOUT_MS} ms — falling through`);
+      finish(null);
+    }, NAVIGATOR_HARD_TIMEOUT_MS);
     const finish = (value: LocationProbe | null) => {
       if (settled) return;
       settled = true;
+      clearTimeout(backstop);
       resolve(value);
     };
     try {

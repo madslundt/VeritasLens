@@ -128,6 +128,34 @@ describe('probeLocation', () => {
     expect(fakeBridge.getAppLocation).toHaveBeenCalledTimes(1);
   });
 
+  it('falls through to getAppLocation when navigator never settles (hard-timeout backstop)', async () => {
+    // Some WebViews ignore the `timeout` option and never invoke EITHER the
+    // success or error callback. Without the JS-side backstop the probe would
+    // hang forever and never reach the host fallback. Fake timers let us
+    // advance past the backstop deadline (NAVIGATOR_TIMEOUT_MS + 500 ms).
+    vi.useFakeTimers();
+    try {
+      stubNavigator(() => {
+        /* deliberately never calls success or error */
+      });
+      fakeBridge.getAppLocation.mockResolvedValueOnce({ latitude: 9.9, longitude: 8.8 });
+      const { mod } = await importLocationModule();
+      const probePromise = mod.probeLocation();
+      // Fire the backstop, then flush the host-fallback microtasks.
+      await vi.advanceTimersByTimeAsync(5_600);
+      const probe = await probePromise;
+      expect(probe).toEqual({
+        kind: 'coords',
+        latitude: 9.9,
+        longitude: 8.8,
+        source: 'getAppLocation',
+      });
+      expect(fakeBridge.getAppLocation).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('drops a getAppLocation fix whose accuracy is worse than the cliff', async () => {
     // navigator absent (default in beforeEach); host returns a coarse fix.
     fakeBridge.getAppLocation.mockResolvedValueOnce({ latitude: 1, longitude: 2, accuracy: 5_000 });
