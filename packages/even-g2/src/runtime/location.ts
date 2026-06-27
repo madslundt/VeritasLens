@@ -1,4 +1,5 @@
 import type { CachedLocation } from '@veritaslens/core';
+import { AppLocationAccuracy } from '@evenrealities/even_hub_sdk';
 import { getBridge } from '@/runtime/bridge';
 import { pushDebugEvent, saveCachedLocation, settings } from '@/state/store';
 
@@ -8,7 +9,7 @@ function locationLog(label: string, detail: string): void {
 }
 
 export type LocationProbe =
-  | { kind: 'coords'; latitude: number; longitude: number; accuracy?: number; source: 'navigator' | 'callEvenApp' }
+  | { kind: 'coords'; latitude: number; longitude: number; accuracy?: number; source: 'navigator' | 'callEvenApp' | 'getAppLocation' }
   | { kind: 'unavailable'; reason: string };
 
 const NAVIGATOR_TIMEOUT_MS = 5_000;
@@ -57,7 +58,7 @@ export async function probeLocation(): Promise<LocationProbe> {
 
   const hostResult = await tryHostGeolocation();
   if (hostResult && hostResult.kind === 'coords') {
-    locationLog('location-probe', `callEvenApp ok ${hostResult.latitude.toFixed(4)},${hostResult.longitude.toFixed(4)}`);
+    locationLog('location-probe', `getAppLocation ok ${hostResult.latitude.toFixed(4)},${hostResult.longitude.toFixed(4)}`);
     return hostResult;
   }
 
@@ -130,10 +131,18 @@ async function tryHostGeolocation(): Promise<LocationProbe | null> {
     return null;
   }
   try {
-    const raw = await bridge.callEvenApp('getLocation');
-    const coords = coerceCoords(raw);
+    // SDK 0.0.11+ typed native bridge. `Medium` accuracy balances a usable fix
+    // against battery/latency — we only need city-grade precision for the
+    // prompt's locale lines, and the accuracy cliff below rejects anything
+    // coarser than cell-tower triangulation. Reuse the navigator timeout so the
+    // probe never blocks a tap for longer than the wearer expects.
+    const loc = await bridge.getAppLocation({
+      accuracy: AppLocationAccuracy.Medium,
+      timeoutMs: NAVIGATOR_TIMEOUT_MS,
+    });
+    const coords = coerceCoords(loc);
     if (!coords) {
-      locationLog('location-host', `raw returned but uncoerced: ${typeof raw === 'object' ? JSON.stringify(raw).slice(0, 80) : String(raw)}`);
+      locationLog('location-host', `getAppLocation returned ${loc === null ? 'null' : 'uncoerced'}`);
       return null;
     }
     // Apply the same accuracy cliff as the navigator path when the host
@@ -146,9 +155,9 @@ async function tryHostGeolocation(): Promise<LocationProbe | null> {
       locationLog('location-host', `dropped, accuracy ${Math.round(coords.accuracy)} m > ${ACCURACY_MAX_METERS} m`);
       return null;
     }
-    return { ...coords, source: 'callEvenApp' };
+    return { ...coords, source: 'getAppLocation' };
   } catch (err) {
-    locationLog('location-host', `callEvenApp threw: ${err instanceof Error ? err.message : String(err)}`);
+    locationLog('location-host', `getAppLocation threw: ${err instanceof Error ? err.message : String(err)}`);
   }
   return null;
 }

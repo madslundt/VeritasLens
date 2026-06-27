@@ -24,9 +24,11 @@ function fakeLocalStorage(): {
 // import time. We hold a mutable handle so each test can swap behaviours
 // without rewiring the module mock.
 const fakeBridge: {
+  getAppLocation: ReturnType<typeof vi.fn>;
   callEvenApp: ReturnType<typeof vi.fn>;
   getUserInfo: ReturnType<typeof vi.fn>;
 } = {
+  getAppLocation: vi.fn(),
   callEvenApp: vi.fn(),
   getUserInfo: vi.fn(),
 };
@@ -55,6 +57,7 @@ function setReverseGeocodeResponse(body: unknown, ok = true): void {
 }
 
 beforeEach(() => {
+  fakeBridge.getAppLocation.mockReset();
   fakeBridge.callEvenApp.mockReset();
   fakeBridge.getUserInfo.mockReset();
   fetchMock.mockReset();
@@ -105,29 +108,37 @@ describe('probeLocation', () => {
       accuracy: 12,
       source: 'navigator',
     });
-    // callEvenApp must never be hit when navigator wins — saves a host round-trip.
-    expect(fakeBridge.callEvenApp).not.toHaveBeenCalled();
+    // getAppLocation must never be hit when navigator wins — saves a host round-trip.
+    expect(fakeBridge.getAppLocation).not.toHaveBeenCalled();
   });
 
-  it('falls back to callEvenApp("getLocation") when navigator errors', async () => {
+  it('falls back to the typed getAppLocation() bridge when navigator errors', async () => {
     stubNavigator((_success, error) => {
       error?.({ code: 1, message: 'denied' } as unknown as GeolocationPositionError);
     });
-    fakeBridge.callEvenApp.mockResolvedValueOnce({ latitude: 1.23, longitude: 4.56 });
+    fakeBridge.getAppLocation.mockResolvedValueOnce({ latitude: 1.23, longitude: 4.56 });
     const { mod } = await importLocationModule();
     const probe = await mod.probeLocation();
     expect(probe).toEqual({
       kind: 'coords',
       latitude: 1.23,
       longitude: 4.56,
-      source: 'callEvenApp',
+      source: 'getAppLocation',
     });
-    expect(fakeBridge.callEvenApp).toHaveBeenCalledWith('getLocation');
+    expect(fakeBridge.getAppLocation).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops a getAppLocation fix whose accuracy is worse than the cliff', async () => {
+    // navigator absent (default in beforeEach); host returns a coarse fix.
+    fakeBridge.getAppLocation.mockResolvedValueOnce({ latitude: 1, longitude: 2, accuracy: 5_000 });
+    const { mod } = await importLocationModule();
+    const probe = await mod.probeLocation();
+    expect(probe.kind).toBe('unavailable');
   });
 
   it('never falls back to profile country even when getUserInfo returns one', async () => {
     // navigator absent (default in beforeEach)
-    fakeBridge.callEvenApp.mockRejectedValueOnce(new Error('unknown method'));
+    fakeBridge.getAppLocation.mockRejectedValueOnce(new Error('unknown method'));
     // getUserInfo must NOT be called — we removed the profile-country fallback
     // because account country can differ from current country (traveller case).
     fakeBridge.getUserInfo.mockResolvedValue({ uid: 1, name: 'A', avatar: '', country: 'DK' });
@@ -152,16 +163,16 @@ describe('probeLocation', () => {
         timestamp: 0,
       } as unknown as GeolocationPosition);
     });
-    fakeBridge.callEvenApp.mockRejectedValueOnce(new Error('nope'));
+    fakeBridge.getAppLocation.mockRejectedValueOnce(new Error('nope'));
     const { mod } = await importLocationModule();
     const probe = await mod.probeLocation();
-    // Filter dropped the navigator fix; callEvenApp also failed; with the
+    // Filter dropped the navigator fix; getAppLocation also failed; with the
     // userInfo fallback gone, this must terminate at unavailable.
     expect(probe.kind).toBe('unavailable');
   });
 
   it('returns unavailable when every remaining branch fails', async () => {
-    fakeBridge.callEvenApp.mockRejectedValueOnce(new Error('nope'));
+    fakeBridge.getAppLocation.mockRejectedValueOnce(new Error('nope'));
     const { mod } = await importLocationModule();
     const probe = await mod.probeLocation();
     expect(probe.kind).toBe('unavailable');
@@ -173,12 +184,12 @@ describe('probeAndCacheLocation', () => {
     const ls = fakeLocalStorage();
     const { mod, store } = await importLocationModule();
     await store.saveLocationEnabled(ls.set, false);
-    fakeBridge.callEvenApp.mockResolvedValue({ latitude: 9, longitude: 9 });
+    fakeBridge.getAppLocation.mockResolvedValue({ latitude: 9, longitude: 9 });
     await mod.probeAndCacheLocation(ls.set);
     // Neither the navigator stub nor the bridge fallback should have run; the
-    // toggle is the gate. If we accidentally probed, callEvenApp would have
+    // toggle is the gate. If we accidentally probed, getAppLocation would have
     // been hit because navigator is absent in this case.
-    expect(fakeBridge.callEvenApp).not.toHaveBeenCalled();
+    expect(fakeBridge.getAppLocation).not.toHaveBeenCalled();
   });
 
   it('persists a coords result so the next loadSettings restores it', async () => {
@@ -257,9 +268,9 @@ describe('cachedLocation coercion', () => {
     const { store } = await importLocationModule();
     await store.loadSettings(ls.get);
     expect(store.settings().cachedLocation).toBeNull();
-    // Default-off on new install: the EvenHub Android host doesn't pass
-    // geolocation through to the WebView (EvenDemoApp issue #50), so the
-    // probe would silently fail. Wearers opt in once a host update lands.
+    // Default-off on new install even with the native getAppLocation() bridge:
+    // coords are sent to the LLM (privacy) and host support is unverified, so
+    // the wearer opts in deliberately.
     expect(store.settings().locationEnabled).toBe(false);
   });
 
@@ -370,7 +381,7 @@ describe('kickOffLocationRefresh', () => {
     stubNavigator(() => {
       throw new Error('should not be called');
     });
-    fakeBridge.callEvenApp.mockImplementation(() => {
+    fakeBridge.getAppLocation.mockImplementation(() => {
       throw new Error('should not be called');
     });
     // No throw is the assertion — the helper short-circuits before any probe.

@@ -36,6 +36,7 @@ import {
   VOICE_GATE_RMS_STEP,
   VOICE_GATE_RMS_MAX,
   saveBufferDuration,
+  saveMicSource,
   saveDiscreet,
   saveGeminiKey,
   saveGeminiModel,
@@ -55,6 +56,7 @@ import {
   saveResponseLanguage,
   saveTranscriptMode,
   saveTranslationMode,
+  saveRomanizeForeignScript,
   saveTranslationSourceLanguages,
   sessionHistory,
   setAvailableModels,
@@ -96,6 +98,7 @@ import type {
   LensResult,
   LlmProvider,
   MeetingPrepSection,
+  MicSource,
   OpenAiBaseUrl,
   SttHost,
   TranscriptMode,
@@ -108,6 +111,11 @@ const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
   { value: 30, label: '30 seconds' },
   { value: 120, label: '2 minutes' },
   { value: 300, label: '5 minutes' },
+];
+
+const MIC_SOURCE_OPTIONS: { value: MicSource; label: string }[] = [
+  { value: 'glasses', label: 'Glasses (default)' },
+  { value: 'phone', label: 'Phone' },
 ];
 
 /**
@@ -434,6 +442,7 @@ export const SettingsView: Component = () => {
   const [openaiFetchState, setOpenaiFetchState] = createSignal<FetchState>('idle');
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
+  const [draftMicSource, setDraftMicSource] = createSignal<MicSource>(settings().micSource);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
   const [draftCrossSessionRecall, setDraftCrossSessionRecall] = createSignal(settings().crossSessionRecallEnabled);
   const [draftLocationEnabled, setDraftLocationEnabled] = createSignal(settings().locationEnabled);
@@ -462,6 +471,7 @@ export const SettingsView: Component = () => {
   const [draftAutoModeInterval, setDraftAutoModeInterval] = createSignal(settings().autoModeIntervalMs);
   const [draftTranslationMode, setDraftTranslationMode] =
     createSignal<'converse' | 'listen-in'>(settings().translationMode);
+  const [draftRomanize, setDraftRomanize] = createSignal(settings().romanizeForeignScript);
   // Source-language hint persisted as either 'auto' (literal) or an array of
   // codes. The UI splits this into two state slots — an auto toggle + an
   // explicit allow-list — so the form can express "auto-detect" without
@@ -1047,6 +1057,7 @@ export const SettingsView: Component = () => {
         sttModel,
         language,
         buffer,
+        micSource,
         autoSummary,
         crossSessionRecall,
         locationEnabled,
@@ -1059,6 +1070,7 @@ export const SettingsView: Component = () => {
         autoModeInterval,
         autoDisabled,
         translationMode,
+        romanize,
         translationSourceLangs,
         transcriptMode,
         prepResult,
@@ -1082,6 +1094,7 @@ export const SettingsView: Component = () => {
         saveSttModel(setLs, draftSttModel().trim()),
         saveResponseLanguage(setLs, draftLanguage()),
         saveBufferDuration(setLs, draftBuffer()),
+        saveMicSource(setLs, draftMicSource()),
         saveAutoSummaryEnabled(setLs, draftAutoEnabled()),
         saveCrossSessionRecallEnabled(setLs, draftCrossSessionRecall()),
         saveLocationEnabled(setLs, draftLocationEnabled()),
@@ -1094,6 +1107,7 @@ export const SettingsView: Component = () => {
         saveAutoModeIntervalMs(setLs, draftAutoModeInterval()),
         saveAutoDisabledLenses(setLs, draftAutoDisabledLenses()),
         saveTranslationMode(setLs, draftTranslationMode()),
+        saveRomanizeForeignScript(setLs, draftRomanize()),
         saveTranslationSourceLanguages(setLs, resolveTranslationSourceLangs()),
         saveTranscriptMode(setLs, draftTranscriptMode()),
         saveMeetingPrepSections(setLs, prepDraft()),
@@ -1104,9 +1118,9 @@ export const SettingsView: Component = () => {
       const allOk = [
         provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
-        language, buffer, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim,
+        language, buffer, micSource, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim,
         autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
-        translationSourceLangs, transcriptMode, prepWebGrounding,
+        romanize, translationSourceLangs, transcriptMode, prepWebGrounding,
       ].every(Boolean) && prepResult.ok;
       if (allOk) {
         // Re-seed the draft signals from the persisted store. The store may
@@ -1191,6 +1205,7 @@ export const SettingsView: Component = () => {
     return (
       draftLanguage() !== s.responseLanguage
       || draftBuffer() !== s.bufferDuration
+      || draftMicSource() !== s.micSource
       || draftAutoEnabled() !== s.autoSummaryEnabled
       || draftCrossSessionRecall() !== s.crossSessionRecallEnabled
       || draftLocationEnabled() !== s.locationEnabled
@@ -1214,6 +1229,7 @@ export const SettingsView: Component = () => {
   const lensDirty = createMemo(() => {
     const s = settings();
     if (draftTranslationMode() !== s.translationMode) return true;
+    if (draftRomanize() !== s.romanizeForeignScript) return true;
     // Translation source-langs are a union ('auto' | LanguageCode[]); compare
     // shape-first so a toggle between 'auto' and an empty array (which the
     // resolver collapses to 'auto') doesn't read as dirty.
@@ -1740,6 +1756,24 @@ export const SettingsView: Component = () => {
                                   </For>
                                 </div>
                               </Show>
+                            </div>
+
+                            <div class="field">
+                              <span class="field-label">Romanize non-European scripts</span>
+                              <span class="field-hint">
+                                Adds a romanized line (Romaji for Japanese, Pinyin for Mandarin,
+                                etc.) beneath the original whenever the other person speaks a
+                                non-Latin script — so you can read and pronounce it. Latin-script
+                                languages (Spanish, French, …) are unaffected.
+                              </span>
+                              <label class="toggle-row" style="margin-top: 8px;">
+                                <input
+                                  type="checkbox"
+                                  checked={draftRomanize()}
+                                  onChange={(e) => setDraftRomanize(e.currentTarget.checked)}
+                                />
+                                <span>Show romanization under non-European text</span>
+                              </label>
                             </div>
                           </div>
                         </Show>
@@ -2482,6 +2516,20 @@ export const SettingsView: Component = () => {
               <span class="field-hint">
                 How much past audio each analysis includes. Longer captures more conversation
                 but sends a bigger payload to the provider.
+              </span>
+            </label>
+
+            <label class="field">
+              <span class="field-label">Microphone</span>
+              <select
+                value={draftMicSource()}
+                onChange={(e) => setDraftMicSource(e.currentTarget.value as MicSource)}
+              >
+                <For each={MIC_SOURCE_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
+              </select>
+              <span class="field-hint">
+                Which microphone to record from. Glasses uses the on-board array; choose Phone
+                if the glasses mic underperforms or isn't available on your device.
               </span>
             </label>
 

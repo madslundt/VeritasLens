@@ -178,12 +178,17 @@ export type LensResult = (
       sourceLanguage: string;
       /** Verbatim transcript in the spoken language. */
       sourceText: string;
+      /** Standard romanization of `sourceText` when it is in a non-Latin
+       *  script (Romaji / Pinyin / etc.). Empty when the source is already
+       *  Latin script or the `romanizeForeignScript` setting is off. */
+      sourceTextRomanized?: string;
       /** Same utterance translated into the wearer's display language. */
       translatedText: string;
       /** Up to 3 short reply starters the wearer could say back. Each carries
        *  both the original-language line (what to speak) and the translation
-       *  (what to read). */
-      replyStarters: Array<{ source: string; translated: string }>;
+       *  (what to read). `sourceRomanized` mirrors `sourceTextRomanized` for the
+       *  starter's spoken line. */
+      replyStarters: Array<{ source: string; translated: string; sourceRomanized?: string }>;
     }
 ) & {
   /** Set when the Auto lens picked this analysis lens on the user's behalf. */
@@ -583,6 +588,18 @@ export const DEFAULT_TRANSCRIPT_MODE: TranscriptMode = 'on';
 
 export const DEFAULT_BUFFER_DURATION: BufferDuration = 30;
 
+/**
+ * Which microphone the host captures audio from. The string values match the
+ * SDK's `AudioInputSource` enum (`'glasses'` / `'phone'`) so the even-g2 layer
+ * can pass the value straight through to `audioControl(true, source)` without a
+ * translation table — while this shared type stays SDK-free.
+ */
+export type MicSource = 'glasses' | 'phone';
+
+/** Default mic source. Glasses by default; the on-board array is the intended
+ *  capture path and keeps audio local to the wearer. */
+export const DEFAULT_MIC_SOURCE: MicSource = 'glasses';
+
 /** User-configurable settings persisted via the SDK bridge local storage. */
 export interface Settings {
   /** Active provider for lens analyses. */
@@ -643,6 +660,13 @@ export interface Settings {
 
   responseLanguage: LanguageCode;
   bufferDuration: BufferDuration;
+  /**
+   * Microphone source for audio capture. `'glasses'` (default) uses the
+   * on-board array; `'phone'` borrows the handset mic — useful on hosts/devices
+   * where the glasses array underperforms or isn't wired through. Passed to the
+   * SDK's `audioControl(true, source)` when a session opens.
+   */
+  micSource: MicSource;
   autoSummaryEnabled: boolean;
   /**
    * When true, the next session starts with the most-recent summaries from
@@ -744,16 +768,29 @@ export interface Settings {
    */
   translationMode: 'converse' | 'listen-in';
   /**
+   * Translate-lens-only, opt-in (default `false`). When true, the Translate
+   * prompts ask the LLM to also emit a standard romanization (Hepburn Romaji,
+   * Hanyu Pinyin with tone marks, Revised Romanization, …) of any foreign-
+   * language field whose source is a NON-Latin script, shown beneath the
+   * native script on the HUD. Latin-script conversations (Spanish, French, …)
+   * are unaffected even when on — the model returns empty romanized fields.
+   * Applies across all three Translate sub-modes: listening, Say-more, and
+   * wearer-speak. Other lenses are unaffected (their output is always in the
+   * European `responseLanguage`).
+   */
+  romanizeForeignScript: boolean;
+  /**
    * When true, the runtime probes the device for an approximate location and
    * injects `Coords` / `City` / `Country` lines into every lens prompt so
    * answers reflect the wearer's locale (currency, units, nearby places).
-   * Defaults to `false`: the EvenHub WebView blocks `navigator.geolocation`
-   * on both phone platforms today. On Android the host doesn't wire location
-   * permission through (EvenDemoApp issue #50); on iOS WKWebView doesn't
-   * support the Geolocation API natively and the host doesn't inject a
-   * CLLocationManager bridge. Works in desktop browsers. Wearers opt in once
-   * a host update lands. When `false`, no location lines are added to the
-   * context block and `cachedLocation` is cleared.
+   * Defaults to `false` and stays opt-in even though the SDK now exposes a
+   * native `getAppLocation()` bridge (so the historical WebView-blocks-
+   * `navigator.geolocation` reason no longer applies on device). Two reasons
+   * keep it off by default: the coords are sent to the LLM provider (a
+   * privacy-affecting choice the wearer should make deliberately), and host
+   * support/permissions for `getAppLocation` are not yet verified across real
+   * hardware. When `false`, no location lines are added to the context block
+   * and `cachedLocation` is cleared.
    */
   locationEnabled: boolean;
   /**
@@ -767,12 +804,16 @@ export interface Settings {
 export interface CachedLocation {
   /** Epoch ms when this entry was written. */
   resolvedAt: number;
-  /** Which probe branch resolved — useful for diagnostics in Settings. */
-  source: 'navigator' | 'callEvenApp';
+  /** Which probe branch resolved — useful for diagnostics in Settings.
+   *  `'getAppLocation'` is the SDK's typed native bridge (the on-device path);
+   *  `'callEvenApp'` is retained for backward-compatible reads of cached
+   *  entries written by the old generic host fallback. */
+  source: 'navigator' | 'callEvenApp' | 'getAppLocation';
   /** Decimal degrees. */
   latitude: number;
   longitude: number;
-  /** Reported accuracy in metres; only present from `navigator`. */
+  /** Reported accuracy in metres, when the probe source supplies it
+   *  (`navigator` and `getAppLocation`); may be absent for older cached entries. */
   accuracy?: number;
   /**
    * Reverse-geocoded labels via BigDataCloud's free `reverse-geocode-client`

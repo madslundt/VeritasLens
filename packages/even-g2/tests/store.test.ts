@@ -18,6 +18,7 @@ import {
   pushHistoryEntry,
   saveAutoSummaryEnabled,
   saveBufferDuration,
+  saveMicSource,
   saveTranscriptMode,
   saveGeminiAutoModel,
   saveGeminiKey,
@@ -26,7 +27,7 @@ import {
   sessionHistory,
   settings,
 } from '../src/state/store';
-import { DEFAULT_BUFFER_DURATION, DEFAULT_GEMINI_AUTO_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_LANGUAGE } from '@veritaslens/core';
+import { DEFAULT_BUFFER_DURATION, DEFAULT_GEMINI_AUTO_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_LANGUAGE, DEFAULT_MIC_SOURCE } from '@veritaslens/core';
 import type { HistoryEntry } from '@veritaslens/core';
 
 const HISTORY_BYTE_BUDGET = 400 * 1024;
@@ -224,6 +225,7 @@ describe('loadSettings', () => {
     await saveGeminiAutoModel(ls.set, 'gemini-2.5-flash');
     await saveResponseLanguage(ls.set, 'da');
     await saveBufferDuration(ls.set, 120);
+    await saveMicSource(ls.set, 'phone');
     await saveAutoSummaryEnabled(ls.set, true);
 
     await loadSettings(ls.get);
@@ -233,6 +235,7 @@ describe('loadSettings', () => {
     expect(s.geminiAutoModel).toBe('gemini-2.5-flash');
     expect(s.responseLanguage).toBe('da');
     expect(s.bufferDuration).toBe(120);
+    expect(s.micSource).toBe('phone');
     expect(s.autoSummaryEnabled).toBe(true);
   });
 
@@ -247,6 +250,7 @@ describe('loadSettings', () => {
     expect(s.geminiAutoModel).toBe(DEFAULT_GEMINI_AUTO_MODEL);
     expect(s.responseLanguage).toBe(DEFAULT_LANGUAGE);
     expect(s.bufferDuration).toBe(DEFAULT_BUFFER_DURATION);
+    expect(s.micSource).toBe(DEFAULT_MIC_SOURCE);
     expect(s.autoSummaryEnabled).toBe(false);
   });
 
@@ -255,11 +259,20 @@ describe('loadSettings', () => {
     ls.data.set('veritaslens.geminiModel', 'not-a-model');
     ls.data.set('veritaslens.responseLanguage', 'klingon');
     ls.data.set('veritaslens.bufferDuration', '9999');
+    ls.data.set('veritaslens.micSource', 'telepathy');
     await loadSettings(ls.get);
     const s = settings();
     expect(s.geminiModel).toBe(DEFAULT_GEMINI_MODEL);
     expect(s.responseLanguage).toBe(DEFAULT_LANGUAGE);
     expect(s.bufferDuration).toBe(DEFAULT_BUFFER_DURATION);
+    // Garbage mic source falls back to the glasses default.
+    expect(s.micSource).toBe('glasses');
+  });
+
+  it("defaults micSource to glasses when storage is empty", async () => {
+    const ls = fakeLocalStorage();
+    await loadSettings(ls.get);
+    expect(settings().micSource).toBe('glasses');
   });
 
   it('clamps a persisted 600s buffer duration from 0.6.x down to the new 300s cap', async () => {

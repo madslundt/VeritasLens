@@ -152,7 +152,7 @@ import {
   settings,
 } from '@/state/store';
 import type { EvenHubEvent } from '@evenrealities/even_hub_sdk';
-import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
+import { AudioInputSource, OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { createEffect, createMemo, createRoot, on } from 'solid-js';
 
 /**
@@ -164,6 +164,24 @@ import { createEffect, createMemo, createRoot, on } from 'solid-js';
 export function chooseClassifierModel(s: Settings): GeminiModel | undefined {
   if (s.provider !== 'gemini') return undefined;
   return s.geminiAutoModel ?? undefined;
+}
+
+/** Terminal disposition of a single `runAnalysis` attempt. */
+export type AnalysisOutcome = 'success' | 'noSpeech' | 'abort' | 'error';
+
+/**
+ * The analysis cursor (`lastAnalysisByteOffset`) advances only when the
+ * analysis actually consumed its audio window: a displayed result or a
+ * completed `noSpeech` verdict. Errors, timeouts, and cancellations leave it
+ * unchanged so a retry re-includes the same audio. Pure so it can be
+ * unit-tested without the lifecycle's bridge/HUD/network surface.
+ */
+export function resolveAnalysisCursor(
+  outcome: AnalysisOutcome,
+  snapshotOffset: number,
+  currentOffset: number,
+): number {
+  return outcome === 'success' || outcome === 'noSpeech' ? snapshotOffset : currentOffset;
 }
 
 /**
@@ -552,6 +570,19 @@ function handleEvent(event: EvenHubEvent): void {
       inflight = null;
       analyzing = false;
       c?.abort();
+      // Tear the loading spinner down here rather than waiting for the abort to
+      // surface in runAnalysis's catch. That catch only runs if the in-flight
+      // call actually rejects with AbortError — but depending on where it is
+      // (pre-fetch prep, a retry backoff that doesn't observe the signal, or a
+      // stream that swallows the abort) it may run late or not at all, leaving
+      // the spinner frozen on screen. The spinner must only show while
+      // `analyzing` is true, so owning teardown on the cancel gesture makes
+      // that invariant hold regardless of how the in-flight call unwinds.
+      setAppPhase('listening');
+      void (async () => {
+        await stopSpinner(); // also resets the status slot to 'listening'
+        await setActiveHint(ACTIVE_HINT_DEFAULT);
+      })().catch((err) => logDispatchError('cancel-analysis-fail', err));
       return;
     }
     runAnalysis().catch((err) => logDispatchError('run-analysis-fail', err));
@@ -965,7 +996,10 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
   await showActivePage(persona);
   buffer = new PcmRingBuffer({ durationSec: settings().bufferDuration, sampleRate: 16_000 });
-  const micOk = await getBridge().audioControl(true);
+  const micOk = await getBridge().audioControl(
+    true,
+    settings().micSource === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses,
+  );
   if (!micOk) {
     await setStatus('error');
     setErrorMessage('Microphone could not be opened.');
@@ -1497,12 +1531,14 @@ async function runAnalysis(): Promise<void> {
     return;
   }
 
-  // No-voice gate: analyse only audio captured *since the last analysis
-  // trigger* (not the whole buffer). This makes re-tapping in silence after
+  // No-voice gate: analyse only audio captured *since the last completed
+  // analysis* (not the whole buffer). This makes re-tapping in silence after
   // a fresh analysis correctly report "no speech captured" — otherwise the
   // already-analysed voice content earlier in the buffer would falsely pass
-  // the gate. The LLM's own noSpeech flag remains the safety net for
-  // ambiguous audio that DOES contain at least one voice frame.
+  // the gate. The cursor only advances on a completed attempt (success or
+  // noSpeech), so after an error/cancel this gate re-sees the same audio. The
+  // LLM's own noSpeech flag remains the safety net for ambiguous audio that
+  // DOES contain at least one voice frame.
   //
   // Bypassed when the user sets `voiceGateRmsFloor` to 0 (Settings → Voice
   // detection → Off). Higher floor values make the gate stricter (only louder
@@ -1530,8 +1566,14 @@ async function runAnalysis(): Promise<void> {
   // buffer. Each subsequent tap sees only what was said since the last one,
   // which (a) prevents Gemini from re-answering the same claim across
   // consecutive taps and (b) shrinks the upload on rapid-tap workflows.
+  //
+  // The cursor is NOT advanced here: we capture the would-be offset into a
+  // local and commit it (in the finally) only when the analysis actually
+  // consumes the window — a displayed result or a completed noSpeech verdict.
+  // An error, timeout, or cancellation leaves `lastAnalysisByteOffset` where it
+  // was, so a retry re-includes this same audio instead of reporting `○`.
   const linearPcm = buffer.linearPcmSince(lastAnalysisByteOffset);
-  lastAnalysisByteOffset = buffer.bytesProduced;
+  const snapshotByteOffset = buffer.bytesProduced;
 
   // Clear the store signal for sibling components (settings WebView). The HUD
   // intentionally keeps the previous answer on screen during analysis so the
@@ -1574,6 +1616,11 @@ async function runAnalysis(): Promise<void> {
   await blankActiveForThinking();
   startSpinner();
 
+  // Defaults to `error` so any unexpected throw or soft early-return inside the
+  // try (e.g. "No Auto lenses enabled", missing-key returns) leaves the cursor
+  // unadvanced — those consume no audio. Flipped to `success`/`noSpeech`/`abort`
+  // on the paths that should (or shouldn't) commit the snapshot offset.
+  let outcome: AnalysisOutcome = 'error';
   try {
     // VAD-trim the upload to just the detected speech regions when enabled
     // (default) and Silero is available. The gate above already confirmed at
@@ -1736,6 +1783,7 @@ async function runAnalysis(): Promise<void> {
       await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set([newEntryId]) });
       await setStatus('displaying');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
+      outcome = 'success';
       setAppPhase('displaying');
       return;
     }
@@ -2006,6 +2054,7 @@ async function runAnalysis(): Promise<void> {
     await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set(freshIds) });
     await setStatus('displaying');
     await setActiveHint(ACTIVE_HINT_DEFAULT);
+    outcome = 'success';
     setAppPhase('displaying');
   } catch (err) {
     await stopSpinner();
@@ -2017,7 +2066,9 @@ async function runAnalysis(): Promise<void> {
       // User cancelled via double-tap (which nulls `inflight` and clears
       // `analyzing` at the call site), or a back-to-back analysis aborted this
       // one. Either way the finally's identity check is enough to clear our
-      // own controller — no extra reset needed here.
+      // own controller — no extra reset needed here. The cursor stays put so
+      // the audio remains available for the next attempt.
+      outcome = 'abort';
       await setStatus('listening');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('listening');
@@ -2029,6 +2080,9 @@ async function runAnalysis(): Promise<void> {
       // the local gate's voice-band heuristic). Surface the same visual as
       // the local gate so the wearer's mental model of `○` is consistent —
       // "no usable speech was found", regardless of which stage caught it.
+      // Counts as a completed verdict: the cursor advances so an immediate
+      // re-tap doesn't re-send the same already-judged audio.
+      outcome = 'noSpeech';
       await showNoVoiceFeedback('No speech captured');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
       setAppPhase('listening');
@@ -2059,9 +2113,14 @@ async function runAnalysis(): Promise<void> {
     // the maximum buffer duration. The cancel path in handleEvent also clears
     // `analyzing`/`inflight` directly so a stuck flag can't strand the user
     // even if the controller-identity check below misses on a race.
+    //
+    // The cursor commit lives inside the identity guard so a superseded
+    // analysis (aborted by a newer one that already owns `inflight`) can't
+    // clobber the live attempt's cursor with a stale offset.
     if (inflight === controller) {
       analyzing = false;
       inflight = null;
+      lastAnalysisByteOffset = resolveAnalysisCursor(outcome, snapshotByteOffset, lastAnalysisByteOffset);
     }
   }
 }
@@ -2134,6 +2193,7 @@ async function runSayMore(): Promise<void> {
     targetLang: s.responseLanguage,
     sourceLang,
     recentTranscripts,
+    romanize: s.romanizeForeignScript,
   });
 
   const wav = encodePcmToWav(buffer.toLinearPcm(), {
@@ -2160,6 +2220,7 @@ async function runSayMore(): Promise<void> {
       await updateTranslationTeleprompterExtended(
         parsed.extendedSource || starter.source,
         parsed.extendedTranslated || starter.translated,
+        parsed.extendedSourceRomanized,
       );
     }
   } catch (err) {
@@ -2274,6 +2335,7 @@ async function runWearerSpeakAnalyze(): Promise<void> {
   const prompt = buildWearerSpeakPrompt({
     wearerLang: s.responseLanguage,
     targetLangCode,
+    romanize: s.romanizeForeignScript,
   });
 
   // Same provider-coverage gap as runAnalysis: Gemini / OpenRouter never fire
@@ -2309,7 +2371,7 @@ async function runWearerSpeakAnalyze(): Promise<void> {
     if (controller.signal.aborted) return;
     const parsed = parseWearerSpeakResponse(rawText);
     if (currentHudPage() === 'translation-wearer-speak') {
-      await updateTranslationWearerSpeakResult(parsed.spoken, parsed.translated);
+      await updateTranslationWearerSpeakResult(parsed.spoken, parsed.translated, parsed.translatedRomanized);
     }
   } catch (err) {
     if ((err as Error).name === 'AbortError') return;

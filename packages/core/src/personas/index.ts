@@ -255,6 +255,7 @@ const BUILTINS: Persona[] = [
         lang,
         settings().translationSourceLanguages,
         settings().translationMode,
+        settings().romanizeForeignScript,
       ),
     get schema() { return getTranslationSchema(settings().translationMode); },
     parse: parseTranslationResponse,

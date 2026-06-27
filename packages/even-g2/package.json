@@ -1,6 +1,6 @@
 {
   "name": "@veritaslens/even-g2",
-  "version": "0.16.8",
+  "version": "0.16.10",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@veritaslens/core": "*",
-    "@evenrealities/even_hub_sdk": "^0.0.10",
+    "@evenrealities/even_hub_sdk": "^0.0.11",
     "solid-js": "^1.9.13"
   },
   "devDependencies": {

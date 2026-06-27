@@ -20,6 +20,7 @@ import {
   DEFAULT_GEMINI_AUTO_MODEL,
   DEFAULT_LANGUAGE,
   DEFAULT_BUFFER_DURATION,
+  DEFAULT_MIC_SOURCE,
   DEFAULT_LLM_PROVIDER,
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
@@ -47,6 +48,7 @@ import type {
   LensResult,
   LlmProvider,
   MeetingPrepSection,
+  MicSource,
   OpenAiBaseUrl,
   Settings,
   SttHost,
@@ -84,6 +86,7 @@ const SETTINGS_KEY_STT_HOST = 'veritaslens.sttHost';
 const SETTINGS_KEY_STT_MODEL = 'veritaslens.sttModel';
 const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
+const SETTINGS_KEY_MIC_SOURCE = 'veritaslens.micSource';
 const SETTINGS_KEY_AUTO_SUMMARY_ENABLED = 'veritaslens.autoSummaryEnabled';
 const SETTINGS_KEY_CROSS_SESSION_RECALL = 'veritaslens.crossSessionRecallEnabled';
 /** Binary transcript control ('off' | 'on'). Read at load with a one-time
@@ -108,6 +111,7 @@ const SETTINGS_KEY_AUTO_MODE_SILENCE_MS = 'veritaslens.autoModeSilenceMs';
 const SETTINGS_KEY_AUTO_MODE_INTERVAL_MS = 'veritaslens.autoModeIntervalMs';
 const SETTINGS_KEY_TRANSLATION_SOURCE_LANGS = 'veritaslens.translationSourceLanguages';
 const SETTINGS_KEY_TRANSLATION_MODE = 'veritaslens.translationMode';
+const SETTINGS_KEY_ROMANIZE = 'veritaslens.romanizeForeignScript';
 const SETTINGS_KEY_LOCATION_ENABLED = 'veritaslens.locationEnabled';
 const SETTINGS_KEY_CACHED_LOCATION = 'veritaslens.cachedLocation';
 /** Default RMS floor when neither the new nor legacy key is set. */
@@ -219,6 +223,7 @@ const [settings, setSettings] = createSignal<Settings>({
   sttModel: DEFAULT_STT_MODEL,
   responseLanguage: DEFAULT_LANGUAGE,
   bufferDuration: DEFAULT_BUFFER_DURATION,
+  micSource: DEFAULT_MIC_SOURCE,
   autoSummaryEnabled: false,
   crossSessionRecallEnabled: false,
   transcriptMode: DEFAULT_TRANSCRIPT_MODE,
@@ -245,13 +250,16 @@ const [settings, setSettings] = createSignal<Settings>({
   // full UX (reply starters); the wearer can switch to listen-in from the
   // Settings → Translate section when they want passive eavesdropping.
   translationMode: 'converse',
-  // Off by default: the EvenHub WebView blocks `navigator.geolocation` on
-  // both phone platforms today. Android: host doesn't implement
-  // `onGeolocationPermissionsShowPrompt` (EvenDemoApp issue #50). iOS:
-  // WKWebView doesn't support the Geolocation API natively and the host
-  // doesn't inject a CLLocationManager bridge. Desktop browsers work.
-  // Wearers opt in once a host update lands; the diagnostic UI under the
-  // toggle makes the "still blocked" state legible.
+  // Romanization of non-European Translate output: opt-in, off by default so
+  // nothing changes for existing wearers. When on, the Translate prompts ask
+  // for a Romaji/Pinyin/etc. companion line beneath the native script.
+  romanizeForeignScript: false,
+  // Off by default. The SDK's native `getAppLocation()` bridge now provides an
+  // on-device location path (so the old WebView-blocks-`navigator.geolocation`
+  // reason no longer applies), but the toggle stays opt-in: coords are sent to
+  // the LLM provider (privacy) and host support/permissions for the bridge are
+  // not yet verified across real hardware. The diagnostic UI under the toggle
+  // ("Test location now") makes the resolved state legible.
   locationEnabled: false,
   cachedLocation: null,
 });
@@ -282,6 +290,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_OPENAI_MODEL),
       safeGet(SETTINGS_KEY_LANGUAGE),
       safeGet(SETTINGS_KEY_BUFFER_DURATION),
+      safeGet(SETTINGS_KEY_MIC_SOURCE),
       safeGet(SETTINGS_KEY_AUTO_SUMMARY_ENABLED),
       safeGet(SETTINGS_KEY_CROSS_SESSION_RECALL),
       safeGet(SETTINGS_KEY_DISCREET),
@@ -297,6 +306,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_AUTO_MODE_INTERVAL_MS),
       safeGet(SETTINGS_KEY_TRANSLATION_SOURCE_LANGS),
       safeGet(SETTINGS_KEY_TRANSLATION_MODE),
+      safeGet(SETTINGS_KEY_ROMANIZE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_MODE),
       safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED_LEGACY),
       safeGet(SETTINGS_KEY_LOCATION_ENABLED),
@@ -317,6 +327,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawOpenaiModel,
     rawLang,
     rawBuffer,
+    rawMicSource,
     rawAutoEnabled,
     rawCrossSessionRecall,
     rawDiscreet,
@@ -332,6 +343,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawAutoModeIntervalMs,
     rawTranslationSourceLangs,
     rawTranslationMode,
+    rawRomanize,
     rawTranscriptMode,
     rawTranscriptEnabledLegacy,
     rawLocationEnabled,
@@ -369,6 +381,9 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     sttModel: rawSttModel || DEFAULT_STT_MODEL,
     responseLanguage: coerceLanguage(rawLang),
     bufferDuration: coerceBufferDuration(rawBuffer),
+    // Only 'phone' opts out of the glasses default; empty/garbage falls back to
+    // the on-board array.
+    micSource: rawMicSource === 'phone' ? 'phone' : 'glasses',
     autoSummaryEnabled: rawAutoEnabled === 'true',
     crossSessionRecallEnabled: rawCrossSessionRecall === 'true',
     // Binary mode. New key wins; otherwise migrate from the legacy v0.14.0-dev
@@ -402,10 +417,12 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     ),
     translationSourceLanguages: coerceTranslationSourceLanguages(rawTranslationSourceLangs),
     translationMode: coerceTranslationMode(rawTranslationMode),
-    // Default to OFF when the key is unset (new install): the EvenHub Android
-    // host doesn't yet pass geolocation permission through to the WebView
-    // (EvenDemoApp issue #50), so the probe would silently fail. Wearers can
-    // opt in once the host fix ships; on iOS / desktop browser it works today.
+    // Opt-in romanization of non-European Translate output. Off when unset.
+    romanizeForeignScript: rawRomanize === 'true',
+    // Default to OFF when the key is unset (new install). A native location
+    // bridge now exists (`getAppLocation()`), but the wearer opts in
+    // deliberately — coords are sent to the LLM and on-device host support is
+    // not yet verified. See the default in the createSignal block above.
     locationEnabled: rawLocationEnabled === 'true',
     cachedLocation: coerceCachedLocation(rawCachedLocation),
   });
@@ -422,7 +439,7 @@ function coerceCachedLocation(raw: string): CachedLocation | null {
     if (!parsed || typeof parsed !== 'object') return null;
     const p = parsed as Record<string, unknown>;
     if (typeof p.resolvedAt !== 'number' || !Number.isFinite(p.resolvedAt)) return null;
-    if (p.source !== 'navigator' && p.source !== 'callEvenApp') return null;
+    if (p.source !== 'navigator' && p.source !== 'callEvenApp' && p.source !== 'getAppLocation') return null;
     if (typeof p.latitude !== 'number' || !Number.isFinite(p.latitude)) return null;
     if (typeof p.longitude !== 'number' || !Number.isFinite(p.longitude)) return null;
     const out: CachedLocation = {
@@ -574,6 +591,9 @@ export const saveResponseLanguage = (setLs: SetLs, language: LanguageCode): Prom
 export const saveBufferDuration = (setLs: SetLs, duration: BufferDuration): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_BUFFER_DURATION, 'bufferDuration', duration);
 
+export const saveMicSource = (setLs: SetLs, source: MicSource): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_MIC_SOURCE, 'micSource', source);
+
 export const saveAutoSummaryEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_SUMMARY_ENABLED, 'autoSummaryEnabled', enabled);
 
@@ -641,6 +661,9 @@ export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promis
 
 export const saveVoiceTrimEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_VOICE_TRIM, 'voiceTrimEnabled', enabled);
+
+export const saveRomanizeForeignScript = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_ROMANIZE, 'romanizeForeignScript', enabled);
 
 export const saveAutoModeEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUTO_MODE_ENABLED, 'autoModeEnabled', enabled);

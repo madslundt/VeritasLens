@@ -32,10 +32,18 @@ const LISTEN_IN_STARTERS_CLAUSE = `4. Return \`replyStarters\` as an empty array
 const TAIL = `Output strict JSON matching the provided schema. No prose outside JSON.
 If no clear human speech is detected, set noSpeech=true and return empty strings / empty arrays.`;
 
+/** Romanization clause appended when the wearer enables `romanizeForeignScript`.
+ *  Asks for a romanized companion of every original-language field, but ONLY
+ *  when that field is written in a non-Latin script — Latin-script speech
+ *  (Spanish, French, …) leaves the romanized fields empty so the HUD shows
+ *  nothing redundant. */
+const ROMANIZE_CLAUSE = `ROMANIZATION: If \`sourceText\` (and each starter's \`source\`) is written in a NON-Latin script (Japanese, Chinese, Korean, Cyrillic, Arabic, Thai, Hindi, etc.), also provide its standard romanization in \`sourceTextRomanized\` (and each starter's \`sourceRomanized\`): Hepburn Romaji for Japanese, Hanyu Pinyin WITH tone marks for Mandarin, Revised Romanization for Korean, and the conventional system for any other script. If the text is already in Latin script, return an empty string for those romanized fields.`;
+
 export function buildTranslationPrompt(
   lang: LanguageCode,
   source: TranslationSourceConfig = 'auto',
   mode: TranslationMode = 'converse',
+  romanize = false,
 ): string {
   const targetName = LANGUAGES[lang] ?? 'English';
   const sourceDirective =
@@ -55,9 +63,10 @@ export function buildTranslationPrompt(
     : `TARGET LANGUAGE: ${targetName}. Render \`translatedText\` and each starter's \`translated\` field in ${targetName}. ` +
       `\`sourceText\` and each starter's \`source\` field MUST stay in the original spoken language. ` +
       `\`sourceLanguage\` is always a BCP-47 short code (or "unknown") regardless of TARGET LANGUAGE.`;
+  const romanizeClause = romanize ? `\n\n${ROMANIZE_CLAUSE}` : '';
   return (
     `${BASE_PROMPT_HEADER}\n${startersClause}\n\n${TAIL}\n\n` +
-    `${targetClause}\n\nSOURCE: ${sourceDirective}`
+    `${targetClause}\n\nSOURCE: ${sourceDirective}${romanizeClause}`
   );
 }
 
@@ -66,8 +75,14 @@ const STARTER_ITEM_SCHEMA = {
   properties: {
     source: { type: 'string', description: 'Starter in the original spoken language (≤10 words).' },
     translated: { type: 'string', description: 'Same starter translated into the wearer display language.' },
+    sourceRomanized: { type: 'string', description: 'Romanization of `source` when it is a non-Latin script; empty otherwise.' },
   },
   required: ['source', 'translated'],
+} as const;
+
+const SOURCE_TEXT_ROMANIZED_SCHEMA = {
+  type: 'string',
+  description: 'Romanization of `sourceText` when it is a non-Latin script (Romaji/Pinyin/etc.); empty otherwise.',
 } as const;
 
 const CONVERSE_SCHEMA = {
@@ -75,6 +90,7 @@ const CONVERSE_SCHEMA = {
   properties: {
     sourceLanguage: { type: 'string', description: 'BCP-47 short code like "es", "fr"; or "unknown".' },
     sourceText: { type: 'string', description: 'Verbatim transcript in the spoken language (≤200 chars).' },
+    sourceTextRomanized: SOURCE_TEXT_ROMANIZED_SCHEMA,
     translatedText: { type: 'string', description: 'Natural translation into the wearer display language.' },
     replyStarters: {
       type: 'array',
@@ -91,6 +107,7 @@ const LISTEN_IN_SCHEMA = {
   properties: {
     sourceLanguage: { type: 'string', description: 'BCP-47 short code like "es", "fr"; or "unknown".' },
     sourceText: { type: 'string', description: 'Verbatim transcript in the spoken language (≤200 chars).' },
+    sourceTextRomanized: SOURCE_TEXT_ROMANIZED_SCHEMA,
     translatedText: { type: 'string', description: 'Natural translation into the wearer display language.' },
     replyStarters: {
       type: 'array',
@@ -119,6 +136,7 @@ export function parseTranslationResponse(text: string): LensResult {
     : 'unknown'
   ) || 'unknown';
   const sourceText = clipShort(raw['sourceText'], 220);
+  const sourceTextRomanized = clipShort(raw['sourceTextRomanized'], 220);
   const translatedText = clipShort(raw['translatedText'], 220);
   const startersRaw = Array.isArray(raw['replyStarters']) ? raw['replyStarters'] : [];
   const replyStarters = startersRaw
@@ -127,11 +145,13 @@ export function parseTranslationResponse(text: string): LensResult {
     .map((s) => ({
       source: clipShort(s['source'], 80),
       translated: clipShort(s['translated'], 80),
+      sourceRomanized: clipShort(s['sourceRomanized'], 80),
     }));
   return {
     type: 'translation',
     sourceLanguage,
     sourceText,
+    sourceTextRomanized,
     translatedText,
     replyStarters,
   };
@@ -156,6 +176,9 @@ export interface SayMoreArgs {
    *  reference what was just said. Each entry is the OTHER side's text in
    *  the foreign language. Pass the latest last. */
   recentTranscripts: string[];
+  /** When true, also ask for a romanization of `extendedSource` for non-Latin
+   *  scripts. Mirrors the wearer's `romanizeForeignScript` setting. */
+  romanize?: boolean;
 }
 
 export const SAY_MORE_SCHEMA = {
@@ -164,6 +187,10 @@ export const SAY_MORE_SCHEMA = {
     extendedSource: {
       type: 'string',
       description: 'Extended reply in the original (foreign) language, 1-3 sentences, ≤220 chars.',
+    },
+    extendedSourceRomanized: {
+      type: 'string',
+      description: 'Romanization of `extendedSource` when it is a non-Latin script; empty otherwise.',
     },
     extendedTranslated: {
       type: 'string',
@@ -199,18 +226,26 @@ export function buildSayMorePrompt(args: SayMoreArgs): string {
     `- ${args.starter.source}\n` +
     `- (${targetName}) ${args.starter.translated}\n\n` +
     `Output strict JSON matching the provided schema. No prose outside JSON. Keep ` +
-    `\`extendedSource\` ≤220 characters.`
+    `\`extendedSource\` ≤220 characters.` +
+    (args.romanize
+      ? `\n\nROMANIZATION: If \`extendedSource\` is in a non-Latin script (Japanese, Chinese, Korean, etc.), also fill \`extendedSourceRomanized\` with its standard romanization (Hepburn Romaji, Hanyu Pinyin with tone marks, Revised Romanization, …). If it is already Latin script, return an empty string.`
+      : '')
   );
 }
 
-/** Parse a Say-more response. Returns a tuple of (sourceLine, translatedLine).
- *  Defensive — missing fields fall back to the starter's original text via
- *  the caller. */
-export function parseSayMoreResponse(text: string): { extendedSource: string; extendedTranslated: string } {
+/** Parse a Say-more response. Returns the extended source/translated lines plus
+ *  an optional romanization of the source. Defensive — missing fields fall back
+ *  to the starter's original text via the caller. */
+export function parseSayMoreResponse(text: string): {
+  extendedSource: string;
+  extendedTranslated: string;
+  extendedSourceRomanized: string;
+} {
   const raw = parseJsonResponse(text);
   const extendedSource = clipShort(raw['extendedSource'], 240);
   const extendedTranslated = clipShort(raw['extendedTranslated'], 240);
-  return { extendedSource, extendedTranslated };
+  const extendedSourceRomanized = clipShort(raw['extendedSourceRomanized'], 240);
+  return { extendedSource, extendedTranslated, extendedSourceRomanized };
 }
 
 // ---------- Wearer-speak (two-way) ----------
@@ -225,6 +260,10 @@ export interface WearerSpeakArgs {
    *  translation's `sourceLanguage`. Empty / 'unknown' is rejected upstream
    *  before we get here — the lifecycle gates on having a known target. */
   targetLangCode: string;
+  /** When true, also ask for a romanization of `translated` (the foreign-side
+   *  line the wearer reads aloud) for non-Latin scripts. Mirrors the wearer's
+   *  `romanizeForeignScript` setting. */
+  romanize?: boolean;
 }
 
 export const WEARER_SPEAK_SCHEMA = {
@@ -237,6 +276,10 @@ export const WEARER_SPEAK_SCHEMA = {
     translated: {
       type: 'string',
       description: 'Same utterance translated into the target (foreign-side) language.',
+    },
+    translatedRomanized: {
+      type: 'string',
+      description: 'Romanization of `translated` when the target is a non-Latin script; empty otherwise.',
     },
   },
   required: ['spoken', 'translated'],
@@ -261,16 +304,24 @@ export function buildWearerSpeakPrompt(args: WearerSpeakArgs): string {
     `2. \`translated\`: \`spoken\` translated naturally into ${targetHint} so the wearer can read it aloud to the other person.\n\n` +
     `Be conversational and natural — match the social register of the speech (formal / casual / friendly).\n\n` +
     `Output strict JSON matching the provided schema. No prose outside JSON. ` +
-    `If no clear human speech is detected, set noSpeech=true and return empty strings.`
+    `If no clear human speech is detected, set noSpeech=true and return empty strings.` +
+    (args.romanize
+      ? `\n\nROMANIZATION: If \`translated\` is in a non-Latin script (Japanese, Chinese, Korean, etc.), also fill \`translatedRomanized\` with its standard romanization (Hepburn Romaji, Hanyu Pinyin with tone marks, Revised Romanization, …) so the wearer can pronounce it. If it is already Latin script, return an empty string.`
+      : '')
   );
 }
 
-/** Parse a wearer-speak response. Defensive — both fields default to empty
+/** Parse a wearer-speak response. Defensive — fields default to empty
  *  strings on missing data, and the caller falls back to a generic
  *  "no speech detected" message rather than rendering blank. */
-export function parseWearerSpeakResponse(text: string): { spoken: string; translated: string } {
+export function parseWearerSpeakResponse(text: string): {
+  spoken: string;
+  translated: string;
+  translatedRomanized: string;
+} {
   const raw = parseJsonResponse(text);
   const spoken = clipShort(raw['spoken'], 240);
   const translated = clipShort(raw['translated'], 240);
-  return { spoken, translated };
+  const translatedRomanized = clipShort(raw['translatedRomanized'], 240);
+  return { spoken, translated, translatedRomanized };
 }

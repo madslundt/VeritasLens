@@ -1255,6 +1255,51 @@ describe('translation persona', () => {
     expect(schema.properties.replyStarters.minItems).toBe(0);
     expect(schema.properties.replyStarters.maxItems).toBe(0);
   });
+
+  // ---------- romanization (romanizeForeignScript) ----------
+
+  it('buildTranslationPrompt appends the romanization clause only when enabled', () => {
+    const off = buildTranslationPrompt('en', 'auto', 'converse', false);
+    const on = buildTranslationPrompt('en', 'auto', 'converse', true);
+    expect(off).not.toContain('ROMANIZATION');
+    expect(on).toContain('ROMANIZATION');
+    expect(on).toContain('Romaji');
+    expect(on).toContain('Pinyin');
+  });
+
+  it('buildTranslationPrompt defaults romanize to off (back-compat with 3-arg callers)', () => {
+    const threeArg = buildTranslationPrompt('en', 'auto', 'converse');
+    expect(threeArg).not.toContain('ROMANIZATION');
+  });
+
+  it('parseTranslationResponse reads romanized fields for a non-Latin script', () => {
+    const result = parseTranslationResponse(JSON.stringify({
+      sourceLanguage: 'ja',
+      sourceText: 'こんにちは、はじめまして。',
+      sourceTextRomanized: 'Konnichiwa, hajimemashite.',
+      translatedText: 'Hello, nice to meet you.',
+      replyStarters: [
+        { source: 'よろしくお願いします。', translated: 'Pleased to meet you.', sourceRomanized: 'Yoroshiku onegshimasu.' },
+      ],
+    }));
+    if (result.type === 'translation') {
+      expect(result.sourceTextRomanized).toBe('Konnichiwa, hajimemashite.');
+      expect(result.replyStarters[0]!.sourceRomanized).toContain('Yoroshiku');
+    }
+  });
+
+  it('parseTranslationResponse leaves romanized fields empty when the model omits them', () => {
+    const result = parseTranslationResponse(JSON.stringify({
+      sourceLanguage: 'es',
+      sourceText: 'Hola',
+      translatedText: 'Hello',
+      replyStarters: [{ source: 'Sí', translated: 'Yes' }],
+    }));
+    if (result.type === 'translation') {
+      expect(result.sourceTextRomanized).toBe('');
+      expect(result.replyStarters[0]!.sourceRomanized).toBe('');
+    }
+  });
 });
 
 describe('say-more expansion', () => {
@@ -1322,6 +1367,27 @@ describe('say-more expansion', () => {
     const parsed = parseSayMoreResponse(JSON.stringify({}));
     expect(parsed.extendedSource).toBe('');
     expect(parsed.extendedTranslated).toBe('');
+    expect(parsed.extendedSourceRomanized).toBe('');
+  });
+
+  it('buildSayMorePrompt appends the romanization clause only when enabled', () => {
+    const base = {
+      starter: { source: 'こんにちは', translated: 'Hello' },
+      targetLang: 'en' as const,
+      sourceLang: 'ja',
+      recentTranscripts: [],
+    };
+    expect(buildSayMorePrompt(base)).not.toContain('ROMANIZATION');
+    expect(buildSayMorePrompt({ ...base, romanize: true })).toContain('ROMANIZATION');
+  });
+
+  it('parseSayMoreResponse reads extendedSourceRomanized when present', () => {
+    const parsed = parseSayMoreResponse(JSON.stringify({
+      extendedSource: 'コーヒーをください。',
+      extendedSourceRomanized: 'Kōhī o kudasai.',
+      extendedTranslated: 'A coffee, please.',
+    }));
+    expect(parsed.extendedSourceRomanized).toContain('Kōhī');
   });
 });
 
@@ -1357,6 +1423,23 @@ describe('wearer-speak (two-way)', () => {
     const parsed = parseWearerSpeakResponse(JSON.stringify({}));
     expect(parsed.spoken).toBe('');
     expect(parsed.translated).toBe('');
+    expect(parsed.translatedRomanized).toBe('');
+  });
+
+  it('buildWearerSpeakPrompt appends the romanization clause only when enabled', () => {
+    const off = buildWearerSpeakPrompt({ wearerLang: 'en', targetLangCode: 'ja' });
+    const on = buildWearerSpeakPrompt({ wearerLang: 'en', targetLangCode: 'ja', romanize: true });
+    expect(off).not.toContain('ROMANIZATION');
+    expect(on).toContain('ROMANIZATION');
+  });
+
+  it('parseWearerSpeakResponse reads translatedRomanized when present', () => {
+    const parsed = parseWearerSpeakResponse(JSON.stringify({
+      spoken: 'Where is the bus stop?',
+      translated: 'バス停はどこですか？',
+      translatedRomanized: 'Basutei wa doko desu ka?',
+    }));
+    expect(parsed.translatedRomanized).toContain('Basutei');
   });
 });
 

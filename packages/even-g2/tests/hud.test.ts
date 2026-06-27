@@ -736,6 +736,47 @@ describe('multi-claim active page', () => {
     expect(lastUpgradeByName('vl-reason')).toBe('1/1 · C1\n\n+ TRUE\n\nR1');
   });
 
+  it('translation view shows romanization IN PLACE OF non-Latin source (not both)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('translation')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'translation',
+      sourceLanguage: 'ja',
+      sourceText: 'こんにちは',
+      sourceTextRomanized: 'Konnichiwa',
+      translatedText: 'Hello',
+      replyStarters: [{ source: 'はい', translated: 'Yes', sourceRomanized: 'Hai' }],
+    });
+    const body = lastUpgradeByName('vl-reason')!;
+    expect(body).toContain('Japanese'); // spelled out, not the bare "JA" code
+    expect(body).not.toMatch(/\bJA\b/);
+    expect(body).toContain('Konnichiwa');
+    expect(body).not.toContain('こんにちは'); // native script replaced, not shown alongside
+    expect(body).toContain('Hai');
+    expect(body).not.toContain('はい');
+    expect(body).toContain('Hello'); // the display-language translation is always shown
+  });
+
+  it('translation view keeps the native source when no romanization is provided (Latin / feature off)', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('translation')!);
+
+    bridge.textContainerUpgrade.mockClear();
+    await setLensResult({
+      type: 'translation',
+      sourceLanguage: 'es',
+      sourceText: 'Hola',
+      translatedText: 'Hello',
+      replyStarters: [{ source: 'Sí', translated: 'Yes' }],
+    });
+    const body = lastUpgradeByName('vl-reason')!;
+    expect(body).toContain('Spanish'); // code resolved to its English name
+    expect(body).toContain('Hola');
+    expect(body).toContain('Sí');
+  });
+
   it('scrollActiveReason advances to claim 2 and rewrites the unified body with the new session-relative prefix', async () => {
     const { scrollActiveReason } = await import('../src/runtime/hud');
     await bootstrapHud('picker');

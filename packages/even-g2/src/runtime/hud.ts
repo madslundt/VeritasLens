@@ -136,7 +136,7 @@ export type HudPage =
  *  page. Read by buildTranslationTeleprompterPage so a Say-more retry can
  *  identify which starter to extend. Replaced atomically when a new picker
  *  selection happens. */
-export type TranslationStarter = { source: string; translated: string };
+export type TranslationStarter = { source: string; translated: string; sourceRomanized?: string };
 
 export const ACTIVE_HINT_DEFAULT = 'Tap: menu · Double-tap: check';
 export const ACTIVE_HINT_ANALYZING = 'Analyzing · Double-tap to cancel';
@@ -1210,11 +1210,20 @@ export function formatLensResultBase(
       // as two lines: translated reply first because that's the wearer's
       // primary reading language, then the source-language version
       // underneath so they know what to actually speak).
-      const srcLang = (result.sourceLanguage || 'xx').toUpperCase().slice(0, 4);
-      const top = result.sourceText ? clip(`${srcLang}  ${result.sourceText}`, 220) : '';
+      // Spell the detected language out ("Danish", "Japanese") so the wearer
+      // can verify the lens caught it correctly — a bare "DA" is easy to
+      // misread. `languageDisplayName` resolves the BCP-47 code to an English
+      // name, falling back to the upper-cased code when it can't.
+      const srcLang = languageDisplayName(result.sourceLanguage);
+      // When romanization is enabled and the source is a non-Latin script, the
+      // model fills `sourceTextRomanized` / each starter's `sourceRomanized`; we
+      // show that IN PLACE OF the native script (one line, not both). Empty
+      // otherwise (Latin script or feature off) → native text is shown.
+      const sourceLine = withRomanized(result.sourceText, result.sourceTextRomanized);
+      const top = sourceLine ? clip(`${srcLang}  ${sourceLine}`, 220) : '';
       const middle = clip(result.translatedText, 220);
       const starters = result.replyStarters
-        .map((s, i) => `${i + 1}. ${s.translated}\n   ${s.source}`)
+        .map((s, i) => `${i + 1}. ${s.translated}\n   ${withRomanized(s.source, s.sourceRomanized)}`)
         .join('\n');
       return { top, middle, bottom: starters };
     }
@@ -1224,6 +1233,28 @@ export function formatLensResultBase(
 function clip(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
+}
+
+/**
+ * Resolve a BCP-47 short code (what the Translate lens returns in
+ * `sourceLanguage`, e.g. "da", "ja", "zh") to a human-readable English name
+ * ("Danish", "Japanese", "Chinese") so the wearer can confirm the lens
+ * identified the language correctly. Uses the platform's `Intl.DisplayNames`,
+ * which covers far more languages than our 11-entry `LANGUAGES` dict and would
+ * otherwise fall back to native names anyway. Falls back to the upper-cased
+ * code when the runtime lacks `Intl.DisplayNames`, the code is unknown (Intl
+ * echoes the input back), or it's the lens's "unknown" sentinel.
+ */
+function languageDisplayName(code: string): string {
+  const c = (code || '').trim();
+  if (!c || c.toLowerCase() === 'unknown') return 'Unknown';
+  try {
+    const name = new Intl.DisplayNames(['en'], { type: 'language' }).of(c);
+    if (name && name.toLowerCase() !== c.toLowerCase()) return name;
+  } catch {
+    // Intl.DisplayNames unavailable or threw on a malformed code — fall through.
+  }
+  return c.toUpperCase();
 }
 
 /**
@@ -2548,16 +2579,30 @@ export async function showTranslationPickerPage(
   currentPage = 'translation-picker';
 }
 
+/** Pick the line to show for a foreign-language field: the romanization when
+ *  the wearer enabled `romanizeForeignScript` and the model returned one
+ *  (non-Latin script), otherwise the native text. We show ONE line, not both —
+ *  a wearer who wants Romaji/Pinyin can't read the native script anyway, and
+ *  the small HUD has no room to spare. Latin-script speech / feature off →
+ *  romanized is empty → native is shown unchanged. */
+function withRomanized(native: string, romanized: string | undefined): string {
+  const r = (romanized ?? '').trim();
+  return r || native;
+}
+
 function buildTranslationTeleprompterPage(
   starter: TranslationStarter,
-  extended: { source: string; translated: string } | null,
+  extended: { source: string; translated: string; sourceRomanized?: string } | null,
 ): RebuildPageContainer {
   // Source on top in a tall body (what the wearer will read aloud); the
   // wearer-language translation sits at the bottom as a smaller reference.
   // Source font is the same as everywhere else on this hardware — there's no
   // size knob exposed by the SDK; we get "larger" via more vertical space
   // and the natural readability of foreground vs subordinate text.
-  const sourceText = extended?.source || starter.source || '(empty)';
+  const sourceText = withRomanized(
+    extended?.source || starter.source || '(empty)',
+    extended?.sourceRomanized ?? starter.sourceRomanized,
+  );
   const translatedText = extended?.translated || starter.translated || '';
   const body = new TextContainerProperty({
     containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 4,
@@ -2600,10 +2645,11 @@ export async function showTranslationTeleprompterPage(
 export async function updateTranslationTeleprompterExtended(
   extendedSource: string,
   extendedTranslated: string,
+  extendedSourceRomanized?: string,
 ): Promise<void> {
   if (currentPage !== 'translation-teleprompter') return;
   if (!activeTranslationStarter) return;
-  await upgradeText(CONTAINER.reason, NAME.reason, extendedSource);
+  await upgradeText(CONTAINER.reason, NAME.reason, withRomanized(extendedSource, extendedSourceRomanized));
   await upgradeText(CONTAINER.activeList, NAME.activeList, extendedTranslated);
 }
 
@@ -2626,13 +2672,13 @@ export function getActiveTranslationStarter(): TranslationStarter | null {
 
 function buildTranslationWearerSpeakPage(
   state: 'recording' | 'result',
-  result: { spoken: string; translated: string } | null,
+  result: { spoken: string; translated: string; translatedRomanized?: string } | null,
 ): RebuildPageContainer {
   // Recording state: prominent "Speak now…" prompt; foreign-language line
   // (the translation) lands here once the call returns.
   const bodyText = state === 'recording'
     ? 'Speak now…'
-    : (result?.translated || '(no speech detected)');
+    : withRomanized(result?.translated || '(no speech detected)', result?.translatedRomanized);
   // Result state: the wearer's own utterance shows below as confirmation
   // ("did I hear you right?"); empty during recording.
   const echoText = state === 'recording'
@@ -2688,10 +2734,15 @@ export async function showTranslationWearerSpeakPage(): Promise<void> {
 export async function updateTranslationWearerSpeakResult(
   spoken: string,
   translated: string,
+  translatedRomanized?: string,
 ): Promise<void> {
   if (currentPage !== 'translation-wearer-speak') return;
   wearerSpeakState = 'result';
-  await upgradeText(CONTAINER.reason, NAME.reason, translated || '(no speech detected)');
+  await upgradeText(
+    CONTAINER.reason,
+    NAME.reason,
+    withRomanized(translated || '(no speech detected)', translatedRomanized),
+  );
   await upgradeText(CONTAINER.activeList, NAME.activeList, spoken || '');
   await upgradeText(CONTAINER.activeHint, NAME.activeHint, 'Tap: menu · Double-tap: speak again');
 }
