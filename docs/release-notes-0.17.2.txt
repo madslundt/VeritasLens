@@ -1,0 +1,3 @@
+VeritasLens 0.17.2
+
+Restores extra space at the bottom of phone pages so controls remain reachable after using the keyboard. Retains the redesigned settings, custom AI and Whisper servers, improved speech detection, and reliable analysis cancellation. Includes the Phone microphone permission.

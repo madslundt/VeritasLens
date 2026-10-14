@@ -2,6 +2,10 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.17.2] — 2026-10-14
+
+- Restore the persistent bottom scroll buffer in phone settings. The Even App WebView needs this space even after the keyboard closes; focus-only padding and viewport-driven footer movement could reduce scroll range and make lower controls difficult to reach.
+
 ## [0.17.1] — 2026-10-14
 
 - Declare the `phone-microphone` permission required by the existing Phone microphone option. The upload package now includes both microphone permissions.

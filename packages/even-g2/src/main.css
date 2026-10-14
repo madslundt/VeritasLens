@@ -122,19 +122,19 @@ a {
 
 /* ---------- Settings layout ---------- */
 
-/* Mobile-first shell. Extra scroll space is added only while editing; the
-   fixed footer and the host keyboard otherwise leave no long empty tail. */
+/* Keep the keyboard scroll buffer even after focus leaves an input. The
+   Even App WebView can retain its native scroll offset after the keyboard
+   closes without resizing the layout viewport. Shrinking this space on blur
+   or visualViewport events makes lower controls unreachable or jumps scroll.
+   The persistent 445px buffer clears the keyboard plus the fixed footer;
+   preserve this device workaround when changing the phone layout. */
 .settings {
   max-width: 560px;
   margin: 0 auto;
-  padding: 28px 24px calc(148px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px));
+  padding: 28px 24px calc(max(3rem, env(safe-area-inset-bottom, 0px)) + 445px);
   display: flex;
   flex-direction: column;
   gap: 24px;
-}
-
-.settings:has(input:focus, textarea:focus) {
-  padding-bottom: calc(400px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px));
 }
 
 /* ---------- Device badge ---------- */
@@ -974,7 +974,7 @@ button.lens-info--clickable:focus-visible {
    under a separate floating element. */
 .bottom-stack {
   position: fixed;
-  bottom: var(--keyboard-inset, 0px);
+  bottom: 0;
   left: 50%;
   width: 100%;
   max-width: 560px;

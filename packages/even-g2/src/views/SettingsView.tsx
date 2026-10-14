@@ -807,19 +807,6 @@ export const SettingsView: Component = () => {
     if (isChatOnlyHost(draftOpenaiBaseUrl())) return 'Uses a separate speech-to-text provider to listen.';
     return 'Transcribes your audio, then analyzes the conversation.';
   });
-  // Keep typing above the keyboard in WebViews that do not resize the page.
-  const [keyboardInset, setKeyboardInset] = createSignal(0);
-  const updateKeyboardInset = (): void => {
-    const viewport = window.visualViewport;
-    setKeyboardInset(viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0);
-  };
-  window.visualViewport?.addEventListener('resize', updateKeyboardInset);
-  window.visualViewport?.addEventListener('scroll', updateKeyboardInset);
-  onCleanup(() => {
-    window.visualViewport?.removeEventListener('resize', updateKeyboardInset);
-    window.visualViewport?.removeEventListener('scroll', updateKeyboardInset);
-  });
-
   // Session log navigation
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
   const [expandedEntryId, setExpandedEntryId] = createSignal<string | null>(null);
@@ -1677,7 +1664,7 @@ export const SettingsView: Component = () => {
   const savedWithoutChanges = (): boolean => saveState() === 'saved' && !hasUnsavedChanges();
 
   return (
-    <main class="settings" style={{ '--keyboard-inset': `${keyboardInset()}px` }}>
+    <main class="settings">
       <header class="app-header">
         <div class="brand"><SettingsIcon name="lens" /><span>VeritasLens</span></div>
         <div class="device-status" role="status">
