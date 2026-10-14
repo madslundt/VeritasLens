@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.17.1 — 2026-10-14
+
+- Declare the `phone-microphone` permission required by the existing Phone microphone option. The upload package now includes both microphone permissions.
+
 ## 0.17.0 — 2026-10-14
 
 - **Custom chat and Whisper servers.** Configure an OpenAI-compatible base URL, model ID, optional key, and ordered fallback addresses in G2 and Ray-Ban settings. Model loading, connection tests, games, transcription, and analysis use the configured addresses. G2 custom origins must be added to the network whitelist before repacking.

@@ -1,0 +1,3 @@
+VeritasLens 0.17.1
+
+Clearer glasses results and redesigned phone settings. Adds custom AI and Whisper servers with fallback addresses, improves local speech detection, and makes analysis and cancellation more reliable. Includes the required permission for the Phone microphone option.
