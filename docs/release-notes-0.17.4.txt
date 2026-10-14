@@ -1,0 +1,5 @@
+VeritasLens 0.17.4
+
+Model selection is simpler in G2 and Ray-Ban settings: choose LLM and Whisper models from dropdowns. Opening a custom-server dropdown loads the server's available models; separate model-entry fields and load buttons have been removed.
+
+Recording window options now include 30 seconds, 1 minute, 2 minutes, 3 minutes, and 5 minutes.

@@ -2,6 +2,11 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.17.4] — 2026-10-14
+
+- Simplify LLM and Whisper model selection to dropdowns. Opening a custom-server dropdown loads its available models; manual model fields and separate load buttons are removed.
+- Add 1-minute and 3-minute recording windows alongside 30 seconds, 2 minutes, and 5 minutes in G2 and Ray-Ban settings.
+
 ## [0.17.3] — 2026-10-14
 
 - Add optional Tavily web search for providers without native search, with isolated credentials, connection testing, citations, and a toggle that preserves the saved key.

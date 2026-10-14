@@ -122,7 +122,9 @@ const IDLE_TEST: ModelTestStatus = { state: 'idle', message: '' };
 
 const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
   { value: 30, label: '30 seconds' },
+  { value: 60, label: '1 minute' },
   { value: 120, label: '2 minutes' },
+  { value: 180, label: '3 minutes' },
   { value: 300, label: '5 minutes' },
 ];
 
@@ -543,10 +545,10 @@ export const SettingsView: Component = () => {
       );
       if (controller.signal.aborted || sttModelsController !== controller) return;
       setSttModels(models);
-      if (models.length === 0) setSttModelsMessage('This server does not list models. Enter the model ID manually.');
+      if (models.length === 0) setSttModelsMessage('This server did not return any models.');
     } catch (error) {
       if (!controller.signal.aborted && sttModelsController === controller) {
-        setSttModelsMessage(`${error instanceof Error ? error.message : String(error)} Manual model entry is still available.`);
+        setSttModelsMessage(error instanceof Error ? error.message : String(error));
       }
     } finally {
       if (sttModelsController === controller) setSttModelsLoading(false);
@@ -2529,13 +2531,6 @@ export const SettingsView: Component = () => {
                     <span class="spinner inline" />
                   </Show>
                 </span>
-                <Show when={isCustomEndpoint()}>
-                  <input type="text" aria-label="Model ID" autocomplete="off" spellcheck={false}
-                    placeholder="Model ID served by your endpoint" value={draftOpenaiModel()}
-                    onInput={(e) => { setDraftOpenaiModel(e.currentTarget.value); clearStatuses(); }} />
-                  <button type="button" class="secondary" onClick={refreshOpenAiModels}
-                    disabled={!!customUrlError() || openaiModelsLoading()}>Load models</button>
-                </Show>
                 <select
                   aria-label="Analysis model"
                   value={draftOpenaiModel()}
@@ -2567,7 +2562,7 @@ export const SettingsView: Component = () => {
                   <span class="field-hint">Models available.</span>
                 </Show>
                 <Show when={(isCustomEndpoint() || draftOpenaiKey().trim().length >= 10) && !openaiModelsLoading() && openaiFetchState() === 'fail'}>
-                  <span class="field-error">Could not load models — check the endpoint and key, or enter a model ID manually.</span>
+                  <span class="field-error">Could not load models — check the endpoint and key.</span>
                 </Show>
                 <div class="model-test-row">
                   <button
@@ -2673,22 +2668,15 @@ export const SettingsView: Component = () => {
                   <For each={STT_MODELS_BY_HOST[draftSttHost()] ?? []}>{(model) => <option value={model}>{model}</option>}</For>
                 </select>
               }>
-                <input type="text" aria-label="Speech-to-text model" placeholder="Model ID served by your Whisper endpoint"
-                  autocomplete="off" spellcheck={false} value={draftSttModel()}
-                  onInput={(e) => { setDraftSttModel(e.currentTarget.value); setDraftCustomSttModel(e.currentTarget.value); clearStatuses(); }} />
-                <button type="button" class="secondary" onClick={() => void refreshSttModels()}
-                  disabled={!!sttUrlError() || !!fallbackError() || sttModelsLoading()}>
-                  {sttModelsLoading() ? 'Loading models…' : 'Load Whisper models'}
-                </button>
-                <Show when={sttModels().length > 0}>
-                  <select aria-label="Available speech-to-text models" value={draftSttModel()}
-                    onChange={(e) => { setDraftSttModel(e.currentTarget.value); setDraftCustomSttModel(e.currentTarget.value); clearStatuses(); }}>
-                    <Show when={!draftSttModel()}><option value="">Choose a model</option></Show>
-                    <For each={modelOptions(draftSttModel(), sttModels())}>{(model) => <option value={model}>{model}</option>}</For>
-                  </select>
-                </Show>
+                <select aria-label="Speech-to-text model" value={draftSttModel()}
+                  disabled={!!sttUrlError() || !!fallbackError()}
+                  onFocus={() => void refreshSttModels()}
+                  onChange={(e) => { setDraftSttModel(e.currentTarget.value); setDraftCustomSttModel(e.currentTarget.value); clearStatuses(); }}>
+                  <For each={modelOptions(draftSttModel(), sttModels())}>{(model) => <option value={model}>{model}</option>}</For>
+                </select>
+                <Show when={sttModelsLoading()}><span class="field-hint">Loading models…</span></Show>
                 <Show when={sttModelsMessage()}><span class="field-hint" role="status">{sttModelsMessage()}</span></Show>
-                <span class="field-hint">Load models from the primary or fallback server when it supports /models, or enter a model ID manually.</span>
+                <span class="field-hint">Open the dropdown to load models from this server.</span>
               </Show>
               <Show when={sttDraftError() && !sttUrlError()}><span class="field-error">{sttDraftError()}</span></Show>
             </label>

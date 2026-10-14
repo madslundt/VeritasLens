@@ -957,7 +957,7 @@ function coerceLanguage(raw: string | null | undefined): LanguageCode {
 
 function coerceBufferDuration(raw: string | null | undefined): BufferDuration {
   const n = Number(raw);
-  if (n === 30 || n === 120 || n === 300) return n;
+  if (n === 30 || n === 60 || n === 120 || n === 180 || n === 300) return n;
   // Back-compat: 0.6.x persisted 600 (10 min); clamp to the new 5-min cap.
   if (n === 600) return 300;
   return DEFAULT_BUFFER_DURATION;

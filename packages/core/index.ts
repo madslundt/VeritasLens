@@ -7,6 +7,8 @@ export * from './src/llm/streamingJsonParser';
 export { resolveProviderGrounding, resolveSearchFallback, applyModelGrounding } from './src/llm/tools';
 export type { ProviderGroundingResult } from './src/llm/tools';
 export { fetchOpenAiModels } from './src/llm/openai';
+export { fetchAvailableModels as fetchGeminiModels } from './src/llm/gemini';
+export { fetchAvailableModels as fetchClaudeModels } from './src/llm/claude';
 export { fetchTranscriptionModels } from './src/llm/transcriptionModels';
 
 // Personas — LensGrounding is already exported (wider) from types; suppress the narrower duplicate

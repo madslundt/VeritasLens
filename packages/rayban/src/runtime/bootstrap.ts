@@ -259,7 +259,8 @@ export async function bootstrap(): Promise<void> {
 
   const bufferDurationParsed = Number(bufferDurationRaw ?? '');
   const effectiveBufferDuration: RaybanSettings['bufferDurationSec'] =
-    bufferDurationParsed === 30 || bufferDurationParsed === 120 || bufferDurationParsed === 300
+    bufferDurationParsed === 30 || bufferDurationParsed === 60 || bufferDurationParsed === 120
+      || bufferDurationParsed === 180 || bufferDurationParsed === 300
       ? bufferDurationParsed
       : 30;
 

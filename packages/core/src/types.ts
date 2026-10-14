@@ -617,7 +617,7 @@ export type LanguageCode = keyof typeof LANGUAGES;
 export const DEFAULT_LANGUAGE: LanguageCode = 'en';
 
 /** Seconds the rolling PCM buffer holds. */
-export type BufferDuration = 30 | 120 | 300;
+export type BufferDuration = 30 | 60 | 120 | 180 | 300;
 
 /**
  * Binary control for the rolling tagged transcript pipeline. See the

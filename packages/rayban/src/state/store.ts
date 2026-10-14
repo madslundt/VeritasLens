@@ -10,7 +10,7 @@ export interface RaybanSettings {
   cameraEnabled: boolean;
   ttsEnabled: boolean;
   ttsRate: number;
-  bufferDurationSec: 30 | 120 | 300;
+  bufferDurationSec: 30 | 60 | 120 | 180 | 300;
   provider: LlmProvider;
   geminiModel: string;
   claudeModel: string;

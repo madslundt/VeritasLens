@@ -29,7 +29,13 @@ export function SettingsScreen() {
     void setLocalStorage(KEY_CAMERA_ENABLED, String(value));
   }
 
-  const bufferOptions: Array<30 | 120 | 300> = [30, 120, 300];
+  const bufferOptions: Array<{ seconds: 30 | 60 | 120 | 180 | 300; label: string }> = [
+    { seconds: 30, label: '30 sec' },
+    { seconds: 60, label: '1 min' },
+    { seconds: 120, label: '2 min' },
+    { seconds: 180, label: '3 min' },
+    { seconds: 300, label: '5 min' },
+  ];
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
@@ -60,26 +66,26 @@ export function SettingsScreen() {
       <Text style={styles.sectionHeader}>Buffer duration</Text>
 
       <View style={styles.segmentRow}>
-        {bufferOptions.map((sec) => (
+        {bufferOptions.map(({ seconds, label }) => (
           <TouchableOpacity
-            key={sec}
+            key={seconds}
             style={[
               styles.segmentButton,
-              settings.bufferDurationSec === sec && styles.segmentButtonActive,
+              settings.bufferDurationSec === seconds && styles.segmentButtonActive,
             ]}
             onPress={() => {
-              updateSettings({ bufferDurationSec: sec });
+              updateSettings({ bufferDurationSec: seconds });
               patchFullSettings({});
-              void setLocalStorage('veritaslens.bufferDurationSec', String(sec));
+              void setLocalStorage('veritaslens.bufferDurationSec', String(seconds));
             }}
           >
             <Text
               style={[
                 styles.segmentLabel,
-                settings.bufferDurationSec === sec && styles.segmentLabelActive,
+                settings.bufferDurationSec === seconds && styles.segmentLabelActive,
               ]}
             >
-              {sec}s
+              {label}
             </Text>
           </TouchableOpacity>
         ))}
@@ -122,6 +128,7 @@ const styles = StyleSheet.create({
   },
   segmentRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     marginHorizontal: 16,
     marginTop: 4,
     gap: 8,

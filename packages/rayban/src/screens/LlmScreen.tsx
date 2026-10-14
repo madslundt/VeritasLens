@@ -6,10 +6,11 @@ import {
   runSelfTest, settings, OPENAI_BASE_URLS, OPENAI_INLINE_AUDIO_HOSTS,
   STT_HOSTS, openaiHostLabel, normalizeOpenAiBaseUrl,
   isCustomOpenAiBaseUrl, isOpenAiChatOnlyHost, isCustomSttHost, defaultSttModel,
-  fetchTranscriptionModels, STT_MODELS_BY_HOST,
+  fetchTranscriptionModels, fetchGeminiModels, fetchClaudeModels, fetchOpenAiModels,
+  STT_MODELS_BY_HOST,
   runTavilySelfTest,
 } from '@veritaslens/core';
-import type { LlmProvider, SttHost } from '@veritaslens/core';
+import type { LlmProvider, OpenAiBaseUrl, SttHost } from '@veritaslens/core';
 import { useStore } from '../state/store';
 import { patchFullSettings } from '../runtime/bootstrap';
 import { setLocalStorage } from '../runtime/bridge-rn';
@@ -40,6 +41,11 @@ export function LlmScreen() {
   const [sttModelsMessage, setSttModelsMessage] = useState<string | null>(null);
   const [sttModelPickerOpen, setSttModelPickerOpen] = useState(false);
   const sttModelsController = useRef<AbortController | null>(null);
+  const [models, setModels] = useState<string[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsMessage, setModelsMessage] = useState<string | null>(null);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const modelsController = useRef<AbortController | null>(null);
   const [tavilyEnabled, setTavilyEnabled] = useState(storeSettings.tavilyEnabled ?? false);
   const [tavilyKey, setTavilyKey] = useState('');
   const [tavilyTesting, setTavilyTesting] = useState(false);
@@ -61,6 +67,17 @@ export function LlmScreen() {
       sttModelsController.current = null;
     };
   }, [sttHost, sttKey, sttFallbackUrls, provider, baseUrl, apiKey]);
+
+  useEffect(() => {
+    setModels([]);
+    setModelsLoading(false);
+    setModelsMessage(null);
+    setModelPickerOpen(false);
+    return () => {
+      modelsController.current?.abort();
+      modelsController.current = null;
+    };
+  }, [provider, baseUrl, apiKey, fallbackUrls]);
 
   // Hydration can finish after the screen's first render.
   useEffect(() => {
@@ -115,7 +132,12 @@ export function LlmScreen() {
     ? Boolean(sttHost.trim() && sttModel.trim()) : Boolean(sttKey.trim());
   const useSpeechSettings = needsStt && (!optionalSidecar || speechConfigured);
   const busy = testing || saving || tavilyTesting;
-  const availableSttModels = isCustomSttHost(sttHost) ? sttModels : STT_MODELS_BY_HOST[sttHost] ?? [];
+  const listedModels = models;
+  const availableModels = model && !listedModels.includes(model) ? [model, ...listedModels] : listedModels;
+  const listedSttModels = isCustomSttHost(sttHost) ? sttModels : STT_MODELS_BY_HOST[sttHost] ?? [];
+  const availableSttModels = sttModel && !listedSttModels.includes(sttModel)
+    ? [sttModel, ...listedSttModels]
+    : listedSttModels;
 
   async function loadSttModels() {
     if (sttModelsLoading) return;
@@ -133,15 +155,54 @@ export function LlmScreen() {
       );
       if (controller.signal.aborted || sttModelsController.current !== controller) return;
       setSttModels(models);
-      if (models.length > 0) setSttModelPickerOpen(true);
-      else setSttModelsMessage('This server does not list models. Enter the model ID manually.');
+      if (models.length === 0) setSttModelsMessage('This server did not return any models.');
     } catch (error) {
       if (!controller.signal.aborted && sttModelsController.current === controller) {
-        setSttModelsMessage(`${error instanceof Error ? error.message : String(error)} Manual model entry is still available.`);
+        setSttModelsMessage(error instanceof Error ? error.message : String(error));
       }
     } finally {
       if (sttModelsController.current === controller) setSttModelsLoading(false);
     }
+  }
+
+  function openSttModelPicker() {
+    setSttModelPickerOpen(true);
+    if (isCustomSttHost(sttHost) && sttModels.length === 0) void loadSttModels();
+  }
+
+  async function loadModels() {
+    if (modelsLoading) return;
+    const controller = new AbortController();
+    modelsController.current?.abort();
+    modelsController.current = controller;
+    setModelsLoading(true);
+    setModelsMessage(null);
+    try {
+      let available: string[];
+      if (provider === 'gemini') {
+        available = await fetchGeminiModels(apiKey.trim(), controller.signal);
+      } else if (provider === 'claude') {
+        available = await fetchClaudeModels(apiKey.trim(), controller.signal);
+      } else {
+        const url = normalizeOpenAiBaseUrl(baseUrl);
+        available = await fetchOpenAiModels(apiKey.trim(), url as OpenAiBaseUrl, controller.signal,
+          parseFallbackUrls(fallbackUrls, url));
+      }
+      if (controller.signal.aborted || modelsController.current !== controller) return;
+      setModels(available);
+      if (available.length === 0) setModelsMessage('This provider did not return any models.');
+    } catch (error) {
+      if (!controller.signal.aborted && modelsController.current === controller) {
+        setModelsMessage(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (modelsController.current === controller) setModelsLoading(false);
+    }
+  }
+
+  function openModelPicker() {
+    setModelPickerOpen(true);
+    if (models.length === 0) void loadModels();
   }
 
   async function runTest() {
@@ -290,7 +351,41 @@ export function LlmScreen() {
           'https://alternate-address.example/v1', true)}
         <Text style={styles.hint}>Alternate addresses of the same server share this endpoint’s API key and model. They are tried in order after a connection failure.</Text>
       </> : null}
-      {input('Model ID', model, setModel, false, provider === 'openai-compatible' ? 'Model ID from your server' : undefined)}
+      <TouchableOpacity accessibilityRole="button"
+        accessibilityLabel={`LLM model: ${model || 'Select model'}`}
+        accessibilityState={{ expanded: modelPickerOpen, disabled: busy }}
+        style={[styles.modelSelect, busy && styles.disabled]} disabled={busy} onPress={openModelPicker}>
+        <View style={styles.modelSelectText}>
+          <Text style={styles.label}>LLM model</Text>
+          <Text numberOfLines={1} style={styles.modelValue}>{model || 'Select model'}</Text>
+        </View>
+        {modelsLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.modelChevron}>▾</Text>}
+      </TouchableOpacity>
+      <Modal visible={modelPickerOpen} transparent animationType="slide"
+        onRequestClose={() => setModelPickerOpen(false)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.modelPicker} accessibilityViewIsModal>
+            <Text style={styles.label}>LLM model</Text>
+            {modelsLoading ? <ActivityIndicator color="#fff" /> : null}
+            <ScrollView>
+              {availableModels.map((id) => <TouchableOpacity key={id} accessibilityRole="button"
+                accessibilityState={{ selected: id === model }} style={[styles.option, id === model && styles.selected]}
+                onPress={() => { setModel(id); setModelPickerOpen(false); }}>
+                <Text style={styles.optionText}>{id}</Text>
+              </TouchableOpacity>)}
+              {!modelsLoading && availableModels.length === 0
+                ? <Text accessibilityLiveRegion="polite" style={styles.hint}>
+                  {modelsMessage ?? 'No models are available for this provider.'}
+                </Text> : null}
+              {modelsMessage && availableModels.length > 0
+                ? <Text accessibilityLiveRegion="polite" style={styles.hint}>{modelsMessage}</Text> : null}
+            </ScrollView>
+            <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => setModelPickerOpen(false)}>
+              <Text style={styles.buttonText}>Close model list</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
       {input('API key', apiKey, setApiKey, true, provider === 'openai-compatible' && isCustomOpenAiBaseUrl(baseUrl) ? 'Optional for servers without authentication' : 'Paste API key')}
       {needsStt ? <>
         <Text style={styles.label}>Transcription provider</Text>
@@ -312,29 +407,34 @@ export function LlmScreen() {
           setSttFallbackUrls((storeSettings.sttFallbackUrls?.[normalized] ?? []).join('\n'));
         }, false, 'https://whisper.example/v1')}
         <Text style={styles.hint}>Use an OpenAI-compatible server with /audio/transcriptions. {optionalSidecar ? 'Audio still goes directly to the analysis provider; this optional server provides the transcript sidecar.' : 'Audio is transcribed here before the transcript is sent for analysis.'}</Text>
-        {input('Transcription model', sttModel, setSttModel)}
-        {isCustomSttHost(sttHost) ? <TouchableOpacity accessibilityRole="button"
-          style={[styles.button, (busy || sttModelsLoading) && styles.disabled]} disabled={busy || sttModelsLoading}
-          onPress={() => void loadSttModels()}>
-          {sttModelsLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Load Whisper models</Text>}
-        </TouchableOpacity> : null}
-        {availableSttModels.length > 0 ? <TouchableOpacity accessibilityRole="button"
-          accessibilityLabel="Select transcription model" accessibilityState={{ expanded: sttModelPickerOpen }}
-          style={styles.button} disabled={busy} onPress={() => setSttModelPickerOpen(true)}>
-          <Text style={styles.buttonText}>Select transcription model ▾</Text>
-        </TouchableOpacity> : null}
-        {sttModelsMessage ? <Text accessibilityLiveRegion="polite" style={styles.hint}>{sttModelsMessage}</Text> : null}
+        <TouchableOpacity accessibilityRole="button"
+          accessibilityLabel={`Transcription model: ${sttModel || 'Select model'}`}
+          accessibilityState={{ expanded: sttModelPickerOpen, disabled: busy }}
+          style={[styles.modelSelect, busy && styles.disabled]} disabled={busy} onPress={openSttModelPicker}>
+          <View style={styles.modelSelectText}>
+            <Text style={styles.label}>Transcription model</Text>
+            <Text numberOfLines={1} style={styles.modelValue}>{sttModel || 'Select model'}</Text>
+          </View>
+          {sttModelsLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.modelChevron}>▾</Text>}
+        </TouchableOpacity>
         <Modal visible={sttModelPickerOpen} transparent animationType="slide"
           onRequestClose={() => setSttModelPickerOpen(false)}>
           <View style={styles.modalBackdrop}>
             <View style={styles.modelPicker} accessibilityViewIsModal>
               <Text style={styles.label}>Transcription model</Text>
+              {sttModelsLoading ? <ActivityIndicator color="#fff" /> : null}
               <ScrollView>
                 {availableSttModels.map((id) => <TouchableOpacity key={id} accessibilityRole="button"
                   accessibilityState={{ selected: id === sttModel }} style={[styles.option, id === sttModel && styles.selected]}
                   onPress={() => { setSttModel(id); setSttModelPickerOpen(false); }}>
                   <Text style={styles.optionText}>{id}</Text>
                 </TouchableOpacity>)}
+                {!sttModelsLoading && availableSttModels.length === 0
+                  ? <Text accessibilityLiveRegion="polite" style={styles.hint}>
+                    {sttModelsMessage ?? 'No models are available for this server.'}
+                  </Text> : null}
+                {sttModelsMessage && availableSttModels.length > 0
+                  ? <Text accessibilityLiveRegion="polite" style={styles.hint}>{sttModelsMessage}</Text> : null}
               </ScrollView>
               <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => setSttModelPickerOpen(false)}>
                 <Text style={styles.buttonText}>Close model list</Text>
@@ -386,6 +486,10 @@ const styles = StyleSheet.create({
   multilineInput: { minHeight: 96 },
   button: { backgroundColor: '#222', borderRadius: 10, padding: 14, alignItems: 'center', borderWidth: 1, borderColor: '#444', minHeight: 48 },
   buttonText: { color: '#fff', fontSize: 15, fontWeight: '600' },
+  modelSelect: { backgroundColor: '#1a1a1a', borderRadius: 8, padding: 12, borderWidth: 1, borderColor: '#333', minHeight: 60, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  modelSelectText: { flex: 1, gap: 4 },
+  modelValue: { color: '#fff', fontSize: 16 },
+  modelChevron: { color: '#bbb', fontSize: 20 },
   disabled: { opacity: 0.5 },
   message: { fontSize: 14, textAlign: 'center', color: '#4caf50' },
   error: { color: '#f44336' },
