@@ -355,7 +355,7 @@ Add `--check` after `pack` to verify `package_id` availability on the store befo
 - Voice-activity detection (Silero v6 + Earshot WASM) runs **locally** in the G2 WebView before analysis uploads. FFT is the fallback when model assets cannot load; native consumers use the FFT adapter without browser WASM.
 - Session history (analysis results, not audio) is persisted on-device — Even App KV on G2, `AsyncStorage` on Rayban — and never sent to any server.
 - API keys are stored per-provider on-device. On Rayban they land in `expo-secure-store` (iOS Keychain); on G2 they sit in the Even App KV store alongside other settings.
-- The only outbound hosts declared in `app.json` are the seven LLM providers above. Each request goes directly from the WebView / phone to the provider you chose; there is no VeritasLens server in the loop.
+- Outbound origins include the bundled AI/transcription providers, BigDataCloud for opt-in location lookup, and Tavily for optional web search. Custom origins must be added before packaging. Requests go directly to the selected service; there is no VeritasLens server.
 
 ---
 
@@ -386,6 +386,12 @@ and optional API key. Include its API path (usually `/v1`): VeritasLens appends
 be entered manually when `/models` is unavailable. Custom Whisper servers must
 accept multipart `file`, `model`, and `response_format=json`, and return JSON
 with a `text` property. Keys remain stored on the device.
+
+For custom Whisper servers, **Load Whisper models** queries the OpenAI-compatible
+`/models` endpoint using the unsaved URL, key, and fallback addresses. Choose a
+discovered ID from the model list, or enter it manually when the server does
+not expose a catalog. Built-in OpenAI and Groq hosts use curated transcription
+model lists.
 
 Chat and speech-to-text each support an ordered list of fallback URLs. These
 are **alternate addresses of the same server**, sharing its model ID and API
@@ -433,3 +439,21 @@ refers to the phone running the app; use the server's LAN or Tailscale address
 when it runs on another computer. The Ray-Ban app does not use the Even Hub
 manifest. The app tries configured addresses; it does not connect or disconnect
 Tailscale for you. Existing built-in provider settings continue to work.
+
+### Optional Tavily web search
+
+In **AI setup → Optional Tavily web search**, enable Tavily and enter its API
+key. It is off by default. **Test Tavily search** probes the unsaved key with a
+public test query; it does not upload audio. The G2 package includes
+`https://api.tavily.com` in its network whitelist. Ray-Ban stores the Tavily
+key separately in SecureStore; G2 uses the Even App's local key-value storage.
+Turning Tavily off preserves the saved key, including after restarting the app.
+
+Tavily is used only when a lens requests web search and the selected chat
+provider cannot search natively. Native search and DeepSeek's existing
+Perplexity Search configuration take priority. It sends a short text query
+from the captured transcript, never the audio or camera image. Usable sources
+are injected into the answer prompt and preserved as citations. Empty results,
+invalid keys, throttling, and network failures leave the answer marked as
+ungrounded (`°`) without blocking it. Stalled searches time out after 15 seconds
+and analysis continues. Cancellation stops the search too.

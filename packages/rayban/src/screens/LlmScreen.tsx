@@ -1,11 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
-  View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator,
+  View, Text, TextInput, TouchableOpacity, StyleSheet, ScrollView, ActivityIndicator, Modal, Switch,
 } from 'react-native';
 import {
   runSelfTest, settings, OPENAI_BASE_URLS, OPENAI_INLINE_AUDIO_HOSTS,
   STT_HOSTS, openaiHostLabel, normalizeOpenAiBaseUrl,
   isCustomOpenAiBaseUrl, isOpenAiChatOnlyHost, isCustomSttHost, defaultSttModel,
+  fetchTranscriptionModels, STT_MODELS_BY_HOST,
+  runTavilySelfTest,
 } from '@veritaslens/core';
 import type { LlmProvider, SttHost } from '@veritaslens/core';
 import { useStore } from '../state/store';
@@ -33,10 +35,38 @@ export function LlmScreen() {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const [sttModels, setSttModels] = useState<string[]>([]);
+  const [sttModelsLoading, setSttModelsLoading] = useState(false);
+  const [sttModelsMessage, setSttModelsMessage] = useState<string | null>(null);
+  const [sttModelPickerOpen, setSttModelPickerOpen] = useState(false);
+  const sttModelsController = useRef<AbortController | null>(null);
+  const [tavilyEnabled, setTavilyEnabled] = useState(storeSettings.tavilyEnabled ?? false);
+  const [tavilyKey, setTavilyKey] = useState('');
+  const [tavilyTesting, setTavilyTesting] = useState(false);
+  const [tavilyMessage, setTavilyMessage] = useState<string | null>(null);
+  const tavilyController = useRef<AbortController | null>(null);
+  useEffect(() => {
+    setTavilyMessage(null);
+    setTavilyTesting(false);
+    return () => { tavilyController.current?.abort(); tavilyController.current = null; };
+  }, [tavilyEnabled, tavilyKey]);
+
+  useEffect(() => {
+    setSttModels([]);
+    setSttModelsLoading(false);
+    setSttModelsMessage(null);
+    setSttModelPickerOpen(false);
+    return () => {
+      sttModelsController.current?.abort();
+      sttModelsController.current = null;
+    };
+  }, [sttHost, sttKey, sttFallbackUrls, provider, baseUrl, apiKey]);
 
   // Hydration can finish after the screen's first render.
   useEffect(() => {
     const s = settings();
+    setTavilyEnabled(storeSettings.tavilyEnabled ?? false);
+    setTavilyKey(s.tavilyApiKey ?? '');
     setProvider(storeSettings.provider);
     setBaseUrl(storeSettings.openaiBaseUrl);
     setModel(storeSettings.provider === 'gemini' ? storeSettings.geminiModel
@@ -84,7 +114,35 @@ export function LlmScreen() {
   const speechConfigured = isCustomSttHost(sttHost.trim().replace(/\/+$/, ''))
     ? Boolean(sttHost.trim() && sttModel.trim()) : Boolean(sttKey.trim());
   const useSpeechSettings = needsStt && (!optionalSidecar || speechConfigured);
-  const busy = testing || saving;
+  const busy = testing || saving || tavilyTesting;
+  const availableSttModels = isCustomSttHost(sttHost) ? sttModels : STT_MODELS_BY_HOST[sttHost] ?? [];
+
+  async function loadSttModels() {
+    if (sttModelsLoading) return;
+    const controller = new AbortController();
+    sttModelsController.current?.abort();
+    sttModelsController.current = controller;
+    setSttModelsLoading(true);
+    setSttModelsMessage(null);
+    try {
+      const speechUrl = normalizeOpenAiBaseUrl(sttHost);
+      const sharesKey = provider === 'openai-compatible' && endpointUrl === speechUrl;
+      const models = await fetchTranscriptionModels(
+        sttKey.trim() || (sharesKey ? apiKey.trim() : ''), speechUrl, controller.signal,
+        parseFallbackUrls(sttFallbackUrls, speechUrl),
+      );
+      if (controller.signal.aborted || sttModelsController.current !== controller) return;
+      setSttModels(models);
+      if (models.length > 0) setSttModelPickerOpen(true);
+      else setSttModelsMessage('This server does not list models. Enter the model ID manually.');
+    } catch (error) {
+      if (!controller.signal.aborted && sttModelsController.current === controller) {
+        setSttModelsMessage(`${error instanceof Error ? error.message : String(error)} Manual model entry is still available.`);
+      }
+    } finally {
+      if (sttModelsController.current === controller) setSttModelsLoading(false);
+    }
+  }
 
   async function runTest() {
     setTesting(true);
@@ -114,14 +172,35 @@ export function LlmScreen() {
     } finally { setTesting(false); }
   }
 
+  async function testTavily() {
+    const controller = new AbortController();
+    tavilyController.current = controller;
+    setTavilyTesting(true);
+    setTavilyMessage(null);
+    try {
+      const result = await runTavilySelfTest(tavilyKey.trim(), controller.signal);
+      if (!controller.signal.aborted && tavilyController.current === controller) {
+        setTavilyMessage(`Connected — ${result.resultCount} results, ${result.latencyMs}ms`);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted && tavilyController.current === controller) {
+        setTavilyMessage(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (tavilyController.current === controller) setTavilyTesting(false);
+    }
+  }
+
   async function save() {
     setSaving(true);
     setMessage(null);
     try {
       if (!model.trim()) throw new Error('Enter a model ID.');
+      if (tavilyEnabled && !tavilyKey.trim()) throw new Error('Add a Tavily API key or turn off Tavily search.');
       const s = settings();
-      const writes: Array<[string, string]> = [['veritaslens.provider', provider]];
-      const next = { ...storeSettings, provider };
+      const writes: Array<[string, string]> = [['veritaslens.provider', provider],
+        ['veritaslens.tavilyEnabled', String(tavilyEnabled)], ['veritaslens.tavilyApiKey', tavilyKey.trim()]];
+      const next = { ...storeSettings, provider, tavilyEnabled };
       const secrets = { ...s.openaiApiKeys };
       if (provider === 'gemini') {
         next.geminiModel = model.trim();
@@ -161,6 +240,7 @@ export function LlmScreen() {
       if (saved.some((ok) => !ok)) throw new Error('Could not save all settings. Please try again.');
       updateSettings(next);
       patchFullSettings({ openaiApiKeys: secrets,
+        tavilyEnabled, tavilyApiKey: tavilyKey.trim(),
         ...(provider === 'gemini' ? { geminiApiKey: apiKey.trim() } : {}),
         ...(provider === 'claude' ? { claudeApiKey: apiKey.trim() } : {}),
       });
@@ -233,12 +313,54 @@ export function LlmScreen() {
         }, false, 'https://whisper.example/v1')}
         <Text style={styles.hint}>Use an OpenAI-compatible server with /audio/transcriptions. {optionalSidecar ? 'Audio still goes directly to the analysis provider; this optional server provides the transcript sidecar.' : 'Audio is transcribed here before the transcript is sent for analysis.'}</Text>
         {input('Transcription model', sttModel, setSttModel)}
+        {isCustomSttHost(sttHost) ? <TouchableOpacity accessibilityRole="button"
+          style={[styles.button, (busy || sttModelsLoading) && styles.disabled]} disabled={busy || sttModelsLoading}
+          onPress={() => void loadSttModels()}>
+          {sttModelsLoading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Load Whisper models</Text>}
+        </TouchableOpacity> : null}
+        {availableSttModels.length > 0 ? <TouchableOpacity accessibilityRole="button"
+          accessibilityLabel="Select transcription model" accessibilityState={{ expanded: sttModelPickerOpen }}
+          style={styles.button} disabled={busy} onPress={() => setSttModelPickerOpen(true)}>
+          <Text style={styles.buttonText}>Select transcription model ▾</Text>
+        </TouchableOpacity> : null}
+        {sttModelsMessage ? <Text accessibilityLiveRegion="polite" style={styles.hint}>{sttModelsMessage}</Text> : null}
+        <Modal visible={sttModelPickerOpen} transparent animationType="slide"
+          onRequestClose={() => setSttModelPickerOpen(false)}>
+          <View style={styles.modalBackdrop}>
+            <View style={styles.modelPicker} accessibilityViewIsModal>
+              <Text style={styles.label}>Transcription model</Text>
+              <ScrollView>
+                {availableSttModels.map((id) => <TouchableOpacity key={id} accessibilityRole="button"
+                  accessibilityState={{ selected: id === sttModel }} style={[styles.option, id === sttModel && styles.selected]}
+                  onPress={() => { setSttModel(id); setSttModelPickerOpen(false); }}>
+                  <Text style={styles.optionText}>{id}</Text>
+                </TouchableOpacity>)}
+              </ScrollView>
+              <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => setSttModelPickerOpen(false)}>
+                <Text style={styles.buttonText}>Close model list</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
         {input('Transcription API key', sttKey, setSttKey, true,
           isCustomSttHost(sttHost) ? 'Optional for servers without authentication' : 'Paste API key')}
         {input('Transcription fallback URLs (one per line, in order)', sttFallbackUrls, setSttFallbackUrls, false,
           'https://alternate-whisper.example/v1', true)}
         <Text style={styles.hint}>Alternate addresses of the same transcription server share its API key and model. They are tried in the order shown.</Text>
       </> : null}
+      <Text style={styles.label}>Optional Tavily web search</Text>
+      <View style={styles.options}>
+        <Switch accessibilityLabel="Use Tavily web search" value={tavilyEnabled} disabled={busy} onValueChange={setTavilyEnabled} />
+        <Text style={styles.hint}>Use Tavily when the provider has no web search</Text>
+      </View>
+      <Text style={styles.hint}>Off by default. Search-enabled lenses send a short text query from captured speech to Tavily. Native search takes priority; failed searches still return an answer marked as ungrounded.</Text>
+      {input('Tavily API key', tavilyKey, setTavilyKey, true, 'tvly-…')}
+      <Text style={styles.hint}>Turning Tavily off keeps your saved API key.</Text>
+      <TouchableOpacity accessibilityRole="button" style={[styles.button, (busy || !tavilyKey.trim()) && styles.disabled]}
+        disabled={busy || !tavilyKey.trim()} onPress={() => void testTavily()}>
+        {tavilyTesting ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Test Tavily search</Text>}
+      </TouchableOpacity>
+      {tavilyMessage ? <Text accessibilityLiveRegion="polite" style={styles.hint}>{tavilyMessage}</Text> : null}
       <TouchableOpacity accessibilityRole="button" style={[styles.button, busy && styles.disabled]} disabled={busy} onPress={() => void runTest()}>
         {testing ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>Test {PROVIDER_LABELS[provider]}</Text>}
       </TouchableOpacity>
@@ -267,4 +389,6 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.5 },
   message: { fontSize: 14, textAlign: 'center', color: '#4caf50' },
   error: { color: '#f44336' },
+  modalBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: '#0009' },
+  modelPicker: { maxHeight: '70%', backgroundColor: '#111', padding: 20, gap: 12, borderTopLeftRadius: 16, borderTopRightRadius: 16 },
 });

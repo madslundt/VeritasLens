@@ -24,7 +24,7 @@ import {
   parseRetryAfterMs,
   type CallLensOptions as GeminiCallLensOptions,
 } from './gemini';
-import { applyModelGrounding, resolveProviderGrounding } from './tools';
+import { applyModelGrounding, resolveProviderGrounding, resolveSearchFallback } from './tools';
 import {
   callOpenAiLens,
   callOpenAiLensStream,
@@ -356,24 +356,15 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       );
     }
     const baseModel = opts.model ?? s.openaiModel;
-    let grounding = resolveProviderGrounding('openai-compatible', chatHost, opts.grounding, baseModel);
-    // DeepSeek grounded path borrows the wearer's Perplexity Search key.
-    // If the key is missing, downgrade to groundless here rather than
-    // throwing mid-stream — the HUD's `°` glyph already communicates the
-    // fallback, and the wearer can add a key without losing the analysis.
-    // The actual pre-search happens inside the OpenAI client *after* STT
-    // so the search query is the wearer's spoken text, not the persona
-    // prompt — `prefetchSearchApiKey` carries the key through.
-    let prefetchSearchApiKey: string | undefined;
-    if (grounding.prefetchSearch === 'perplexity') {
-      const pplxKey = s.openaiApiKeys['https://api.perplexity.ai'] ?? '';
-      if (!pplxKey) {
-        grounding = { mode: 'groundless' };
-      } else {
-        prefetchSearchApiKey = pplxKey;
-      }
-    }
-    try { opts.onGroundingMode?.(grounding.mode); } catch { /* subscriber errors must not break the lens call */ }
+    const grounding = resolveSearchFallback(
+      resolveProviderGrounding('openai-compatible', chatHost, opts.grounding, baseModel), s,
+    );
+    const prefetchSearchApiKey = grounding.prefetchSearch === 'tavily'
+      ? s.tavilyApiKey?.trim()
+      : grounding.prefetchSearch === 'perplexity' ? s.openaiApiKeys['https://api.perplexity.ai']?.trim() : undefined;
+    // A search capability is not evidence: only mark grounded after usable
+    // results arrive. Search errors/empty results retain the ungrounded badge.
+    try { opts.onGroundingMode?.(grounding.prefetchSearch ? 'groundless' : grounding.mode); } catch { /* subscriber errors */ }
     if (grounding.useResponsesApi) {
       // Grounded OpenAI calls go through the Responses API client, which
       // knows the built-in `web_search` tool. Chat Completions stays for
@@ -428,6 +419,8 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       onTranscript: opts.onTranscript,
       onCitations: opts.onCitations,
       prefetchSearchApiKey,
+      prefetchSearchProvider: grounding.prefetchSearch,
+      onGroundingMode: opts.onGroundingMode,
       imageData: opts.imageData,
     });
   }
@@ -560,4 +553,12 @@ export async function runSelfTest(
     fallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
     transcribeFallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
   });
+}
+
+/** User-triggered probe of the unsaved Tavily credential, without audio. */
+export async function runTavilySelfTest(apiKey: string, signal?: AbortSignal): Promise<{ latencyMs: number; resultCount: number }> {
+  const start = performance.now();
+  const { tavilySearch } = await import('./tavilySearch');
+  const results = await tavilySearch({ apiKey, query: 'Even Realities G2', signal });
+  return { latencyMs: Math.round(performance.now() - start), resultCount: results.length };
 }

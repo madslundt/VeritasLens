@@ -22,6 +22,7 @@ describe('isSecureKey', () => {
   it('classifies API key keys as secure', () => {
     expect(isSecureKey('veritaslens.geminiApiKey')).toBe(true);
     expect(isSecureKey('veritaslens.claudeApiKey')).toBe(true);
+    expect(isSecureKey('veritaslens.tavilyApiKey')).toBe(true);
     expect(isSecureKey('veritaslens.openaiApiKeys')).toBe(true);
     expect(isSecureKey('veritaslens.openaiKey.http://localhost:1234/v1')).toBe(true);
   });
@@ -56,6 +57,13 @@ describe('bridge-rn storage routing', () => {
     const ok = await setLocalStorage('veritaslens.claudeApiKey', 'sk-...');
     expect(SecureStore.setItemAsync).toHaveBeenCalled();
     expect(ok).toBe(true);
+  });
+
+  it('stores the Tavily key in SecureStore rather than AsyncStorage', async () => {
+    vi.mocked(SecureStore.setItemAsync).mockResolvedValue(undefined);
+    expect(await setLocalStorage('veritaslens.tavilyApiKey', 'tvly-secret')).toBe(true);
+    expect(SecureStore.setItemAsync).toHaveBeenCalledWith('veritaslens_tavilyApiKey', 'tvly-secret');
+    expect(AsyncStorage.setItem).not.toHaveBeenCalled();
   });
 
   it('uses valid collision-free SecureStore names for endpoint keys', async () => {

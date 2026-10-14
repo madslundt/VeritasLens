@@ -2,6 +2,14 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.17.3] — 2026-10-14
+
+- Add optional Tavily web search for providers without native search, with isolated credentials, connection testing, citations, and a toggle that preserves the saved key.
+- Continue with an ungrounded answer after search errors, invalid responses, or a 15-second timeout. User cancellation still stops analysis.
+- Add custom Whisper model discovery and a model picker in G2 and Ray-Ban settings, preserving manual entry and ordered alternate addresses.
+- Apply native search model overrides correctly in streamed OpenAI-compatible requests. Add Tavily to the network whitelist without adding permission categories.
+
+
 ## [0.17.2] — 2026-10-14
 
 - Restore the persistent bottom scroll buffer in phone settings. The Even App WebView needs this space even after the keyboard closes; focus-only padding and viewport-driven footer movement could reduce scroll range and make lower controls difficult to reach.

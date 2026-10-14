@@ -5,6 +5,13 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 describe('custom endpoint packaging helper', () => {
+  it('includes the optional Tavily service in the packaged network whitelist', async () => {
+    const manifest = JSON.parse(await readFile(new URL('../app.json', import.meta.url), 'utf8'));
+    const network = manifest.permissions.find((permission: { name: string }) => permission.name === 'network');
+    expect(network.whitelist).toContain('https://api.tavily.com');
+    expect(network.desc.length).toBeLessThanOrEqual(300);
+  });
+
   it('adds deduplicated origins and rejects a bad batch before writing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'veritaslens-manifest-'));
     try {

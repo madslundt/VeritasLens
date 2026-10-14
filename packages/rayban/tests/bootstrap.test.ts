@@ -106,6 +106,19 @@ describe('bootstrap', () => {
     expect(settings.ttsRate).toBe(1.5);
   });
 
+  it.each([true, false])('hydrates Tavily enabled=%s without losing its private key', async (enabled) => {
+    mockStorage({ 'veritaslens.tavilyEnabled': String(enabled), 'veritaslens.tavilyApiKey': 'tvly-private' });
+    await bootstrap();
+    expect(useStore.getState().settings.tavilyEnabled).toBe(enabled);
+    expect(useStore.getState().settings).not.toHaveProperty('tavilyApiKey');
+    expect(core.settings().tavilyApiKey).toBe('tvly-private');
+    expect(core.settings().tavilyEnabled).toBe(enabled);
+    expect(Object.values(core.settings().openaiApiKeys)).not.toContain('tvly-private');
+    patchFullSettings({ tavilyEnabled: !enabled });
+    expect(core.settings().tavilyEnabled).toBe(!enabled);
+    expect(core.settings().tavilyApiKey).toBe('tvly-private');
+  });
+
   it('hydrates custom endpoints and their per-endpoint keys', async () => {
     mockStorage({
       'veritaslens.provider': 'openai-compatible',

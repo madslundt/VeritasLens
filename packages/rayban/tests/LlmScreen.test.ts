@@ -9,12 +9,13 @@ const testState = vi.hoisted(() => ({
     openaiFallbackUrls: {}, sttFallbackUrls: {},
   },
   hooks: [] as unknown[], setters: [] as Array<ReturnType<typeof vi.fn>>,
-  updateSettings: vi.fn(), patchFullSettings: vi.fn(), runSelfTest: vi.fn(), setLocalStorage: vi.fn(),
+  updateSettings: vi.fn(), patchFullSettings: vi.fn(), runSelfTest: vi.fn(), setLocalStorage: vi.fn(), fetchTranscriptionModels: vi.fn(), runTavilySelfTest: vi.fn(),
 }));
 
 vi.mock('react', async (importOriginal) => ({
   ...await importOriginal<typeof import('react')>(),
   useEffect: vi.fn(),
+  useRef: () => ({ current: null }),
   useState: (initial: unknown) => {
     const setter = vi.fn();
     const index = testState.setters.length;
@@ -24,7 +25,7 @@ vi.mock('react', async (importOriginal) => ({
 }));
 vi.mock('react-native', () => ({
   View: 'View', Text: 'Text', TextInput: 'TextInput', TouchableOpacity: 'TouchableOpacity',
-  ScrollView: 'ScrollView', ActivityIndicator: 'ActivityIndicator', StyleSheet: { create: (styles: unknown) => styles },
+  ScrollView: 'ScrollView', ActivityIndicator: 'ActivityIndicator', Modal: 'Modal', Switch: 'Switch', StyleSheet: { create: (styles: unknown) => styles },
 }));
 vi.mock('../src/state/store', () => ({
   useStore: (select: (state: unknown) => unknown) => select({ settings: testState.settings, updateSettings: testState.updateSettings }),
@@ -35,6 +36,8 @@ vi.mock('@veritaslens/core', async (importOriginal) => ({
   ...await importOriginal<typeof import('@veritaslens/core')>(),
   settings: () => ({ openaiApiKeys: {}, geminiApiKey: '', claudeApiKey: '' }),
   runSelfTest: testState.runSelfTest,
+  fetchTranscriptionModels: testState.fetchTranscriptionModels,
+  runTavilySelfTest: testState.runTavilySelfTest,
 }));
 
 import { LlmScreen } from '../src/screens/LlmScreen';
@@ -65,9 +68,79 @@ beforeEach(() => {
   testState.hooks = [];
   testState.setLocalStorage.mockResolvedValue(true);
   testState.runSelfTest.mockResolvedValue({ latencyMs: 10 });
+  testState.fetchTranscriptionModels.mockResolvedValue(['local-whisper', 'distil-large-v3']);
+  testState.runTavilySelfTest.mockResolvedValue({ latencyMs: 20, resultCount: 3 });
 });
 
 describe('LLM settings draft actions', () => {
+  it.each([true, false])('saves the optional Tavily key separately with search enabled=%s', async (enabled) => {
+    draft();
+    testState.hooks.push(false, false, null, [], false, null, false, enabled, 'tvly-only-search');
+    press('Save settings');
+    await vi.waitFor(() => expect(testState.patchFullSettings).toHaveBeenCalled());
+    expect(testState.setLocalStorage).toHaveBeenCalledWith('veritaslens.tavilyApiKey', 'tvly-only-search');
+    expect(testState.setLocalStorage).toHaveBeenCalledWith('veritaslens.tavilyEnabled', String(enabled));
+    expect(testState.patchFullSettings).toHaveBeenCalledWith(expect.objectContaining({ tavilyEnabled: enabled, tavilyApiKey: 'tvly-only-search' }));
+    const keys = testState.patchFullSettings.mock.calls[0]![0].openaiApiKeys;
+    expect(Object.values(keys)).not.toContain('tvly-only-search');
+    expect(testState.updateSettings.mock.calls[0]![0]).not.toHaveProperty('tavilyApiKey');
+  });
+
+  it('changes only the enabled preference when toggling Tavily', () => {
+    draft();
+    testState.hooks.push(false, false, null, [], false, null, false, true, 'tvly-retained');
+    const toggle = elements(LlmScreen()).find((element) => element.type === 'Switch')! as ReactElement<{ onValueChange: (enabled: boolean) => void }>;
+    toggle.props.onValueChange(false);
+    toggle.props.onValueChange(true);
+    expect(testState.setters[16]).toHaveBeenNthCalledWith(1, false);
+    expect(testState.setters[16]).toHaveBeenNthCalledWith(2, true);
+    expect(testState.setters[17]).not.toHaveBeenCalled();
+    expect(testState.setLocalStorage).not.toHaveBeenCalled();
+  });
+
+  it('tests the unsaved Tavily key without saving credentials', async () => {
+    draft();
+    testState.hooks.push(false, false, null, [], false, null, false, true, 'tvly-unsaved');
+    press('Test Tavily search');
+    await vi.waitFor(() => expect(testState.runTavilySelfTest).toHaveBeenCalledWith('tvly-unsaved', expect.any(AbortSignal)));
+    expect(testState.setLocalStorage).not.toHaveBeenCalled();
+  });
+
+  it('requires a key only when optional Tavily is enabled', async () => {
+    draft();
+    testState.hooks.push(false, false, null, [], false, null, false, true, '');
+    press('Save settings');
+    await vi.waitFor(() => expect(testState.setters[11]).toHaveBeenCalledWith(expect.stringContaining('Add a Tavily API key')));
+    expect(testState.setLocalStorage).not.toHaveBeenCalled();
+  });
+
+  it('loads custom Whisper models using the unsaved key and ordered alternatives', async () => {
+    draft('openai-compatible', 'https://whisper.example/v1/', 'whisper-key');
+    press('Load Whisper models');
+    await vi.waitFor(() => expect(testState.fetchTranscriptionModels).toHaveBeenCalledWith(
+      'whisper-key', 'https://whisper.example/v1', expect.any(AbortSignal), ['https://whisper-backup.example/v1'],
+    ));
+    expect(testState.setters[12]).toHaveBeenCalledWith(['local-whisper', 'distil-large-v3']);
+    expect(testState.setters[15]).toHaveBeenCalledWith(true);
+    expect(testState.setLocalStorage).not.toHaveBeenCalled();
+  });
+
+  it('selects a discovered model without discarding manual model entry', () => {
+    draft();
+    testState.hooks.push(false, false, null, ['local-whisper'], false, null, true);
+    press('local-whisper');
+    expect(testState.setters[6]).toHaveBeenCalledWith('local-whisper');
+    expect(testState.setters[15]).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the entered model when the server cannot list models', async () => {
+    draft();
+    testState.fetchTranscriptionModels.mockResolvedValueOnce([]);
+    press('Load Whisper models');
+    await vi.waitFor(() => expect(testState.setters[14]).toHaveBeenCalledWith(expect.stringContaining('Enter the model ID manually')));
+    expect(testState.setters[6]).not.toHaveBeenCalled();
+  });
+
   it('tests draft custom Whisper and ordered alternate addresses without saving', async () => {
     draft();
     press('Test OpenAI-compatible');

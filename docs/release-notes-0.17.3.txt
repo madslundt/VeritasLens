@@ -1,0 +1,5 @@
+VeritasLens 0.17.3
+
+Adds optional Tavily web search for providers without native search. Search failures and timeouts fall back to an ungrounded answer; disabling Tavily keeps the saved API key. Custom Whisper servers now offer a model picker when model discovery is available, alongside manual entry and alternate addresses. Fixes native search model selection and retains the phone keyboard scrolling fix.
+
+Permissions: adds https://api.tavily.com to the network whitelist; no new permission categories.

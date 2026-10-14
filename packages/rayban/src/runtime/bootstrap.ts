@@ -71,6 +71,8 @@ const KEY_OPENAI_FALLBACK_URLS = 'veritaslens.openaiFallbackUrls';
 const KEY_STT_FALLBACK_URLS = 'veritaslens.sttFallbackUrls';
 const KEY_STT_HOST = 'veritaslens.sttHost';
 const KEY_STT_MODEL = 'veritaslens.sttModel';
+const KEY_TAVILY_ENABLED = 'veritaslens.tavilyEnabled';
+const KEY_TAVILY_API_KEY = 'veritaslens.tavilyApiKey';
 const KEY_ACTIVE_LENS = 'veritaslens.activeLensId';
 const KEY_CAMERA_ENABLED = 'veritaslens.cameraEnabled';
 const KEY_TTS_ENABLED = 'veritaslens.ttsEnabled';
@@ -100,6 +102,8 @@ let cachedFullSettings: Settings = {
   geminiAutoModel: DEFAULT_GEMINI_AUTO_MODEL,
   claudeApiKey: '',
   claudeModel: DEFAULT_CLAUDE_MODEL,
+  tavilyEnabled: false,
+  tavilyApiKey: '',
   openaiApiKeys: emptyOpenaiKeys(),
   openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
   openaiModel: DEFAULT_OPENAI_MODEL,
@@ -145,6 +149,7 @@ export function patchFullSettings(partial: Partial<Settings>): void {
     sttHost: s.sttHost,
     sttModel: s.sttModel,
     sttFallbackUrls: s.sttFallbackUrls,
+    tavilyEnabled: s.tavilyEnabled ?? false,
     bufferDuration: s.bufferDurationSec,
     ...partial,
   };
@@ -185,6 +190,8 @@ export async function bootstrap(): Promise<void> {
     customUrlsRaw,
     openaiFallbackUrlsRaw,
     sttFallbackUrlsRaw,
+    tavilyEnabledRaw,
+    tavilyApiKey,
     ...openaiKeyValues
   ] = await Promise.all([
     getLocalStorage(KEY_PROVIDER),
@@ -204,6 +211,8 @@ export async function bootstrap(): Promise<void> {
     getLocalStorage(KEY_OPENAI_CUSTOM_URLS),
     getLocalStorage(KEY_OPENAI_FALLBACK_URLS),
     getLocalStorage(KEY_STT_FALLBACK_URLS),
+    getLocalStorage(KEY_TAVILY_ENABLED),
+    getLocalStorage(KEY_TAVILY_API_KEY),
     // Per-host OpenAI API keys — one read per host
     ...OPENAI_BASE_URLS.map((url) => getLocalStorage(`${KEY_OPENAI_KEY_PREFIX}${url}`)),
   ]);
@@ -266,6 +275,7 @@ export async function bootstrap(): Promise<void> {
     sttHost: effectiveSttHost,
     sttModel: sttModel?.trim() || defaultSttModel(effectiveSttHost),
     sttFallbackUrls: restoreFallbackUrls(sttFallbackUrlsRaw),
+    tavilyEnabled: tavilyEnabledRaw === 'true',
     activeLensId: activeLensId ?? 'fact-checker',
     cameraEnabled: cameraEnabledRaw !== 'false',
     ttsEnabled: ttsEnabledRaw !== 'false',
@@ -283,6 +293,8 @@ export async function bootstrap(): Promise<void> {
     geminiApiKey: geminiApiKey ?? '',
     geminiModel: storeSettings.geminiModel as Settings['geminiModel'],
     claudeApiKey: claudeApiKey ?? '',
+    tavilyApiKey: tavilyApiKey?.trim() ?? '',
+    tavilyEnabled: storeSettings.tavilyEnabled ?? false,
     claudeModel: storeSettings.claudeModel as Settings['claudeModel'],
     openaiApiKeys,
     openaiBaseUrl: storeSettings.openaiBaseUrl as Settings['openaiBaseUrl'],

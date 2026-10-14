@@ -69,6 +69,8 @@ const SETTINGS_KEY_MODEL = 'veritaslens.geminiModel';
 const SETTINGS_KEY_AUTO_MODEL = 'veritaslens.geminiAutoModel';
 const SETTINGS_KEY_CLAUDE_KEY = 'veritaslens.claudeKey';
 const SETTINGS_KEY_CLAUDE_MODEL = 'veritaslens.claudeModel';
+const SETTINGS_KEY_TAVILY_ENABLED = 'veritaslens.tavilyEnabled';
+const SETTINGS_KEY_TAVILY_API_KEY = 'veritaslens.tavilyApiKey';
 /** Legacy single-key storage. Read once on load and migrated into the per-host map. */
 const SETTINGS_KEY_OPENAI_KEY_LEGACY = 'veritaslens.openaiKey';
 /** Per-host OpenAI API key. The host base URL is appended as a suffix. */
@@ -220,6 +222,8 @@ const [settings, setSettings] = createSignal<Settings>({
   geminiAutoModel: DEFAULT_GEMINI_AUTO_MODEL,
   claudeApiKey: '',
   claudeModel: DEFAULT_CLAUDE_MODEL,
+  tavilyEnabled: false,
+  tavilyApiKey: '',
   openaiApiKeys: emptyOpenaiKeys(),
   openaiBaseUrl: DEFAULT_OPENAI_BASE_URL,
   openaiModel: DEFAULT_OPENAI_MODEL,
@@ -334,6 +338,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_TRANSCRIPT_ENABLED_LEGACY),
       safeGet(SETTINGS_KEY_LOCATION_ENABLED),
       safeGet(SETTINGS_KEY_CACHED_LOCATION),
+      safeGet(SETTINGS_KEY_TAVILY_ENABLED),
+      safeGet(SETTINGS_KEY_TAVILY_API_KEY),
     ]),
     Promise.all(perHostKeyReads),
     Promise.all(perHostTranscribeReads),
@@ -371,6 +377,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawTranscriptEnabledLegacy,
     rawLocationEnabled,
     rawCachedLocation,
+    rawTavilyEnabled,
+    rawTavilyApiKey,
   ] = fixedReads;
   // Build the per-host key map. If no per-host key exists for the host that
   // was last active, fall back to the legacy single-key storage so users who
@@ -396,6 +404,8 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     geminiAutoModel: coerceAutoModel(rawAutoModel),
     claudeApiKey: rawClaudeKey,
     claudeModel: coerceClaudeModel(rawClaudeModel),
+    tavilyEnabled: rawTavilyEnabled === 'true',
+    tavilyApiKey: typeof rawTavilyApiKey === 'string' ? rawTavilyApiKey.trim() : '',
     openaiApiKeys,
     openaiBaseUrl: coercedBaseUrl,
     openaiModel: rawOpenaiModel || DEFAULT_OPENAI_MODEL,
@@ -552,6 +562,11 @@ export const saveClaudeKey = (setLs: SetLs, key: string): Promise<boolean> =>
 
 export const saveClaudeModel = (setLs: SetLs, model: ClaudeModel): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_CLAUDE_MODEL, 'claudeModel', model);
+
+export const saveTavilyEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_TAVILY_ENABLED, 'tavilyEnabled', enabled);
+export const saveTavilyApiKey = (setLs: SetLs, key: string): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_TAVILY_API_KEY, 'tavilyApiKey', key.trim());
 
 export async function saveGeminiAutoModel(
   setLs: SetLs,

@@ -102,3 +102,47 @@ describe('custom Whisper and alternate URL persistence', () => {
     expect(settings().sttFallbackUrls).toEqual(before);
   });
 });
+
+// Tavily is deliberately separate from chat/STT credentials and opt-in.
+describe('optional Tavily persistence', () => {
+  it('defaults to disabled with no credential', async () => {
+    await loadSettings(async () => '');
+    expect(settings().tavilyEnabled).toBe(false);
+    expect(settings().tavilyApiKey).toBe('');
+  });
+
+  it('round-trips enabled search and its separate key', async () => {
+    const { saveTavilyEnabled, saveTavilyApiKey } = await import('../src/state/store');
+    const storage = new Map<string, string>();
+    const set = async (key: string, value: string) => { storage.set(key, value); return true; };
+    await saveTavilyEnabled(set, true);
+    await saveTavilyApiKey(set, ' tvly-secret ');
+    await loadSettings(async (key) => storage.get(key) ?? '');
+    expect(settings().tavilyEnabled).toBe(true);
+    expect(settings().tavilyApiKey).toBe('tvly-secret');
+    expect(Object.values(settings().openaiApiKeys)).not.toContain('tvly-secret');
+  });
+
+  it('does not activate corrupted flags or publish failed key writes', async () => {
+    const { saveTavilyApiKey } = await import('../src/state/store');
+    await loadSettings(async (key) => key === 'veritaslens.tavilyEnabled' ? 'unexpected' : '');
+    expect(settings().tavilyEnabled).toBe(false);
+    expect(await saveTavilyApiKey(async () => false, 'new-key')).toBe(false);
+    expect(settings().tavilyApiKey).toBe('');
+  });
+
+  it('preserves the saved key through disabling, restarting and re-enabling search', async () => {
+    const { saveTavilyEnabled, saveTavilyApiKey } = await import('../src/state/store');
+    const storage = new Map<string, string>();
+    const writes: string[] = [];
+    const set = async (key: string, value: string) => { writes.push(key); storage.set(key, value); return true; };
+    await saveTavilyApiKey(set, 'tvly-retained');
+    for (const enabled of [true, false, true]) {
+      await saveTavilyEnabled(set, enabled);
+      await loadSettings(async (key) => storage.get(key) ?? '');
+      expect(settings().tavilyEnabled).toBe(enabled);
+      expect(settings().tavilyApiKey).toBe('tvly-retained');
+    }
+    expect(writes.filter((key) => key === 'veritaslens.tavilyApiKey')).toHaveLength(1);
+  });
+});

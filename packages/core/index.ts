@@ -4,9 +4,10 @@ export * from './src/types';
 // LLM
 export * from './src/llm/index';
 export * from './src/llm/streamingJsonParser';
-export { resolveProviderGrounding, applyModelGrounding } from './src/llm/tools';
+export { resolveProviderGrounding, resolveSearchFallback, applyModelGrounding } from './src/llm/tools';
 export type { ProviderGroundingResult } from './src/llm/tools';
 export { fetchOpenAiModels } from './src/llm/openai';
+export { fetchTranscriptionModels } from './src/llm/transcriptionModels';
 
 // Personas — LensGrounding is already exported (wider) from types; suppress the narrower duplicate
 export {

@@ -2550,6 +2550,8 @@ function startSettingsWatcher(): void {
         s.geminiAutoModel,
         s.claudeApiKey,
         s.claudeModel,
+        s.tavilyEnabled ?? false,
+        s.tavilyApiKey ?? '',
         s.openaiApiKeys[s.openaiBaseUrl] ?? '',
         s.openaiBaseUrl,
         s.openaiModel,

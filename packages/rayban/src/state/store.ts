@@ -20,6 +20,7 @@ export interface RaybanSettings {
   sttHost: SttHost;
   sttModel: string;
   sttFallbackUrls?: Record<string, string[]>;
+  tavilyEnabled?: boolean;
 }
 
 export interface GlassesConnection {
@@ -62,6 +63,7 @@ const DEFAULT_SETTINGS: RaybanSettings = {
   sttHost: 'https://api.groq.com/openai/v1' as SttHost,
   sttModel: 'whisper-large-v3',
   sttFallbackUrls: {},
+  tavilyEnabled: false,
 };
 
 export const useStore = create<RaybanStore>((set) => ({

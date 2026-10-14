@@ -647,6 +647,10 @@ export const DEFAULT_MIC_SOURCE: MicSource = 'glasses';
 
 /** User-configurable settings persisted via the SDK bridge local storage. */
 export interface Settings {
+  /** Optional search fallback for providers without native web search. Off by default. */
+  tavilyEnabled?: boolean;
+  /** Stored separately from chat/STT credentials; sent only to Tavily. */
+  tavilyApiKey?: string;
   /** Active provider for lens analyses. */
   provider: LlmProvider;
 

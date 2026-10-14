@@ -29,6 +29,7 @@ import type {
   LensGrounding,
   LlmProvider,
   OpenAiBaseUrl,
+  Settings,
 } from '@/types';
 
 /** Anthropic's server-side web search tool spec — capped to 3 uses per call
@@ -83,11 +84,9 @@ export interface ProviderGroundingResult {
    *  resolver picks the built-in `web_search` tool. The OpenAI client owns
    *  the actual tool wiring — this flag is the switch the facade reads. */
   useResponsesApi?: boolean;
-  /** Pre-fetch search results from a separate provider and inject them into
-   *  the prompt. Only set for DeepSeek today (`'perplexity'` — reuses the
-   *  wearer's Perplexity API key). The facade fans out the search call
-   *  before the chat call. */
-  prefetchSearch?: 'perplexity';
+  /** Pre-fetch search evidence before chat: Perplexity for DeepSeek, or
+   *  opt-in Tavily when a provider lacks native search. */
+  prefetchSearch?: 'perplexity' | 'tavily';
   /** 'grounded' when any of the above is populated; 'groundless' otherwise. */
   mode: GroundingMode;
 }
@@ -199,4 +198,18 @@ export function applyModelGrounding(
     return `${baseModel}${result.modelSuffix}`;
   }
   return baseModel;
+}
+
+/** Prefer native search, then the existing Perplexity path, then opt-in Tavily. */
+export function resolveSearchFallback(
+  result: ProviderGroundingResult,
+  settings: Pick<Settings, 'openaiApiKeys' | 'tavilyEnabled' | 'tavilyApiKey'>,
+): ProviderGroundingResult {
+  if (result.prefetchSearch === 'perplexity' && !(settings.openaiApiKeys['https://api.perplexity.ai'] ?? '').trim()) {
+    result = { mode: 'groundless' };
+  }
+  if (result.mode === 'groundless' && settings.tavilyEnabled && settings.tavilyApiKey?.trim()) {
+    return { prefetchSearch: 'tavily', mode: 'grounded' };
+  }
+  return result;
 }

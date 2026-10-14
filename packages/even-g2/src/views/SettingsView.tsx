@@ -43,6 +43,8 @@ import {
   saveGeminiAutoModel,
   saveClaudeKey,
   saveClaudeModel,
+  saveTavilyEnabled,
+  saveTavilyApiKey,
   saveMeetingPrepSections,
   saveMeetingPrepWebGrounding,
   saveOpenaiBaseUrl,
@@ -72,9 +74,12 @@ import { isHudRunning, providerConfigurationError, refreshHudPage, startHudRunti
 import { probeAndCacheLocation, probeLocation } from '@/runtime/location';
 import {
   resolveProviderGrounding,
+  resolveSearchFallback,
   fetchAvailableModels,
   fetchOpenAiModels,
+  fetchTranscriptionModels,
   runSelfTest,
+  runTavilySelfTest,
   CLAUDE_MODELS,
   LANGUAGES,
   OPENAI_BASE_URLS,
@@ -219,7 +224,7 @@ function parseProviderOption(value: string): { provider: LlmProvider; baseUrl: O
  * saved model so the `<select>`'s `value` binds to a real `<option>` even
  * before the live list returns. Fetched models are appended after, de-duped.
  */
-function openaiModelOptions(saved: string, fetched: string[]): string[] {
+function modelOptions(saved: string, fetched: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   if (saved) {
@@ -401,6 +406,36 @@ export const SettingsView: Component = () => {
   const [draftAutoModel, setDraftAutoModel] = createSignal<GeminiModel | null>(settings().geminiAutoModel);
   const [draftClaudeKey, setDraftClaudeKey] = createSignal(settings().claudeApiKey);
   const [draftClaudeModel, setDraftClaudeModel] = createSignal<ClaudeModel>(settings().claudeModel);
+  const [draftTavilyEnabled, setDraftTavilyEnabled] = createSignal(settings().tavilyEnabled ?? false);
+  const [draftTavilyKey, setDraftTavilyKey] = createSignal(settings().tavilyApiKey ?? '');
+  const [tavilyTesting, setTavilyTesting] = createSignal(false);
+  const [tavilyTestMessage, setTavilyTestMessage] = createSignal<string | null>(null);
+  let tavilyTestController: AbortController | null = null;
+  createEffect(on([draftTavilyKey, draftTavilyEnabled], () => {
+    tavilyTestController?.abort();
+    tavilyTestController = null;
+    setTavilyTesting(false);
+    setTavilyTestMessage(null);
+  }, { defer: true }));
+  onCleanup(() => tavilyTestController?.abort());
+  const testTavily = async (): Promise<void> => {
+    const controller = new AbortController();
+    tavilyTestController = controller;
+    setTavilyTesting(true);
+    setTavilyTestMessage(null);
+    try {
+      const result = await runTavilySelfTest(draftTavilyKey().trim(), controller.signal);
+      if (tavilyTestController === controller && !controller.signal.aborted) {
+        setTavilyTestMessage(`Connected · ${result.resultCount} results · ${result.latencyMs} ms`);
+      }
+    } catch (error) {
+      if (tavilyTestController === controller && !controller.signal.aborted) {
+        setTavilyTestMessage(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (tavilyTestController === controller) setTavilyTesting(false);
+    }
+  };
   // Claude model picker uses the curated CLAUDE_MODELS list directly. No live
   // /v1/models probe — the curated list covers the production lineup and a
   // failing key would block the "Test model" button anyway, which is where
@@ -471,6 +506,52 @@ export const SettingsView: Component = () => {
     }
     return null;
   };
+  const [sttSetupExpanded, setSttSetupExpanded] = createSignal(needsDraftStt() || !!sttDraftError());
+  createEffect(on([needsDraftStt, sttDraftError], ([required, error]) => {
+    // Validation may reveal this panel, but fixing a field must not close it
+    // while the wearer is choosing a model or entering fallback addresses.
+    if (required || error) setSttSetupExpanded(true);
+  }));
+
+  const [sttModels, setSttModels] = createSignal<string[]>([]);
+  const [sttModelsLoading, setSttModelsLoading] = createSignal(false);
+  const [sttModelsMessage, setSttModelsMessage] = createSignal<string | null>(null);
+  let sttModelsController: AbortController | null = null;
+  createEffect(on([
+    draftSttHost,
+    () => draftOpenaiKeys()[draftSttHost()] ?? '',
+    () => draftSttFallbacks()[draftSttHost()] ?? '',
+  ], () => {
+    sttModelsController?.abort();
+    sttModelsController = null;
+    setSttModels([]);
+    setSttModelsLoading(false);
+    setSttModelsMessage(null);
+  }, { defer: true }));
+  onCleanup(() => sttModelsController?.abort());
+
+  async function refreshSttModels(): Promise<void> {
+    if (sttModelsLoading() || sttUrlError() || fallbackError()) return;
+    const controller = new AbortController();
+    sttModelsController = controller;
+    setSttModelsLoading(true);
+    setSttModelsMessage(null);
+    try {
+      const models = await fetchTranscriptionModels(
+        (draftOpenaiKeys()[draftSttHost()] ?? '').trim(), draftSttHost(), controller.signal,
+        normalizeFallbackUrls(draftSttHost(), (draftSttFallbacks()[draftSttHost()] ?? '').split('\n')),
+      );
+      if (controller.signal.aborted || sttModelsController !== controller) return;
+      setSttModels(models);
+      if (models.length === 0) setSttModelsMessage('This server does not list models. Enter the model ID manually.');
+    } catch (error) {
+      if (!controller.signal.aborted && sttModelsController === controller) {
+        setSttModelsMessage(`${error instanceof Error ? error.message : String(error)} Manual model entry is still available.`);
+      }
+    } finally {
+      if (sttModelsController === controller) setSttModelsLoading(false);
+    }
+  }
 
   const [openaiModels, setOpenaiModels] = createSignal<string[]>([]);
   const [openaiModelsLoading, setOpenaiModelsLoading] = createSignal(false);
@@ -983,6 +1064,7 @@ export const SettingsView: Component = () => {
    */
   const canSave = createMemo(() => {
     const provider = draftProvider();
+    if (draftTavilyEnabled() && !draftTavilyKey().trim()) return false;
     if (mainTest().state === 'fail' || autoTest().state === 'fail' || fallbackError() || sttDraftError()) return false;
     if (provider === 'gemini') {
       if (draftKey().trim().length < 10) return false;
@@ -1115,6 +1197,7 @@ export const SettingsView: Component = () => {
    * refreshes when both tabs are dirty.
    */
   const onSave = async () => {
+    if (draftTavilyEnabled() && !draftTavilyKey().trim()) { setKeyError('Add a Tavily API key or turn off Tavily search.'); return; }
     if (customUrlError() || sttDraftError() || fallbackError()) { setKeyError(customUrlError() || sttDraftError() || fallbackError()); return; }
     if (isCustomEndpoint()) setDraftOpenaiKeys((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: draftOpenaiKey() }));
     if (isCustomSttHost(draftSttHost())) setDraftOpenaiKeys((prev) => ({ ...prev, [draftSttHost()]: prev[draftSttHost()] ?? '' }));
@@ -1133,6 +1216,8 @@ export const SettingsView: Component = () => {
         geminiAuto,
         claudeKey,
         claudeModel,
+        tavilyEnabled,
+        tavilyKey,
         openaiKeys,
         openaiBaseUrl,
         openaiModel,
@@ -1168,6 +1253,8 @@ export const SettingsView: Component = () => {
         saveGeminiAutoModel(setLs, draftAutoModel()),
         saveClaudeKey(setLs, draftClaudeKey().trim()),
         saveClaudeModel(setLs, draftClaudeModel()),
+        saveTavilyEnabled(setLs, draftTavilyEnabled()),
+        saveTavilyApiKey(setLs, draftTavilyKey()),
         saveOpenaiKeys(setLs, Object.fromEntries(
           (Object.entries(draftOpenaiKeys()) as Array<[OpenAiBaseUrl, string]>).map(([u, v]) => [u, v.trim()]),
         ) as Record<OpenAiBaseUrl, string>),
@@ -1204,7 +1291,7 @@ export const SettingsView: Component = () => {
       if (prepResult.ok) setPrepError('');
       else setPrepError(prepResult.error ?? 'Could not save meeting prep.');
       const allOk = [
-        provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, openaiKeys,
+        provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, tavilyEnabled, tavilyKey, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel, chatFallbacks, sttFallbacks,
         language, buffer, micSource, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim,
         autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
@@ -1235,6 +1322,8 @@ export const SettingsView: Component = () => {
         setDraftChatFallbacks(fallbackTextMap(settings().openaiFallbackUrls));
         setDraftSttFallbacks(fallbackTextMap(settings().sttFallbackUrls));
         setDraftSttModel(settings().sttModel);
+        setDraftTavilyKey(settings().tavilyApiKey ?? '');
+        setDraftTavilyEnabled(settings().tavilyEnabled ?? false);
         setDraftSttHost(settings().sttHost);
         if (isCustomSttHost(settings().sttHost)) setDraftCustomSttUrl(settings().sttHost);
         setSaveState('saved');
@@ -1282,6 +1371,8 @@ export const SettingsView: Component = () => {
       || draftAutoModel() !== s.geminiAutoModel
       || draftClaudeKey() !== s.claudeApiKey
       || draftClaudeModel() !== s.claudeModel
+      || draftTavilyEnabled() !== (s.tavilyEnabled ?? false)
+      || draftTavilyKey() !== (s.tavilyApiKey ?? '')
       || !shallowRecordEq(draftOpenaiKeys() as Record<string, string>, s.openaiApiKeys as Record<string, string>)
       || draftOpenaiBaseUrl() !== s.openaiBaseUrl
       || draftOpenaiModel() !== s.openaiModel
@@ -2462,7 +2553,7 @@ export const SettingsView: Component = () => {
                     picker on the focus-triggered refetch. User reopens after
                     fetch lands to see the live list.
                   */}
-                  <For each={openaiModelOptions(draftOpenaiModel(), openaiModels())}>
+                  <For each={modelOptions(draftOpenaiModel(), openaiModels())}>
                     {(m) => <option value={m}>{m}</option>}
                   </For>
                 </select>
@@ -2536,7 +2627,8 @@ export const SettingsView: Component = () => {
                 </label>
               </details>
             </Show>
-            <details class="settings-disclosure" open={needsDraftStt() || !!sttDraftError()}>
+            <details class="settings-disclosure" open={sttSetupExpanded()}
+              onToggle={(e) => setSttSetupExpanded(e.currentTarget.open)}>
               <summary>Speech-to-text setup<SettingsIcon name="chevron" /></summary>
               <div class="disclosure-body">
             <p class="field-hint">Used by text-only providers and live speaker tagging for Gemini and OpenRouter. Choose Groq, OpenAI, or your own Whisper-compatible server.</p>
@@ -2584,6 +2676,19 @@ export const SettingsView: Component = () => {
                 <input type="text" aria-label="Speech-to-text model" placeholder="Model ID served by your Whisper endpoint"
                   autocomplete="off" spellcheck={false} value={draftSttModel()}
                   onInput={(e) => { setDraftSttModel(e.currentTarget.value); setDraftCustomSttModel(e.currentTarget.value); clearStatuses(); }} />
+                <button type="button" class="secondary" onClick={() => void refreshSttModels()}
+                  disabled={!!sttUrlError() || !!fallbackError() || sttModelsLoading()}>
+                  {sttModelsLoading() ? 'Loading models…' : 'Load Whisper models'}
+                </button>
+                <Show when={sttModels().length > 0}>
+                  <select aria-label="Available speech-to-text models" value={draftSttModel()}
+                    onChange={(e) => { setDraftSttModel(e.currentTarget.value); setDraftCustomSttModel(e.currentTarget.value); clearStatuses(); }}>
+                    <Show when={!draftSttModel()}><option value="">Choose a model</option></Show>
+                    <For each={modelOptions(draftSttModel(), sttModels())}>{(model) => <option value={model}>{model}</option>}</For>
+                  </select>
+                </Show>
+                <Show when={sttModelsMessage()}><span class="field-hint" role="status">{sttModelsMessage()}</span></Show>
+                <span class="field-hint">Load models from the primary or fallback server when it supports /models, or enter a model ID manually.</span>
               </Show>
               <Show when={sttDraftError() && !sttUrlError()}><span class="field-error">{sttDraftError()}</span></Show>
             </label>
@@ -2600,6 +2705,28 @@ export const SettingsView: Component = () => {
               </div>
             </details>
             <Show when={fallbackError()}><span class="field-error">Fallback URL: {fallbackError()}</span></Show>
+
+            <details class="settings-disclosure" open={draftTavilyEnabled()}>
+              <summary>Optional Tavily web search<SettingsIcon name="chevron" /></summary>
+              <div class="disclosure-body">
+                <label class="toggle-row toggle-row--full">
+                  <input type="checkbox" aria-label="Use Tavily web search" checked={draftTavilyEnabled()}
+                    onChange={(e) => setDraftTavilyEnabled(e.currentTarget.checked)} />
+                  <span>Use Tavily when the provider has no web search</span>
+                </label>
+                <p class="field-hint">Off by default. Search-enabled lenses send a short text query from captured speech to Tavily. Native provider search takes priority. Failed or empty searches still return an answer marked as ungrounded.</p>
+                <label class="field">
+                  <span class="field-label">Tavily API key</span>
+                  <ApiKeyInput label="Tavily API key" placeholder="tvly-…" value={draftTavilyKey()}
+                    onInput={(e) => setDraftTavilyKey(e.currentTarget.value)} />
+                  <span class="field-hint">Stored on this device. Turning Tavily off keeps your saved key. <a href="https://app.tavily.com" target="_blank" rel="noreferrer">Get a Tavily key</a></span>
+                </label>
+                <Show when={draftTavilyEnabled() && !draftTavilyKey().trim()}><span class="field-error">Add a Tavily API key or turn off Tavily search.</span></Show>
+                <button type="button" class="secondary" disabled={!draftTavilyKey().trim() || tavilyTesting()}
+                  onClick={() => void testTavily()}>{tavilyTesting() ? 'Testing Tavily…' : 'Test Tavily search'}</button>
+                <Show when={tavilyTestMessage()}><span class="field-hint" role="status">{tavilyTestMessage()}</span></Show>
+              </div>
+            </details>
 
             <details class="settings-disclosure provider-capabilities">
               <summary>Web search availability<SettingsIcon name="chevron" /></summary>
@@ -2618,21 +2745,25 @@ export const SettingsView: Component = () => {
                       ? draftClaudeModel()
                       : draftOpenaiModel();
                   const baseUrl = provider === 'openai-compatible' ? draftOpenaiBaseUrl() : undefined;
-                  const resolved = resolveProviderGrounding(provider, baseUrl, 'web_search', model);
+                  const native = resolveProviderGrounding(provider, baseUrl, 'web_search', model);
+                  const resolved = resolveSearchFallback(native, {
+                    openaiApiKeys: draftOpenaiKeys(), tavilyEnabled: draftTavilyEnabled(), tavilyApiKey: draftTavilyKey(),
+                  });
+                  if (resolved.prefetchSearch === 'tavily') return 'Tavily search is enabled for this provider. Usable results appear as citations; empty or failed searches retain the ungrounded ° mark.';
                   // DeepSeek borrows the wearer's Perplexity Search key —
                   // resolver returns `grounded` regardless, but the actual
                   // runtime downgrades to groundless when no Perplexity key
                   // is on file. Surface the dependency explicitly so the
                   // wearer knows what's needed.
-                  if (resolved.prefetchSearch === 'perplexity') {
+                  if (native.prefetchSearch === 'perplexity') {
                     const pplxKey = (draftOpenaiKeys()['https://api.perplexity.ai'] ?? '').trim();
                     return pplxKey
                       ? 'Grounded via your Perplexity key (DeepSeek has no native web search, so VeritasLens reuses Perplexity Search before each grounded lens call).'
-                      : 'Add a Perplexity API key (under the Perplexity provider) to enable web search on DeepSeek. Without it, fact-style lenses run on training data only and the HUD marks them with a trailing °.';
+                      : 'Add a Perplexity API key or enable optional Tavily search above. Otherwise, DeepSeek answers use training data and carry a trailing °.';
                   }
                   return resolved.mode === 'grounded'
                     ? 'Grounded: fact-style lenses pull fresh web results before answering.'
-                    : 'Groundless: this host has no web search — fact-style lenses run on training data only. The HUD marks groundless answers with a trailing °.';
+                    : 'This provider has no web search. Enable optional Tavily search above, or answers use training data and carry a trailing °.';
                 })()}
               </span>
             </details>
