@@ -19,9 +19,8 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
     "types": ["vite/client", "vitest/globals", "node"],
-    "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*", "../core/src/*"]
+      "@/*": ["./src/*", "../core/src/*"]
     }
   },
   "include": ["src", "tests"]

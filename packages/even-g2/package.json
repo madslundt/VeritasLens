@@ -15,17 +15,17 @@
     "sim": "evenhub-simulator http://localhost:5173 --automation-port 9898"
   },
   "dependencies": {
-    "@veritaslens/core": "*",
     "@evenrealities/even_hub_sdk": "^0.0.16",
+    "@veritaslens/core": "*",
     "solid-js": "^1.9.17"
   },
   "devDependencies": {
     "@evenrealities/evenhub-cli": "^0.1.14",
     "@evenrealities/evenhub-simulator": "^0.9.5",
     "@evenrealities/pretext": "^0.1.4",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "vite": "^8.3.4",
     "vite-plugin-solid": "^2.11.14",
-    "vitest": "^4.1.11"
+    "vitest": "^5.0.4"
   }
 }
