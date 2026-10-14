@@ -1,7 +1,7 @@
 // src/personas/factChecker.ts
 import type { FactClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES, LENS_FOCUS_RULES } from './_utils';
 
 export const FACT_CHECKER_PROMPT = `You are VeritasLens, a real-time fact-check assistant for smart glasses.
 
@@ -82,7 +82,7 @@ export function buildFactCheckerPrompt(lang: LanguageCode): string {
     `LANGUAGE: Write each claim's \`claim\`, \`correction\`, and \`reason\` fields in ${langName}. ` +
     `Each claim's \`quote\` field must stay in the original spoken language. ` +
     `Each claim's \`verdict\` MUST stay as one of "TRUE", "FALSE", or "UNVERIFIED" regardless of language.\n\n` +
-    `CONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`
+    `FOCUS: ${LENS_FOCUS_RULES}\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`
   );
 }
 
@@ -104,7 +104,7 @@ export const FACT_CHECKER_SCHEMA = {
   properties: {
     claims: {
       type: 'array',
-      minItems: 1,
+      minItems: 0,
       maxItems: 5,
       items: CLAIM_ITEM_SCHEMA,
     },

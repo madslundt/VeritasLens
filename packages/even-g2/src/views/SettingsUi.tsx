@@ -87,7 +87,7 @@ export const ApiKeyInput: Component<{
 };
 
 export const LENS_DESCRIPTIONS: Partial<Record<IconName, string>> = {
-  auto: 'Let the conversation choose the right lens.',
+  auto: 'Choose useful help for your profile and goal, or stay quiet.',
   translation: 'Understand another language and find a reply.',
   'meeting-prep': 'Answers grounded in notes you prepare.',
   'fact-checker': 'Check claims against the facts.',

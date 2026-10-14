@@ -1,3 +1,7 @@
+import { CONVERSATION_PROFILES, DEFAULT_CONVERSATION, preparedConversationSections, conversationDirective, capturedConversationContext, collectConversationRecords, resultText, profileCandidates, LiveCaptionCapture, captionConfigurationError } from '@veritaslens/core';
+import type { ConversationProfile } from '@veritaslens/core';
+import { saveConversationPreferences, saveAutoModeEnabled, updateHistoryEntry, recordingPaused, setRecordingPaused, liveCaptionText, setLiveCaptionText, liveCaptionStatus, setLiveCaptionStatus } from '@/state/store';
+import { showConversationOptions, conversationOptionAtIndex, showCaptionsPage, updateCaptionsPage } from './hud';
 // src/runtime/lifecycle.ts
 import { getBridge } from './bridge';
 import { isLocationFresh, kickOffLocationRefresh, probeAndCacheLocation } from './location';
@@ -80,8 +84,7 @@ import {
   gameSavePromptEntryAtIndex,
   gamesPickerEntryAtIndex,
   getActiveLayout,
-  hasPendingActiveResult,
-  markActiveHidden,
+  dismissActiveAnswer,
   menuOptionAtIndex,
   pickerEntryAtIndex,
   resetHudSessionState,
@@ -147,7 +150,6 @@ import {
   appPhase,
   gamePresets,
   loadHistory,
-  meetingPrepIsConfigured,
   meetingPrepSections,
   meetingPrepWebGrounding,
   pushDebugEvent,
@@ -177,13 +179,179 @@ export function chooseClassifierModel(s: Settings): GeminiModel | undefined {
   return s.geminiAutoModel ?? undefined;
 }
 
+let cachedExchange: { pcm: Uint8Array; capturedAt: number; transcript: string; context: string; result?: LensResult } | null = null;
+let captionCapture: LiveCaptionCapture | null = null;
+let captionCaptureEnabled = false;
+let cueExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+let pinnedCue = false;
+let lastConversationOptionIndex = 0;
+let conversationOptionsKind: 'profiles' | 'help' | 'refine' | 'tools' | 'arguments' = 'help';
+const storeWrite = (key: string, value: string) => getBridge().setLocalStorage(key, value);
+function stopConversationCapture(): void {
+  captionCapture?.stop(); captionCapture = null; captionCaptureEnabled = false;
+  if (cueExpiryTimer) clearTimeout(cueExpiryTimer);
+  cueExpiryTimer = null; cachedExchange = null; pinnedCue = false;
+  setRecordingPaused(false); setLiveCaptionText(''); setLiveCaptionStatus('');
+}
+function rememberDisplayedCue(result: LensResult): void {
+  if (cachedExchange) cachedExchange.result = result;
+  pinnedCue = false;
+  if (cueExpiryTimer) clearTimeout(cueExpiryTimer);
+  if (!settings().conversation) return;
+  cueExpiryTimer = setTimeout(() => {
+    cueExpiryTimer = null;
+    if (!pinnedCue && !sessionHistory().filter(e => e.sessionId === currentSessionId).at(-1)?.pinned && !analyzing && currentHudPage() === 'active') {
+      void dismissActiveAnswer().catch(err => logDispatchError('cue-expiry-fail', err));
+    }
+  }, settings().conversation!.cueDurationSec * 1000);
+}
+function syncCaptionCapture(): void {
+  const enabled = !!settings().conversation?.captionsEnabled && !!buffer && !recordingPaused();
+  if (enabled === captionCaptureEnabled) return;
+  captionCapture?.stop(); captionCapture = null; captionCaptureEnabled = enabled;
+  if (!enabled) return;
+  const error = captionConfigurationError();
+  if (error) { setLiveCaptionStatus(error); return; }
+  const expectedSession = currentSessionId;
+  captionCapture = new LiveCaptionCapture({
+    source: cursor => buffer && currentSessionId === expectedSession && !recordingPaused() ? { pcm: buffer.linearPcmSince(cursor), sampleRate: buffer.sampleRate, endOffset: buffer.bytesProduced } : null,
+    onCaption: (text, startedAt, endedAt) => {
+      if (currentSessionId !== expectedSession || recordingPaused()) return;
+      appendTranscriptSegment({ speaker: 'other', text, startedAt, endedAt });
+      setLiveCaptionText(text); setLiveCaptionStatus('Captured speech · speaker unknown');
+      void updateCaptionsPage(text).catch(err => logDispatchError('caption-display-fail', err));
+    },
+    onError: message => { setLiveCaptionStatus(message); void updateCaptionsPage(liveCaptionText(), message).catch(err => logDispatchError('caption-display-fail', err)); },
+  });
+  setLiveCaptionStatus('Waiting for speech…');
+  captionCapture.start(buffer!.bytesProduced);
+}
+export async function selectConversationProfile(profile: ConversationProfile, presetId?: string): Promise<void> {
+  const c = settings().conversation ?? DEFAULT_CONVERSATION;
+  const preset = c.presets.find(p => p.id === presetId);
+  const next = preset ? { ...c, profile: preset.profile, goal: preset.goal, constraints: preset.constraints, selectedContextIds: preset.selectedContextIds } : { ...c, profile };
+  if (!await saveConversationPreferences(storeWrite, next)) throw new Error('Could not save conversation profile.');
+  if (buffer) { await cancelConversationAnalysis(); setActivePersona(CONVERSATION_PROFILES.find(p => p.id === next.profile)!.defaultLens); await restoreActivePage(); }
+  else await showPickerPage();
+}
+export async function startConversation(personaId?: string): Promise<void> {
+  if (!running) await startHudRuntime();
+  const error = providerConfigurationError(settings());
+  if (error) { setErrorMessage(error); return; }
+  if (buffer) { if (personaId) { await cancelConversationAnalysis(); setActivePersona(personaId); } await restoreActivePage(); return; }
+  const profile = CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile) ?? CONVERSATION_PROFILES[0];
+  await enterActiveSession(personaId ?? profile.defaultLens);
+}
+async function cancelConversationAnalysis(): Promise<void> {
+  inflight?.abort(); inflight = null; analyzing = false;
+  clearLensStreamingHeading(); setLensPartialResult(null);
+  await stopSpinner();
+}
+export async function pauseConversation(): Promise<void> {
+  if (!buffer) return;
+  const paused = !recordingPaused();
+  if (paused) {
+    await cancelConversationAnalysis();
+    if (noVoiceStatusTimer) clearTimeout(noVoiceStatusTimer); noVoiceStatusTimer = null;
+    if (errClearTimer) clearTimeout(errClearTimer); errClearTimer = null;
+    captionCapture?.stop(); autoSummaryInflight?.abort();
+  }
+  const ok = await getBridge().audioControl(!paused, settings().micSource === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses);
+  if (!ok) { setErrorMessage('Microphone state could not be changed.'); return; }
+  setRecordingPaused(paused); syncAutoModeWatcher(); syncCaptionCapture();
+  setAppPhase('listening'); await setStatus(paused ? 'PAUSED' : 'listening');
+  if (currentHudPage() === 'captions') await updateCaptionsPage(liveCaptionText(), paused ? 'Microphone paused' : liveCaptionStatus());
+}
+export async function requestConversationHelp(personaId: string, instruction?: string, reuse = true): Promise<void> {
+  if (!buffer) { await startConversation(); if (!buffer) return; }
+  const memory = personaId === 'catch-up' || personaId === 'commitments';
+  await runAnalysis({ personaId, instruction, reuse: reuse && !!cachedExchange, memory });
+}
+export async function endConversation(): Promise<void> {
+  if (!buffer) return;
+  if (settings().conversation && buffer.bytesBuffered > 0 && !analyzing) {
+    if (!recordingPaused()) await pauseConversation();
+    await requestConversationHelp('commitments', undefined, false);
+  }
+  await leaveActiveSession();
+}
+async function openProfileOptions(): Promise<void> {
+  conversationOptionsKind = 'profiles'; lastConversationOptionIndex = 0;
+  await showConversationOptions('Choose your situation', [
+    ...CONVERSATION_PROFILES.map(p => ({ id: `profile:${p.id}`, label: p.name })),
+    ...(settings().conversation?.presets ?? []).map(p => ({ id: `preset:${p.id}`, label: p.name })),
+  ]);
+}
+async function openHelpOptions(): Promise<void> {
+  conversationOptionsKind = 'help'; lastConversationOptionIndex = 0;
+  await showConversationOptions('Help with this exchange', [
+    { id: 'help:respond', label: 'Help me respond' }, { id: 'help:eli5', label: 'Explain' },
+    { id: 'help:fact-checker', label: 'Check a fact' }, { id: 'help:key-questions', label: 'What should I ask?' },
+    { id: 'help:repair', label: 'Clarify or disagree' }, { id: 'help:commitments', label: 'Remember decisions & commitments' },
+    { id: 'help:catch-up', label: 'Catch me up' }, { id: 'conversation-arguments', label: 'Examine the argument ›' },
+    { id: 'help:translation', label: 'Translate' }, { id: 'help:meeting-prep', label: 'Use prepared context' },
+  ]);
+}
+async function openRefineOptions(): Promise<void> {
+  conversationOptionsKind = 'refine'; lastConversationOptionIndex = 0;
+  await showConversationOptions('Refine the same exchange', [
+    { id: 'refine:Make the previous answer shorter.', label: 'Shorter' },
+    { id: 'refine:Make the suggested response more natural.', label: 'More natural' },
+    { id: 'refine:Explain why, using the same evidence.', label: 'Explain why' },
+    { id: 'refine:Speaker attribution may be wrong. Remove unsupported attribution.', label: 'Wrong speaker' },
+    { id: 'refine:Recheck the transcript against the audio. Do not guess unclear words.', label: 'Wrong word — recheck' },
+    { id: 'conversation-pin', label: pinnedCue ? 'Unpin this cue' : 'Pin this cue' },
+    { id: 'feedback:useful', label: 'Useful' }, { id: 'feedback:not-useful', label: 'Not useful' },
+  ]);
+}
+async function openSessionOptions(): Promise<void> {
+  conversationOptionsKind = 'tools'; lastConversationOptionIndex = 0;
+  await showConversationOptions('Session tools', [
+    { id: 'conversation-pause', label: recordingPaused() ? 'Resume microphone' : 'Pause microphone' },
+    { id: 'conversation-hands-free', label: settings().autoModeEnabled ? 'Hands-free: on → turn off' : 'Hands-free: off → turn on' },
+    { id: 'conversation-captions', label: 'View live captions' },
+    { id: 'conversation-caption-toggle', label: settings().conversation?.captionsEnabled ? 'Stop live captions' : 'Enable live captions' },
+    { id: 'help:catch-up', label: 'Catch me up' }, { id: 'help:commitments', label: 'Review decisions & commitments' },
+    { id: 'conversation-profiles', label: 'Change profile ›' }, { id: 'conversation-dismiss', label: 'Dismiss displayed cue' },
+  ]);
+}
+async function handleConversationOptionGesture(g: Gesture): Promise<void> {
+  if (typeof g.itemIndex === 'number') lastConversationOptionIndex = g.itemIndex;
+  if (g.type !== OsEventTypeList.CLICK_EVENT && g.type !== undefined) return;
+  const id = conversationOptionAtIndex(lastConversationOptionIndex);
+  if (id === 'conversation-back') { if (buffer) await openMenuForCurrentContext(); else await showPickerPage(); return; }
+  if (id.startsWith('profile:')) { await selectConversationProfile(id.slice(8) as ConversationProfile); return; }
+  if (id.startsWith('preset:')) { const p = settings().conversation?.presets.find(p => p.id === id.slice(7)); if (p) await selectConversationProfile(p.profile, p.id); return; }
+  if (id.startsWith('help:')) { await requestConversationHelp(id.slice(5)); return; }
+  if (id.startsWith('refine:')) { await requestConversationHelp('refine', id.slice(7)); return; }
+  if (id === 'conversation-profiles') { await openProfileOptions(); return; }
+  if (id === 'conversation-arguments') {
+    conversationOptionsKind = 'arguments'; lastConversationOptionIndex = 0;
+    await showConversationOptions('Examine the argument', ['logical-fallacy', 'bias-detector', 'devils-advocate'].map(id => ({ id: `help:${id}`, label: getPersona(id)!.name }))); return;
+  }
+  if (id === 'conversation-pause') await pauseConversation();
+  if (id === 'conversation-hands-free') await saveAutoModeEnabled(storeWrite, !settings().autoModeEnabled);
+  if (id === 'conversation-caption-toggle') await saveConversationPreferences(storeWrite, { ...(settings().conversation ?? DEFAULT_CONVERSATION), captionsEnabled: !settings().conversation?.captionsEnabled });
+  if (id === 'conversation-captions') { await showCaptionsPage(liveCaptionText(), recordingPaused() ? 'Microphone paused' : liveCaptionStatus() || 'Enable captions in Session tools'); return; }
+  if (id === 'conversation-dismiss') { await restoreActivePage(); await dismissActiveAnswer(); return; }
+  if (id === 'conversation-pin' || id.startsWith('feedback:')) {
+    const entry = sessionHistory().filter(e => e.sessionId === currentSessionId).at(-1);
+    if (entry) {
+      if (id === 'conversation-pin') { pinnedCue = !pinnedCue; await updateHistoryEntry(entry.id, { pinned: pinnedCue }, storeWrite); }
+      else await updateHistoryEntry(entry.id, { feedback: id.slice(9) as 'useful' | 'not-useful' }, storeWrite);
+    }
+    await restoreActivePage(); return;
+  }
+  if (conversationOptionsKind === 'tools') await openSessionOptions();
+}
+
 /** Terminal disposition of a single `runAnalysis` attempt. */
-export type AnalysisOutcome = 'success' | 'noSpeech' | 'abort' | 'error';
+export type AnalysisOutcome = 'success' | 'noSpeech' | 'noContent' | 'abort' | 'error';
 
 /**
  * The analysis cursor (`lastAnalysisByteOffset`) advances only when the
  * analysis actually consumed its audio window: a displayed result or a
- * completed `noSpeech` verdict. Errors, timeouts, and cancellations leave it
+ * completed `noSpeech` or `noContent` verdict. Errors, timeouts, and cancellations leave it
  * unchanged so a retry re-includes the same audio. Pure so it can be
  * unit-tested without the lifecycle's bridge/HUD/network surface.
  */
@@ -192,7 +360,7 @@ export function resolveAnalysisCursor(
   snapshotOffset: number,
   currentOffset: number,
 ): number {
-  return outcome === 'success' || outcome === 'noSpeech' ? snapshotOffset : currentOffset;
+  return outcome === 'success' || outcome === 'noSpeech' || outcome === 'noContent' ? snapshotOffset : currentOffset;
 }
 
 /**
@@ -384,6 +552,7 @@ export async function refreshHudPage(): Promise<void> {
 }
 
 export async function stopHudRuntime(): Promise<void> {
+  stopConversationCapture();
   if (!running) return;
   running = false;
   gameLocationController?.abort();
@@ -512,7 +681,7 @@ function handleEvent(event: EvenHubEvent): void {
     }
   }
 
-  if (event.audioEvent && buffer) { buffer.append(event.audioEvent.audioPcm); return; }
+  if (event.audioEvent && buffer && !recordingPaused()) { buffer.append(event.audioEvent.audioPcm); return; }
 
   if (event.textEvent) {
     const type = event.textEvent.eventType ?? 0;
@@ -552,6 +721,7 @@ function handleEvent(event: EvenHubEvent): void {
   // review so users always have a way out, even before an API key is set.
   // Everywhere else it starts analysis, or cancels an in-flight one.
   if (gesture.type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+    if (page === 'conversation-options') { void (buffer ? openMenuForCurrentContext() : showPickerPage()).catch(err => logDispatchError('conversation-back-fail', err)); return; }
     if (gameLocationController) {
       gameLocationController.abort();
       gameLocationController = null;
@@ -628,7 +798,9 @@ function handleEvent(event: EvenHubEvent): void {
     return;
   }
 
-  if (page === 'picker') handlePickerEvent(gesture).catch((err) => logDispatchError('picker-fail', err));
+  if (page === 'conversation-options') handleConversationOptionGesture(gesture).catch((err) => logDispatchError('conversation-option-fail', err));
+  else if (page === 'captions') openMenuForCurrentContext().catch((err) => logDispatchError('captions-menu-fail', err));
+  else if (page === 'picker') handlePickerEvent(gesture).catch((err) => logDispatchError('picker-fail', err));
   else if (page === 'active') handleActiveGesture(gesture).catch((err) => logDispatchError('active-fail', err));
   else if (page === 'menu') handleMenuGesture(gesture).catch((err) => logDispatchError('menu-fail', err));
   else if (page === 'history-list') handleHistoryListGesture(gesture).catch((err) => logDispatchError('history-list-fail', err));
@@ -650,6 +822,7 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
   if (typeof g.itemIndex === 'number') lastPickerIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const entry = pickerEntryAtIndex(lastPickerIndex);
+    if (entry.kind === 'profiles') { await openProfileOptions(); return; }
     if (entry.kind === 'games') {
       await openGamesPicker();
       return;
@@ -664,11 +837,12 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
     // session would needlessly power the mic and allocate the ring buffer
     // for a lens that can't produce anything useful. Flash a hint on the
     // picker so the wearer knows why nothing happened.
-    if (persona.id === MEETING_PREP_ID && !meetingPrepIsConfigured()) {
+    if (persona.id === MEETING_PREP_ID && !preparedConversationSections(meetingPrepSections(), settings().conversation).some(section => section.body.trim())) {
       await flashPickerHint('Add notes in phone settings first');
       return;
     }
-    await enterActiveSession(persona.id);
+    const profile = CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile);
+    await enterActiveSession(persona.id === 'auto' && profile ? profile.defaultLens : persona.id);
   }
 }
 
@@ -829,9 +1003,13 @@ async function handleActiveGesture(g: Gesture): Promise<void> {
  *  items (Reply… when a translation result is cached, Say more → when the
  *  wearer is on the teleprompter, mid-summary items as before). */
 async function openMenuForCurrentContext(): Promise<void> {
+  lastMenuIndex = 0;
   await showMenuPage({
     exitGeneratesSummary: canGenerateFinalSummary(),
     dynamicItems: [
+      { id: 'conversation-help', label: 'Help with this exchange ›' },
+      { id: 'conversation-refine', label: 'Refine or correct ›' },
+      { id: 'conversation-tools', label: 'Session tools ›' },
       ...buildMidSummaryMenuItems(),
       ...buildTranslateMenuItems(),
     ],
@@ -963,6 +1141,9 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const option = menuOptionAtIndex(lastMenuIndex);
     switch (option) {
+      case 'conversation-help': await openHelpOptions(); break;
+      case 'conversation-refine': await openRefineOptions(); break;
+      case 'conversation-tools': await openSessionOptions(); break;
       case 'mid-summary':
       case 'mid-summary-refresh': {
         const reason = summaryGateReason();
@@ -977,7 +1158,7 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
       case 'back': await handleBackMenuOption(); break;
       case 'fact-check': await restoreActivePage(); await runAnalysis(); break;
       case 'history': await showHistoryListPage(sessionHistory().filter(e => e.sessionId === currentSessionId)); break;
-      case 'exit': await leaveActiveSession(); break;
+      case 'exit': await endConversation(); break;
       // Symmetric to 'exit' but tells leaveActiveSession to skip the
       // stop-time summary chain. Only surfaced by showMenuPage when a
       // summary could actually be generated, so it's never a confusing
@@ -1003,28 +1184,15 @@ async function handleMenuGesture(g: Gesture): Promise<void> {
 
 /**
  * Back closes the menu and returns to the listening state, clearing any
- * answer that was on screen. In discreet mode that means returning to the
- * dot-only layout; in baseline it means the standard REC + hint view.
+ * answer that was on screen and showing only the recording dot.
  */
 async function handleBackMenuOption(): Promise<void> {
-  // If a result arrived while the menu was open, surface it instead of
-  // clearing — the user opened the menu before the answer was revealed and
-  // expects to see it on return. When no pending result exists the menu was
-  // opened after the answer was already on screen (or no analysis ran), and
-  // Back should return to a clean recording view as before.
-  if (hasPendingActiveResult()) {
-    await restoreActivePage();
-    await setStatus('displaying');
-    await setActiveHint(ACTIVE_HINT_DEFAULT);
-    setAppPhase('displaying');
-    return;
-  }
   setStateResult(null);
-  setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
+  await setStatus('listening');
+  // Consume any result that arrived on the menu so it is available for recall,
+  // then dismiss through the same path as swiping past the last answer.
   await restoreActivePage();
-  // Preserve the result so a follow-up swipe-up re-reveals the last page the
-  // user was viewing instead of decrementing from a stale index.
-  markActiveHidden();
+  await dismissActiveAnswer();
   setAppPhase('listening');
 }
 
@@ -1066,6 +1234,10 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   // can't interleave with this fresh session's writes.
   finalSummaryInflight?.abort();
   finalSummaryInflight = null;
+  setRecordingPaused(false);
+  cachedExchange = null;
+  pinnedCue = false;
+  setLiveCaptionText(''); setLiveCaptionStatus('');
   setActivePersona(personaId);
   currentSessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
   sessionStartTime = Date.now();
@@ -1100,6 +1272,7 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   }
   startAutoSummaryTimer();
   syncAutoModeWatcher();
+  syncCaptionCapture();
   setAppPhase('listening');
 }
 
@@ -1113,7 +1286,7 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
  * case where the user toggles the setting while the mic is hot.
  */
 function syncAutoModeWatcher(): void {
-  const wantOn = settings().autoModeEnabled && buffer !== null;
+  const wantOn = settings().autoModeEnabled && buffer !== null && !recordingPaused();
   if (wantOn && !isAutoModeWatcherRunning()) {
     startAutoModeWatcher(buffer!, {
       getStartMs: () => settings().autoModeStartMs,
@@ -1125,6 +1298,7 @@ function syncAutoModeWatcher(): void {
         // Wearer-speak is a deliberate "I'm about to say something" recording
         // — silently dropping it because the surrounding transcript is filler
         // would feel broken. Bypass the gate entirely in that mode.
+        if (pinnedCue || sessionHistory().filter(e => e.sessionId === currentSessionId).at(-1)?.pinned) return false;
         if (wearerSpeakActive) return true;
         // Transcript mode off → no signal to gate on. Preserves today's
         // behaviour so privacy-conscious users don't lose auto-mode.
@@ -1165,6 +1339,7 @@ async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise
   // stop) keep the default false so a summary still lands when possible.
   const skipSummary = opts.skipSummary === true;
   try {
+    stopConversationCapture();
     // Cancel any analysis still in flight so the answer doesn't arrive into a
     // session that no longer exists (which would set lensResult / pendingActive
     // long after the user has left). resetHudSessionState below clears the
@@ -1224,8 +1399,12 @@ async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise
   }
 }
 
-const SPINNER_FRAMES = ['|', '/', '-', '\\'];
+// Equal advance widths let the corner stay right-aligned without rebuilding
+// its layout on each animation frame.
+const SPINNER_FRAMES = ['/', '\\'];
 const SPINNER_INTERVAL_MS = 200;
+const ELAPSED_TIMER_THRESHOLD_MS = 10_000;
+let spinnerStartedAt: number | null = null;
 let spinnerTimer: ReturnType<typeof setTimeout> | null = null;
 let spinnerPrefix = '';
 // Generation counter bumped by stopSpinner so a tick callback already
@@ -1241,11 +1420,14 @@ let spinnerGen = 0;
 let spinnerInflight: Promise<void> | null = null;
 
 function statusFrameContent(frame: string): string {
-  return spinnerPrefix ? `${spinnerPrefix}${frame}` : ` ${frame}  `;
+  const elapsedMs = performance.now() - (spinnerStartedAt ?? performance.now());
+  if (elapsedMs > ELAPSED_TIMER_THRESHOLD_MS) return `${Math.floor(elapsedMs / 1000)}s`;
+  return spinnerPrefix ? `${spinnerPrefix}${frame}` : frame;
 }
 
-function startSpinner(): void {
+function startSpinner(startedAt: number = performance.now()): void {
   if (spinnerTimer) return;
+  spinnerStartedAt = startedAt;
   let i = 0;
   const gen = spinnerGen;
   // Push an initial frame immediately so the menu/status slot doesn't stay
@@ -1256,16 +1438,17 @@ function startSpinner(): void {
   // fire-and-forget write that could out-live stopSpinner.
   const dispatchFrame = async (frame: string): Promise<void> => {
     const page = currentHudPage();
+    const content = statusFrameContent(frame);
     if (page === 'active') {
-      seedMenuSpinnerFrame(frame);
-      await setStatus(statusFrameContent(frame));
+      seedMenuSpinnerFrame(content);
+      await setStatus(content);
     } else if (page === 'menu') {
-      seedStatusFrame(statusFrameContent(frame));
-      await setMenuSpinner(frame);
+      seedStatusFrame(content);
+      await setMenuSpinner(content);
     } else {
       // No visible spinner slot — just seed both buffers for later rebuilds.
-      seedStatusFrame(statusFrameContent(frame));
-      seedMenuSpinnerFrame(frame);
+      seedStatusFrame(content);
+      seedMenuSpinnerFrame(content);
     }
   };
 
@@ -1292,7 +1475,13 @@ function startSpinner(): void {
         // Self-reschedule only after the SDK write resolves — caps cadence to
         // what the bridge can actually deliver and prevents the setInterval
         // catch-up burst that produced the jittery "freeze, then rush" motion.
-        spinnerTimer = setTimeout(() => { void tick(); }, SPINNER_INTERVAL_MS);
+        const elapsedMs = performance.now() - (spinnerStartedAt ?? performance.now());
+        // Once elapsed time replaces animation, only write when the second
+        // changes. Read the monotonic clock, rather than counting slow BLE ticks.
+        const delay = elapsedMs > ELAPSED_TIMER_THRESHOLD_MS
+          ? 1000 - (elapsedMs % 1000)
+          : Math.max(1, Math.min(SPINNER_INTERVAL_MS, ELAPSED_TIMER_THRESHOLD_MS - elapsedMs + 1));
+        spinnerTimer = setTimeout(() => { void tick(); }, delay);
       }
     }
   };
@@ -1306,6 +1495,7 @@ async function stopSpinner(): Promise<void> {
   if (spinnerTimer) clearTimeout(spinnerTimer);
   spinnerTimer = null;
   spinnerPrefix = '';
+  spinnerStartedAt = null;
   spinnerGen++;
   // Sync reset of the canonical buffers so any page rebuild that races the
   // async clear writes below (notably setLensResult → renderActivePage on the
@@ -1324,14 +1514,14 @@ async function stopSpinner(): Promise<void> {
 }
 
 /**
- * Format the already-answered claims block. Filtered to the *current* session
+ * Format the already-answered claims block. Filtered to the same lens and *current* session
  * only — previous sessions are unrelated context and would just inflate the
  * prompt. Includes the verbatim quote when present so the LLM can anchor
  * against the exact spoken utterance, not just the topic label.
  */
-function buildAlreadyAnsweredLines(): string[] {
+function buildAlreadyAnsweredLines(lensId: string): string[] {
   const entries = sessionHistory()
-    .filter((e) => e.sessionId === currentSessionId)
+    .filter((e) => e.sessionId === currentSessionId && e.lensId === lensId)
     .slice(-5);
   return entries.map((e, i) => {
     const q = (e.question ?? '').trim() || '(no question)';
@@ -1341,7 +1531,7 @@ function buildAlreadyAnsweredLines(): string[] {
 }
 
 const ALREADY_ANSWERED_DIRECTIVE =
-  'ALREADY ANSWERED in this conversation — do NOT re-extract, re-answer, or include these claims even if they appear again in the audio. If the audio contains ONLY these (nothing new), set noSpeech=true. If the audio contains both these and something new, analyze ONLY the new content and skip the rest:';
+  'ALREADY ANSWERED by this lens — avoid repeating unchanged items. A new question, corrected claim, changed qualifier, or explicit request to revisit an answer is new content; analyze it. If nothing suitable remains, return empty claims with noSpeech=false. Previous answers are not verified evidence:';
 
 /** Conversation memory: last few taps within a short window, used as soft
  *  context rather than hard suppression. The disclaimer is important — the
@@ -1408,7 +1598,7 @@ const TRANSCRIPT_DIRECTIVE =
 
 function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   const base = persona.buildPrompt(lang);
-  const recent = buildAlreadyAnsweredLines();
+  const recent = persona.id === 'auto' || persona.id === 'translation' ? [] : buildAlreadyAnsweredLines(persona.id);
   const recall = buildRecallContextLines(intermediateSummaries, settings().autoSummaryEnabled);
   // Skip soft recent-memory entirely on Translation. Translation runs are
   // about the other person speaking — surfacing the wearer's prior fact-check
@@ -1428,7 +1618,7 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   // Recall context first (general background), then the tagged rolling
   // transcript (recent conversation flow), then recent-memory (soft — the
   // model may or may not act on it), then the already-answered directive
-  // (hard rule) closest to the call so the model's last-seen instruction is
+  // (same-lens deduplication) closest to the call so the last instruction is
   // the suppression list, not the "look back" context.
   if (recall.length > 0) {
     parts.push('', RECALL_CONTEXT_DIRECTIVE, ...recall);
@@ -1446,8 +1636,8 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
 }
 
 /**
- * Mirror of buildPromptWithContext for Meeting Prep — wraps the same speech-
- * focus preamble and recent-list around the section-aware prompt. Kept as a
+ * Meeting Prep wraps the speech-focus preamble and soft conversation memory
+ * around the section-aware prompt. Prior answers must not suppress new offers. Kept as a
  * dedicated helper so the runtime doesn't need to make the Persona shape
  * accept a sections argument.
  */
@@ -1458,7 +1648,6 @@ function buildMeetingPromptWithContext(
   opts: { webGrounding: boolean },
 ): string {
   const base = buildMeetingPrepPrompt(lang, sections, { webGrounding: opts.webGrounding });
-  const recent = buildAlreadyAnsweredLines();
   const recall = buildRecallContextLines(intermediateSummaries, settings().autoSummaryEnabled);
   const memory = buildRecentMemoryLines();
   const parts = [
@@ -1473,9 +1662,6 @@ function buildMeetingPromptWithContext(
   }
   if (memory.length > 0) {
     parts.push('', RECENT_MEMORY_DIRECTIVE, ...memory);
-  }
-  if (recent.length > 0) {
-    parts.push('', ALREADY_ANSWERED_DIRECTIVE, ...recent);
   }
   return parts.join('\n');
 }
@@ -1569,13 +1755,15 @@ async function showNoVoiceFeedback(message: string): Promise<void> {
   }, 2500);
 }
 
-async function runAnalysis(): Promise<void> {
+async function runAnalysis(options: { personaId?: string; reuse?: boolean; instruction?: string; memory?: boolean } = {}): Promise<void> {
   const page = currentHudPage();
-  if (page === 'history-list' || page === 'history-detail' || page === 'mid-summary') await restoreActivePage();
+  if (page === 'history-list' || page === 'history-detail' || page === 'mid-summary' || page === 'conversation-options' || page === 'captions') await restoreActivePage();
   if (currentHudPage() !== 'active') return;
   if (analyzing) return;
 
-  if (!buffer || buffer.bytesBuffered === 0) {
+  if (recordingPaused() && !options.reuse && !options.memory) { await flashActiveHint('Microphone paused — resume in Session tools'); return; }
+  if (options.reuse && !cachedExchange && !options.memory) { await flashActiveHint('Analyze an exchange first'); return; }
+  if (!buffer || (buffer.bytesBuffered === 0 && !options.memory && !options.reuse)) {
     // User tapped before any audio arrived (e.g. immediately after entering
     // the lens). Surface the same "no speech" feedback as the gate below
     // instead of silently returning so the wearer knows the tap registered.
@@ -1592,14 +1780,20 @@ async function runAnalysis(): Promise<void> {
     return;
   }
 
-  const persona = getPersona(activePersona());
-  if (!persona) return;
+  const selectedPersona = getPersona(options.personaId ?? activePersona());
+  if (!selectedPersona) return;
+  const previousAnswer = cachedExchange?.result;
+  if (selectedPersona.id === 'refine' && !previousAnswer) { await flashActiveHint('Analyze an exchange before refining'); return; }
+  const context = options.reuse && !options.memory && cachedExchange ? cachedExchange.context : capturedConversationContext(sessionHistory().filter(e => e.sessionId === currentSessionId), formatTranscriptForPrompt());
+  const records = collectConversationRecords(sessionHistory().filter(e => e.sessionId === currentSessionId));
+  const extra = `\n${conversationDirective(s.conversation)}\n${options.memory || ['respond', 'repair', 'commitments', 'catch-up', 'refine'].includes(selectedPersona.id) ? context : ''}\n${options.instruction ? `WEARER REQUEST: ${JSON.stringify(options.instruction)}\nPRIOR AI ANSWER (not evidence): ${previousAnswer ? resultText(previousAnswer) : ''}` : ''}\n${selectedPersona.id === 'commitments' ? `PRIOR RECORDS: ${JSON.stringify(records)}` : ''}\n${options.memory ? 'Answer from captured context. Fresh audio may be silent; do not set noSpeech for that alone.' : ''}`;
+  const persona: Persona = { ...selectedPersona, buildPrompt: lang => selectedPersona.buildPrompt(lang) + extra };
 
   // Empty-context guard for Meeting Prep: show a clear "configure on phone"
   // message and skip the API call entirely. The user can leave context empty
   // and still pick the lens from the picker, so this needs to be friendly
   // rather than an error.
-  if (persona.id === MEETING_PREP_ID && !meetingPrepIsConfigured()) {
+  if (persona.id === MEETING_PREP_ID && !preparedConversationSections(meetingPrepSections(), settings().conversation).some(section => section.body.trim())) {
     const guidance: LensResult = {
       type: 'meeting-prep',
       claims: [{
@@ -1628,7 +1822,7 @@ async function runAnalysis(): Promise<void> {
   const analysisStartedAt = performance.now();
   const analysisBuffer = buffer;
   const snapshotByteOffset = analysisBuffer.bytesProduced;
-  const linearPcm = analysisBuffer.linearPcmSince(lastAnalysisByteOffset);
+  const linearPcm = options.memory ? analysisBuffer.toLinearPcm() : options.reuse && cachedExchange ? cachedExchange.pcm : analysisBuffer.linearPcmSince(lastAnalysisByteOffset);
   const controller = new AbortController();
   inflight = controller;
   analyzing = true;
@@ -1659,7 +1853,7 @@ async function runAnalysis(): Promise<void> {
     // input passes); lower values are more permissive — useful when the G2's
     // low-amplitude mic capture is being misclassified as silence.
     const rmsFloor = s.voiceGateRmsFloor;
-    if (rmsFloor > 0) {
+    if (rmsFloor > 0 && !options.reuse && !options.memory) {
       const gateBytes = VAD_GATE_WINDOW_SEC * analysisBuffer.sampleRate * (analysisBuffer.bitsPerSample / 8) * analysisBuffer.channels;
       const gatePcm = linearPcm.subarray(Math.max(0, linearPcm.length - gateBytes));
       const gateStartedAt = performance.now();
@@ -1706,7 +1900,7 @@ async function runAnalysis(): Promise<void> {
     // re-renders inside `setLensResult`, so auto-return is free.
     await blankActiveForThinking();
     assertCurrentAnalysis();
-    startSpinner();
+    startSpinner(analysisStartedAt);
 
     // VAD-trim the upload to just the detected speech regions when enabled
     // (default) and Silero is available. The gate above already confirmed at
@@ -1747,13 +1941,14 @@ async function runAnalysis(): Promise<void> {
       channels: analysisBuffer.channels,
     });
     uploadedBytes = wav.length;
+    if (!options.reuse || options.memory) cachedExchange = { pcm: linearPcm.slice(), capturedAt: Date.now(), transcript: '', context };
     const lang = settings().responseLanguage;
     const onRetry = async (attempt: number): Promise<void> => {
       // Keep the spinner running and switch its prefix to the retry label so
       // the indicator animates as e.g. R1/2|, R1/2/, R1/2- through the retry
       // wait and the next request, instead of freezing on a static label.
       spinnerPrefix = `R${attempt}/${MAX_RETRIES}`;
-      if (!spinnerTimer) startSpinner();
+      if (!spinnerTimer) startSpinner(analysisStartedAt);
     };
 
     // Meeting Prep follows a dedicated flow: prompt and schema are built from
@@ -1762,13 +1957,13 @@ async function runAnalysis(): Promise<void> {
     // folded into the single history entry rather than fanning out — they're
     // suggestions, not standalone facts.
     if (persona.id === MEETING_PREP_ID) {
-      const sections = meetingPrepSections();
+      const sections = preparedConversationSections(meetingPrepSections(), s.conversation);
       // Read the toggle once per analysis — a mid-flight settings save can't
       // half-apply (the schema's `Web` enum and the resolver's tools array
       // need to agree on the same call). Snapshotting here keeps that
       // coherent without cross-thread synchronisation.
       const webGrounding = meetingPrepWebGrounding();
-      const meetingPrompt = buildMeetingPromptWithContext(persona, lang, sections, { webGrounding });
+      const meetingPrompt = buildMeetingPromptWithContext(persona, lang, sections, { webGrounding }) + extra;
       const meetingSchema = buildMeetingPrepSchema(sections, { webGrounding });
       const meetingContext = buildContextBlock(persona.name);
       // Mirror the generic runAnalysis path: a `groundless` resolver verdict
@@ -1842,6 +2037,7 @@ async function runAnalysis(): Promise<void> {
         result.claims[0].sourceMeta = webCitations[0].domain;
       }
       await stopSpinner();
+      rememberDisplayedCue(result);
       setStateResult(result);
       // Decorate the badge with a trailing `°` when grounding was requested
       // but the provider couldn't supply it — mirror of the generic path's
@@ -1904,18 +2100,19 @@ async function runAnalysis(): Promise<void> {
       if (s.transcriptMode === 'off' || controller.signal.aborted || inflight !== controller) return;
       const trimmed = text.trim();
       if (!trimmed) return;
+      if (cachedExchange && !options.reuse && !options.memory) cachedExchange.transcript = trimmed;
+      if (options.reuse) return;
       const now = Date.now();
       appendTranscriptSegment({ speaker: 'other', text: trimmed, startedAt: now, endedAt: now });
     };
     // Scope STT reuse to this snapshot. A new tap creates a new promise;
     // transcript text is appended once even when Auto makes parallel calls.
-    let transcript: Promise<string> | undefined;
-    if (shouldRunWhisperSidecar()) void runWhisperSidecar(wav, 'other', controller.signal);
+    let transcript: Promise<string> | undefined = options.reuse && !options.memory && cachedExchange?.transcript ? Promise.resolve(cachedExchange.transcript) : undefined;
+    if (!options.reuse && !settings().conversation?.captionsEnabled && shouldRunWhisperSidecar()) void runWhisperSidecar(wav, 'other', controller.signal);
 
     if (persona.id === 'auto') {
-      const enabled = (AUTO_LENS_CANDIDATES as readonly string[]).filter(
-        (id) => !settings().autoDisabledLenses.includes(id),
-      );
+      const candidates = s.conversation ? profileCandidates(s.conversation.profile, AUTO_LENS_CANDIDATES) : [...AUTO_LENS_CANDIDATES];
+      const enabled = candidates.filter((id) => !settings().autoDisabledLenses.includes(id));
       if (enabled.length === 0) {
         await stopSpinner();
         await setStatus('No Auto lenses enabled — configure in settings');
@@ -1924,20 +2121,23 @@ async function runAnalysis(): Promise<void> {
       transcript = prepareLensTranscript(wav, controller.signal)
         ?.then((text) => { captureTranscript(text); return text; });
       const classifierPrompt = buildPromptWithContext(
-        { ...persona, buildPrompt: (l: LanguageCode) => buildAutoPrompt(l, enabled) },
+        { ...persona, buildPrompt: (l: LanguageCode) => buildAutoPrompt(l, enabled) + extra },
         lang,
       );
       const classifierContext = buildContextBlock(persona.name);
       const classifierModel = chooseClassifierModel(settings());
-      const classifierCall = callLens({
-        wav,
-        transcript,
-        prompt: `${classifierContext}\n\n${classifierPrompt}`,
-        schema: buildAutoClassifierSchema(enabled),
-        model: classifierModel,
-        signal: controller.signal,
-        onRetry,
-      });
+      // With one enabled lens there is no routing decision to pay for.
+      const classifierCall = enabled.length === 1
+        ? Promise.resolve(JSON.stringify({ chosenLensId: enabled[0] }))
+        : callLens({
+            wav,
+            transcript,
+            prompt: `${classifierContext}\n\n${classifierPrompt}`,
+            schema: buildAutoClassifierSchema(enabled),
+            model: classifierModel,
+            signal: controller.signal,
+            onRetry,
+          });
 
       // Fire a speculative lens call in parallel against the previous Auto
       // winner in this session. First tap of a session has no signal yet —
@@ -1945,7 +2145,7 @@ async function runAnalysis(): Promise<void> {
       // tokens. On hit we save one full sequential lens RTT.
       const speculativeId = lastAutoWinnerInSession;
       const speculativeLens =
-        speculativeId && enabled.includes(speculativeId) ? getPersona(speculativeId) : null;
+        enabled.length > 1 && speculativeId && enabled.includes(speculativeId) ? getPersona(speculativeId) : null;
       const speculativeCtrl = new AbortController();
       // Forward outer aborts (user cancel via double-tap, settings change,
       // teardown) onto the speculative controller so its fetch releases too.
@@ -1953,7 +2153,7 @@ async function runAnalysis(): Promise<void> {
       controller.signal.addEventListener('abort', forwardAbort, { once: true });
       let speculativeCall: Promise<string> | null = null;
       if (speculativeLens) {
-        const specPrompt = buildPromptWithContext(speculativeLens, lang);
+        const specPrompt = buildPromptWithContext(speculativeLens, lang) + extra;
         const specContext = buildContextBlock(speculativeLens.name);
         speculativeCall = callLensStream({
           wav,
@@ -1974,7 +2174,7 @@ async function runAnalysis(): Promise<void> {
 
       let chosenLensId: string;
       try {
-        chosenLensId = parseAutoClassifierResponse(await classifierCall).chosenLensId;
+        chosenLensId = parseAutoClassifierResponse(await classifierCall, enabled).chosenLensId;
         assertCurrentAnalysis();
       } catch (err) {
         speculativeCtrl.abort();
@@ -1982,7 +2182,12 @@ async function runAnalysis(): Promise<void> {
         throw err;
       }
 
-      const chosen = getPersona(chosenLensId);
+      if (chosenLensId === 'none') {
+        speculativeCtrl.abort(); controller.signal.removeEventListener('abort', forwardAbort);
+        const error = new Error('No assistance needed'); error.name = 'NoRelevantContentError'; throw error;
+      }
+      const chosenBase = getPersona(chosenLensId);
+      const chosen = chosenBase ? { ...chosenBase, buildPrompt: (language: LanguageCode) => chosenBase.buildPrompt(language) + extra } : undefined;
       if (!chosen) {
         speculativeCtrl.abort();
         controller.signal.removeEventListener('abort', forwardAbort);
@@ -2038,7 +2243,7 @@ async function runAnalysis(): Promise<void> {
       webCitations = speculativeWebCitations;
       setLensGroundingMode(groundingMode);
     } else {
-      const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
+      const analysisPrompt = buildPromptWithContext(analysisPersona, lang) + extra;
       const analysisContext = buildContextBlock(analysisPersona.name);
       // Heading streaming wiring: when the active persona declares
       // `streamHeading` (Trivia answer, Translate translatedText, Companion
@@ -2106,6 +2311,7 @@ async function runAnalysis(): Promise<void> {
     // reactive `partial ?? final` consumer flips over to the authoritative
     // parse without one frame of stale partial data.
     setLensPartialResult(null);
+    rememberDisplayedCue(result);
     setStateResult(result);
     // Single atomic write for all per-claim history entries — see
     // pushHistoryEntries for the race it prevents (concurrent persist calls
@@ -2193,6 +2399,18 @@ async function runAnalysis(): Promise<void> {
       setAppPhase('listening');
       return;
     }
+    if ((err as Error)?.name === 'NoRelevantContentError') {
+      // A completed analysis found speech but nothing useful for this lens.
+      // Keep it out of history and consume the snapshot to avoid repeat calls.
+      outcome = 'noContent';
+      pushDebugEvent({ label: 'lens-no-content', detail: persona.name });
+      await setStatus('listening');
+      if (inflight !== controller || buffer !== analysisBuffer) return;
+      await flashActiveHint('Nothing relevant for this lens');
+      if (inflight !== controller || buffer !== analysisBuffer) return;
+      setAppPhase('listening');
+      return;
+    }
     if ((err as Error)?.name === 'NoSpeechError') {
       // The LLM saw the audio but decided no clear speech was present
       // (typically humming, mouth sounds, or voice-shaped noise that passed
@@ -2247,7 +2465,7 @@ async function runAnalysis(): Promise<void> {
     if (inflight === controller) {
       analyzing = false;
       inflight = null;
-      lastAnalysisByteOffset = resolveAnalysisCursor(outcome, snapshotByteOffset, lastAnalysisByteOffset);
+      if (!options.reuse && !options.memory) lastAnalysisByteOffset = resolveAnalysisCursor(outcome, snapshotByteOffset, lastAnalysisByteOffset);
     }
   }
 }
@@ -2600,8 +2818,10 @@ function startSettingsWatcher(): void {
     createEffect(() => {
       // Read the signal so Solid tracks the dependency.
       settings().autoModeEnabled;
+      recordingPaused();
       syncAutoModeWatcher();
     });
+    createEffect(on(() => [settings().conversation?.captionsEnabled, recordingPaused()], () => syncCaptionCapture()));
   });
 }
 
@@ -2687,6 +2907,7 @@ function buildMidSummaryMenuItems(): MenuItem[] {
 }
 
 async function runAutoSummary(): Promise<void> {
+  if (recordingPaused()) return;
   if (!buffer || buffer.bytesBuffered === 0) return;
   // Skip when the active provider is not configured — the facade would throw
   // and we'd just be burning Silero inference time before discovering that.
@@ -3133,6 +3354,7 @@ function normalizeTags(raw: Array<string | undefined | null>): string[] {
 export function extractTags(result: LensResult): string[] {
   const raw: string[] = [];
   switch (result.type) {
+    case 'assistance': raw.push(result.action, ...keywordize(result.headline, 3)); break;
     case 'fact-check':
       for (const c of result.claims) {
         raw.push(c.verdict);
@@ -3204,6 +3426,7 @@ export function extractTags(result: LensResult): string[] {
 
 function extractQuestion(result: LensResult): string {
   switch (result.type) {
+    case 'assistance': return result.headline;
     case 'fact-check': {
       const c = result.claims[0];
       if (!c) return '';
@@ -3250,6 +3473,7 @@ function extractQuestion(result: LensResult): string {
 
 function extractBadge(result: LensResult): string {
   switch (result.type) {
+    case 'assistance': return result.action.toUpperCase();
     case 'fact-check': return result.claims[0]?.verdict ?? 'UNVERIFIED';
     case 'trivia': return 'ANSWER';
     case 'logical-fallacy': return (result.claims[0]?.fallacy ?? '').slice(0, 12).toUpperCase();
@@ -3287,6 +3511,7 @@ function extractBadge(result: LensResult): string {
  */
 export function splitResultByClaim(result: LensResult): LensResult[] {
   switch (result.type) {
+    case 'assistance': return [result];
     case 'fact-check':
     case 'logical-fallacy':
     case 'bias':
@@ -3355,6 +3580,7 @@ export function splitResultByClaim(result: LensResult): LensResult[] {
  */
 export function extractQuote(result: LensResult): string {
   switch (result.type) {
+    case 'assistance': return result.quote;
     case 'fact-check':
     case 'logical-fallacy':
     case 'bias':

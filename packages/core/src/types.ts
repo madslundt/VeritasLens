@@ -151,6 +151,7 @@ export interface MeetingPrepClaim {
 
 /** Result union — every built-in lens returns one of these shapes. */
 export type LensResult = (
+  | { type: 'assistance'; action: AssistanceAction; headline: string; detail: string; quote: string; records: ConversationRecord[] }
   | { type: 'fact-check'; claims: FactClaim[] }
   | { type: 'trivia'; claims: TriviaClaim[] }
   | { type: 'logical-fallacy'; claims: FallacyClaim[] }
@@ -372,6 +373,8 @@ export interface HistoryEntry {
   /** Verbatim source quote(s) joined with " · ". Used to make history searchable. */
   quote: string;
   result: LensResult;
+  pinned?: boolean;
+  feedback?: 'useful' | 'not-useful';
   /**
    * Auto-derived topic / entity / verdict tokens used purely to widen the
    * history search predicate — never rendered. Optional for back-compat with
@@ -648,7 +651,37 @@ export type MicSource = 'glasses' | 'phone';
 export const DEFAULT_MIC_SOURCE: MicSource = 'glasses';
 
 /** User-configurable settings persisted via the SDK bridge local storage. */
+export type ConversationProfile = 'everyday' | 'work' | 'understand';
+export type AssistanceAction = 'respond' | 'repair' | 'catch-up' | 'commitments' | 'refine';
+export interface ConversationRecord {
+  id: string;
+  kind: 'decision' | 'commitment' | 'question';
+  status: 'proposed' | 'agreed' | 'open' | 'completed';
+  text: string;
+  owner: string;
+  ownerRole?: 'wearer' | 'other' | 'unknown';
+  deadline: string;
+  quote: string;
+}
+export interface ConversationContext { id: string; label: string; body: string }
+export interface ConversationPreset {
+  id: string; name: string; profile: ConversationProfile; goal: string; constraints: string;
+  selectedContextIds: string[];
+}
+export interface ConversationPreferences {
+  profile: ConversationProfile;
+  goal: string;
+  constraints: string;
+  tone: 'natural' | 'brief' | 'professional';
+  captionsEnabled: boolean;
+  cueDurationSec: number;
+  contexts: ConversationContext[];
+  selectedContextIds: string[];
+  presets: ConversationPreset[];
+}
+
 export interface Settings {
+  conversation?: ConversationPreferences;
   /** Optional search fallback for providers without native web search. Off by default. */
   tavilyEnabled?: boolean;
   /** Stored separately from chat/STT credentials; sent only to Tavily. */

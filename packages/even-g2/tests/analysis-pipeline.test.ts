@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   listener: null as ((event: EvenHubEvent) => void) | null,
   storage: new Map<string, string>(),
   upgrades: [] as Array<{ containerName: string; content: string }>,
+  visible: new Map<string, string>(),
 }));
 
 vi.mock('@veritaslens/core', async (importOriginal) => ({
@@ -22,9 +23,20 @@ vi.mock('@veritaslens/core', async (importOriginal) => ({
 vi.mock('../src/runtime/bridge', () => ({
   getBridge: () => ({
     createStartUpPageContainer: vi.fn(async () => 0),
-    rebuildPageContainer: vi.fn(async () => true),
+    rebuildPageContainer: vi.fn(async (page: { textObject?: Array<{ containerName?: string; content?: string }> }) => {
+      mocks.visible.clear();
+      // Record visible content from both in-place updates and page rebuilds.
+      for (const text of page.textObject ?? []) {
+        if (text.containerName && typeof text.content === 'string') {
+          mocks.upgrades.push({ containerName: text.containerName, content: text.content });
+          mocks.visible.set(text.containerName, text.content);
+        }
+      }
+      return true;
+    }),
     textContainerUpgrade: vi.fn(async (upgrade: { containerName: string; content: string }) => {
       mocks.upgrades.push(upgrade);
+      mocks.visible.set(upgrade.containerName, upgrade.content);
       return true;
     }),
     audioControl: vi.fn(async () => true),
@@ -38,13 +50,13 @@ vi.mock('../src/runtime/bridge', () => ({
 }));
 
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
-import { configureSettings } from '@veritaslens/core';
-import { startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
-import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState } from '../src/runtime/hud';
+import { DEFAULT_CONVERSATION, AUTO_LENS_CANDIDATES, configureSettings, getPersona } from '@veritaslens/core';
+import { requestConversationHelp, pauseConversation, selectConversationProfile, startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
+import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState, menuOptionAtIndex, setActiveLayout, showActivePage, isActiveHidden } from '../src/runtime/hud';
 import {
   appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
-  saveGeminiKey, saveTranscriptMode, saveVoiceGateRmsFloor, saveVoiceTrimEnabled,
-  sessionHistory, settings, setErrorMessage,
+  saveAutoDisabledLenses, saveGeminiKey, saveTranscriptMode, saveVoiceGateRmsFloor, saveVoiceTrimEnabled,
+  recordingPaused, updateHistoryEntry, loadHistory, saveConversationPreferences, sessionHistory, settings, setErrorMessage, saveDiscreet,
 } from '../src/state/store';
 
 const voice: VoiceBufferAnalysis = { voiceFrames: 1, silenceFrames: 0, noiseFrames: 0, totalFrames: 1 };
@@ -85,14 +97,18 @@ describe('analysis through the gesture/audio pipeline', () => {
     vi.spyOn(console, 'info').mockImplementation(() => {});
     mocks.storage.clear();
     mocks.upgrades.length = 0;
+    mocks.visible.clear();
     configureSettings(settings);
     setErrorMessage(null);
     clearSessionHistory();
     _resetHudBootstrapForTesting();
     const persist = async () => true;
+    await saveConversationPreferences(persist, DEFAULT_CONVERSATION);
     await saveGeminiKey(persist, 'test-gemini-key');
+    await saveDiscreet(persist, false);
     await saveAutoSummaryEnabled(persist, false);
     await saveTranscriptMode(persist, 'off');
+    await saveAutoDisabledLenses(persist, []);
     await saveVoiceTrimEnabled(persist, false);
     await saveVoiceGateRmsFloor(persist, 200);
     mocks.gate.mockResolvedValue(voice);
@@ -112,7 +128,101 @@ describe('analysis through the gesture/audio pipeline', () => {
     expect(appPhase()).toBe('listening');
   });
 
-  afterEach(async () => { await stopHudRuntime(); await drain(); });
+  afterEach(async () => { await stopHudRuntime(); await drain(); await saveDiscreet(async () => true, false); vi.useRealTimers(); });
+
+  it.each([false, true])('routes up/down, click, and menu Back to answers or dot-only listening (discreet=%s)', async (discreet) => {
+    await saveDiscreet(async () => true, discreet);
+    setActiveLayout(discreet ? 'discreet-minimal' : 'baseline');
+    await showActivePage(getPersona('auto')!);
+    mocks.call.mockResolvedValueOnce(JSON.stringify({ chosenLensId: 'trivia' }));
+    mocks.stream.mockResolvedValueOnce(JSON.stringify({ claims: [
+      { quote: 'First question?', question: 'First question?', answer: 'First answer', description: '', confidence: 'HIGH' },
+      { quote: 'Second question?', question: 'Second question?', answer: 'Second answer', description: '', confidence: 'HIGH' },
+    ] }));
+    audio(1000);
+    tap();
+    await drain();
+    const gesture = async (type?: OsEventTypeList) => {
+      const scroll = type === OsEventTypeList.SCROLL_TOP_EVENT || type === OsEventTypeList.SCROLL_BOTTOM_EVENT;
+      mocks.listener!(scroll
+        ? { textEvent: { eventType: type } } as EvenHubEvent
+        : { sysEvent: { eventType: type } } as EvenHubEvent);
+      await drain();
+    };
+    const dotOnly = () => {
+      expect(currentHudPage()).toBe('active');
+      expect(appPhase()).toBe('listening');
+      expect(isActiveHidden()).toBe(true);
+      expect([...mocks.visible.values()].filter((text) => text.trim())).toEqual(['•']);
+      expect(mocks.visible.has('vl-claim')).toBe(false);
+    };
+    expect(mocks.visible.get('vl-reason')).toBe('First answer');
+    await gesture(OsEventTypeList.SCROLL_TOP_EVENT);
+    expect(mocks.visible.get('vl-reason')).toBe('First answer');
+    await gesture(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    expect(mocks.visible.get('vl-reason')).toBe('Second answer');
+    await gesture(OsEventTypeList.SCROLL_TOP_EVENT);
+    expect(mocks.visible.get('vl-reason')).toBe('First answer');
+    await gesture(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    await gesture(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    dotOnly();
+    await gesture(OsEventTypeList.SCROLL_BOTTOM_EVENT);
+    dotOnly();
+    await gesture(OsEventTypeList.SCROLL_TOP_EVENT);
+    expect(mocks.visible.get('vl-reason')).toBe('Second answer');
+    expect(appPhase()).toBe('displaying');
+    await gesture(); // Host normalizes a click to an undefined event type.
+    expect(currentHudPage()).toBe('menu');
+    await gesture(); // Fresh menu highlights Back.
+    dotOnly();
+    await gesture(OsEventTypeList.SCROLL_TOP_EVENT);
+    expect(mocks.visible.get('vl-reason')).toBe('Second answer');
+  });
+
+  it('Back hides an answer that arrived while the menu was open, but up can recall it', async () => {
+    const response = deferred<string>();
+    mocks.stream.mockReturnValueOnce(response.promise);
+    audio(1000);
+    tap();
+    await drain();
+    mocks.listener!({ sysEvent: {} } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('menu');
+    response.resolve(answer);
+    await drain();
+    mocks.listener!({ sysEvent: {} } as EvenHubEvent);
+    await drain();
+    expect(appPhase()).toBe('listening');
+    expect([...mocks.visible.values()].filter((text) => text.trim())).toEqual(['•']);
+    mocks.listener!({ textEvent: { eventType: OsEventTypeList.SCROLL_TOP_EVENT } } as EvenHubEvent);
+    await drain();
+    expect(appPhase()).toBe('displaying');
+    expect(mocks.visible.get('vl-reason')).toContain('French capital');
+  });
+
+  it('resets the menu selection to Back after previously selecting History', async () => {
+    audio(1000);
+    tap();
+    await drain();
+    mocks.listener!({ sysEvent: {} } as EvenHubEvent);
+    await drain();
+    const historyIndex = Array.from({ length: 20 }, (_, i) => i).find((i) => menuOptionAtIndex(i) === 'history')!;
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.SCROLL_BOTTOM_EVENT, currentSelectItemIndex: historyIndex } } as EvenHubEvent);
+    mocks.listener!({ sysEvent: {} } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('history-list');
+    mocks.listener!({ listEvent: { currentSelectItemIndex: 0 } } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('active');
+    mocks.listener!({ sysEvent: {} } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('menu');
+    mocks.listener!({ sysEvent: {} } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('active');
+    expect(appPhase()).toBe('listening');
+    expect([...mocks.visible.values()].filter((text) => text.trim())).toEqual(['•']);
+  });
 
   it('freezes the audio at the tap and leaves audio received during VAD for the next tap', async () => {
     const gate = deferred<VoiceBufferAnalysis>();
@@ -236,6 +346,184 @@ describe('analysis through the gesture/audio pipeline', () => {
     expect(sessionHistory()).toHaveLength(0);
   });
 
+  it('consumes an irrelevant snapshot without saving a blank answer or reporting no speech', async () => {
+    mocks.stream.mockResolvedValueOnce(JSON.stringify({ noSpeech: false, claims: [] }));
+    const consumed = audio(1000);
+    tap();
+    await drain();
+    expect(appPhase()).toBe('listening');
+    expect(errorMessage()).toBeNull();
+    expect(sessionHistory()).toHaveLength(0);
+    expect(lastHudContent('vl-status')).toBe('•');
+    const next = audio(2000);
+    tap();
+    await drain();
+    expect(mocks.gate.mock.calls[1]![0]).toEqual(next);
+    expect(mocks.gate.mock.calls[1]![0]).not.toEqual(consumed);
+    expect(appPhase()).toBe('displaying');
+  });
+
+  it('runs the sole enabled Auto lens without a classifier or speculative duplicate', async () => {
+    await saveAutoDisabledLenses(async () => true, AUTO_LENS_CANDIDATES.filter((id) => id !== 'fact-checker'));
+    for (const value of [1000, 2000]) {
+      audio(value);
+      tap();
+      await drain();
+      expect(appPhase()).toBe('displaying');
+    }
+    expect(mocks.call).not.toHaveBeenCalled();
+    expect(mocks.stream).toHaveBeenCalledTimes(2);
+    expect(sessionHistory().every((entry) => entry.lensId === 'fact-checker')).toBe(true);
+  });
+
+  it('rejects a classifier pick outside the enabled lenses before analysis', async () => {
+    await saveAutoDisabledLenses(async () => true, ['fact-checker']);
+    mocks.call.mockResolvedValueOnce(JSON.stringify({ chosenLensId: 'fact-checker' }));
+    audio(1000);
+    tap();
+    await drain();
+    expect(appPhase()).toBe('error');
+    expect(mocks.stream).not.toHaveBeenCalled();
+    expect(sessionHistory()).toHaveLength(0);
+  });
+
+  it('keeps already-answered suppression scoped to the lens selected by Auto', async () => {
+    audio(1000);
+    tap();
+    await drain();
+    audio(2000);
+    mocks.call.mockResolvedValueOnce(JSON.stringify({ chosenLensId: 'trivia' }));
+    tap();
+    await drain();
+    const prompts = mocks.stream.mock.calls.map(([opts]) => (opts as CallLensStreamOptions).prompt);
+    // Previous-winner speculation gets the fact-check history; Trivia must
+    // still be able to answer a question about the same topic.
+    expect(prompts[1]).toContain('ALREADY ANSWERED by this lens');
+    expect(prompts[2]).not.toContain('ALREADY ANSWERED');
+    const classifier = mocks.call.mock.calls[1]![0] as CallLensStreamOptions;
+    expect(classifier.prompt).not.toContain('ALREADY ANSWERED');
+  });
+
+  it('shows elapsed seconds after ten seconds, updates once a second, and clears on completion', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const response = deferred<string>();
+    mocks.stream.mockReturnValueOnce(response.promise);
+    audio(1000);
+    tap();
+    await drain();
+    await vi.advanceTimersByTimeAsync(9999);
+    expect(lastHudContent('vl-status')).toMatch(/^[\/\\]$/);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(lastHudContent('vl-status')).toMatch(/^[\/\\]$/);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(lastHudContent('vl-status')).toBe('10s');
+    const writes = mocks.upgrades.filter((entry) => entry.containerName === 'vl-status').length;
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(lastHudContent('vl-status')).toBe('13s');
+    expect(mocks.upgrades.filter((entry) => entry.containerName === 'vl-status').length - writes).toBe(3);
+    response.resolve(answer);
+    await drain();
+    expect(appPhase()).toBe('displaying');
+    expect(lastHudContent('vl-status')).toBe('');
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(lastHudContent('vl-status')).toBe('');
+  });
+
+  it('counts preparation and retry time from the original tap', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const gate = deferred<VoiceBufferAnalysis>();
+    const response = deferred<string>();
+    mocks.gate.mockReturnValueOnce(gate.promise);
+    let retry: CallLensStreamOptions['onRetry'];
+    mocks.stream.mockImplementationOnce((opts: CallLensStreamOptions) => {
+      retry = opts.onRetry;
+      return response.promise;
+    });
+    audio(1000);
+    tap();
+    await vi.advanceTimersByTimeAsync(6000);
+    gate.resolve(voice);
+    await drain();
+    await vi.advanceTimersByTimeAsync(4001);
+    expect(lastHudContent('vl-status')).toBe('10s');
+    await retry?.(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(lastHudContent('vl-status')).toBe('11s');
+    response.resolve(answer);
+    await drain();
+  });
+
+  it('cancels the elapsed timer and starts the next analysis from zero', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const response = deferred<string>();
+    mocks.stream.mockReturnValueOnce(response.promise);
+    audio(1000);
+    tap();
+    await drain();
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(lastHudContent('vl-status')).toBe('12s');
+    tap();
+    await drain();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(lastHudContent('vl-status')).toBe('•');
+    response.resolve(answer);
+    await drain();
+    const next = deferred<string>();
+    mocks.stream.mockReturnValueOnce(next.promise);
+    audio(2000);
+    tap();
+    await drain();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(lastHudContent('vl-status')).toMatch(/^[\/\\]$/);
+    next.resolve(answer);
+    await drain();
+  });
+
+  it('removes the elapsed timer as soon as an answer begins streaming', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const response = deferred<string>();
+    mocks.call.mockResolvedValueOnce(JSON.stringify({ chosenLensId: 'trivia' }));
+    let partial: CallLensStreamOptions['onPartialString'];
+    mocks.stream.mockImplementationOnce((opts: CallLensStreamOptions) => {
+      partial = opts.onPartialString;
+      return response.promise;
+    });
+    audio(1000);
+    tap();
+    await drain();
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(lastHudContent('vl-status')).toBe('12s');
+    partial?.('answer', 'Paris');
+    await drain();
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(lastHudContent('vl-status')).toBe('');
+    expect(lastHudContent('vl-reason')).toBe('Paris');
+    response.resolve(answer);
+    await drain();
+  });
+
+  it('keeps elapsed time visible on the menu and clears it when analysis completes', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+    const response = deferred<string>();
+    mocks.stream.mockReturnValueOnce(response.promise);
+    audio(1000);
+    tap();
+    await drain();
+    await vi.advanceTimersByTimeAsync(12000);
+    mocks.listener!({ sysEvent: {} } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('menu');
+    expect(lastHudContent('vl-menu-spin')).toBe('12s');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(lastHudContent('vl-menu-spin')).toBe('13s');
+    expect(currentHudPage()).toBe('menu');
+    response.resolve(answer);
+    await drain();
+    expect(lastHudContent('vl-menu-spin')).toBe('');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(lastHudContent('vl-menu-spin')).toBe('');
+  });
+
   it('does not resume a stopped session when VAD finishes', async () => {
     const gate = deferred<VoiceBufferAnalysis>();
     mocks.gate.mockReturnValueOnce(gate.promise);
@@ -248,4 +536,59 @@ describe('analysis through the gesture/audio pipeline', () => {
     expect(mocks.stream).toHaveBeenCalledTimes(0);
     expect(appPhase()).toBe('idle');
   });
+  it('reuses captured audio for a different action and leaves new speech for the next check', async () => {
+    const initial = audio(1000);
+    await requestConversationHelp('fact-checker', undefined, false);
+    const originalWav = mocks.stream.mock.calls.at(-1)![0].wav;
+    audio(2000);
+    mocks.stream.mockResolvedValueOnce(JSON.stringify({ useful: true, headline: 'Could you clarify the scope?', detail: '', quote: '', records: [] }));
+    await requestConversationHelp('respond');
+    expect(mocks.stream.mock.calls.at(-1)![0].wav).toEqual(originalWav);
+    expect(sessionHistory().at(-1)?.result.type).toBe('assistance');
+    await requestConversationHelp('fact-checker', undefined, false);
+    const next = mocks.stream.mock.calls.at(-1)![0].wav as Uint8Array;
+    expect(next.slice(44)).not.toEqual(initial);
+    expect(new DataView(next.buffer, next.byteOffset).getInt16(44, true)).toBe(2000);
+  });
+
+  it('keeps the session and frozen exchange when paused, and discards paused audio', async () => {
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    const session = sessionHistory().at(-1)!.sessionId;
+    await pauseConversation(); expect(recordingPaused()).toBe(true);
+    const count = mocks.stream.mock.calls.length;
+    audio(2000); tap(); await drain(); expect(mocks.stream.mock.calls.length).toBe(count);
+    mocks.stream.mockResolvedValueOnce(JSON.stringify({ useful: true, headline: 'Short answer', detail: '', quote: '', records: [] }));
+    await requestConversationHelp('refine', 'Shorter');
+    expect(sessionHistory().at(-1)!.sessionId).toBe(session);
+    await pauseConversation(); expect(recordingPaused()).toBe(false);
+    audio(3000); await requestConversationHelp('fact-checker', undefined, false);
+    const next = mocks.stream.mock.calls.at(-1)![0].wav as Uint8Array;
+    expect(next.length).toBe(44 + 3200);
+    expect(new DataView(next.buffer, next.byteOffset).getInt16(44, true)).toBe(3000);
+  });
+
+  it('injects profile goals and selected notes, with criticism outside default routing', async () => {
+    await saveConversationPreferences(async () => true, { ...DEFAULT_CONVERSATION, profile: 'work', goal: 'Clarify ownership', contexts: [{ id: 'a', label: 'Project', body: 'Testing required' }, { id: 'b', label: 'Unrelated', body: 'PRIVATE_NOTE' }], selectedContextIds: ['a'] });
+    await selectConversationProfile('work'); audio(1000); tap(); await drain();
+    const classifier = mocks.call.mock.calls.at(-1)![0] as CallLensStreamOptions;
+    expect(classifier.prompt).toContain('Clarify ownership'); expect(classifier.prompt).toContain('Testing required'); expect(classifier.prompt).not.toContain('PRIVATE_NOTE');
+    const schema = classifier.schema as { properties: { chosenLensId: { enum: string[] } } };
+    expect(schema.properties.chosenLensId.enum).toContain('respond'); expect(schema.properties.chosenLensId.enum).toContain('commitments'); expect(schema.properties.chosenLensId.enum).not.toContain('logical-fallacy');
+  });
+
+  it('lets Best next help abstain without analysis or history', async () => {
+    mocks.call.mockResolvedValueOnce(JSON.stringify({ chosenLensId: 'none' })); audio(1000); tap(); await drain();
+    expect(mocks.stream).not.toHaveBeenCalled(); expect(sessionHistory()).toHaveLength(0); expect(appPhase()).toBe('listening');
+  });
+
+  it('persists structured records, pins and feedback across history reload', async () => {
+    audio(1000);
+    mocks.stream.mockResolvedValueOnce(JSON.stringify({ useful: true, headline: 'Plan proposed', detail: '', quote: 'Maybe Friday', records: [{ id: 'plan', kind: 'commitment', status: 'proposed', text: 'Send plan', owner: '', deadline: '', quote: 'Maybe Friday' }] }));
+    await requestConversationHelp('commitments', undefined, false);
+    const entry = sessionHistory().at(-1)!;
+    await updateHistoryEntry(entry.id, { pinned: true, feedback: 'useful' }, async (k, v) => { mocks.storage.set(k, v); return true; });
+    await loadHistory(async k => mocks.storage.get(k) ?? '');
+    expect(sessionHistory().at(-1)).toMatchObject({ pinned: true, feedback: 'useful', result: { type: 'assistance', records: [{ status: 'proposed', owner: '', deadline: '' }] } });
+  });
+
 });

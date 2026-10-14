@@ -12,6 +12,7 @@ const lines = (...values: Array<string | undefined>) => values.filter(Boolean).j
 /** Keep presentation exhaustive as new lenses are added to the shared result union. */
 export function resultSections(result: LensResult): ResultSection[] {
   switch (result.type) {
+    case 'assistance': return [{ title: result.headline, body: result.detail, quote: result.quote, badge: result.action }, ...result.records.map(r => ({ title: r.text, body: lines(r.owner || 'Owner not stated', r.deadline || 'No deadline agreed'), quote: r.quote, badge: r.status }))];
     case 'fact-check': return result.claims.map((c) => ({ title: c.claim, body: lines(c.reason, c.correction), quote: c.quote, badge: c.verdict }));
     case 'trivia': return result.claims.map((c) => ({ title: c.question, body: lines(c.answer, c.description, c.alt), quote: c.quote }));
     case 'logical-fallacy': return result.claims.map((c) => ({ title: c.fallacy, body: lines(c.explanation, c.callOut), quote: c.quote }));

@@ -184,7 +184,7 @@ describe('setLensStreamingHeading throttle', () => {
     expect(reasonContentCalls()).toEqual([]);
     finishRebuild(true);
     await finalWrite;
-    expect(reasonContentCalls()).toEqual(['1/1 · Final answer']);
+    expect(reasonContentCalls()).toEqual(['Final answer']);
   });
 
   it.each(['baseline', 'discreet-minimal'] as const)('discards an unfinished %s heading and preserves completed answers for swipe recall', async (layout) => {
@@ -203,9 +203,9 @@ describe('setLensStreamingHeading throttle', () => {
     await discardLensStreamingHeading();
     expect(getActiveLayout()).toBe(layout);
     await setStatus('error');
-    const writes = bridge.textContainerUpgrade.mock.calls as unknown as UpgradeRequest[][];
-    expect(writes.filter(([r]) => r.payload.containerName === 'vl-status').at(-1)?.[0].payload.content).toBe('ERR');
+    const rebuilds = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { textObject: Array<{ payload: { containerName: string; content: string } }> } }]>;
+    expect(rebuilds.at(-1)![0].payload.textObject.find((text) => text.payload.containerName === 'vl-status')?.payload.content).toBe('ERR');
     expect(await scrollActiveReason(-1)).toBe('revealed');
-    expect(reasonContentCalls().at(-1)).toBe('1/1 · Completed answer');
+    expect(reasonContentCalls().at(-1)).toBe('Completed answer');
   });
 });

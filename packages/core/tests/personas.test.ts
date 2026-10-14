@@ -1,6 +1,6 @@
 // tests/personas.test.ts
 import { describe, it, expect } from 'vitest';
-import { trimTo, isRecord, parseJsonResponse, coerceQuote, readClaimsArray, MAX_QUOTE_CHARS, NoSpeechError } from '../src/personas/_utils';
+import { trimTo, isRecord, parseJsonResponse, coerceQuote, readClaimsArray, MAX_QUOTE_CHARS, NoSpeechError, NoRelevantContentError } from '../src/personas/_utils';
 import { parseFactCheckerResponse, buildFactCheckerPrompt } from '../src/personas/factChecker';
 import {
   parseTranslationResponse,
@@ -579,9 +579,14 @@ describe('auto-classifier', () => {
     expect(result.reason).toBe('Numerical claim');
   });
 
-  it('falls back to fact-checker for unknown lens ids', () => {
-    const result = parseAutoClassifierResponse(JSON.stringify({ chosenLensId: 'not-a-lens' }));
-    expect(result.chosenLensId).toBe('fact-checker');
+  it('rejects unknown lens ids instead of silently routing to fact-checker', () => {
+    expect(() => parseAutoClassifierResponse(JSON.stringify({ chosenLensId: 'not-a-lens' })))
+      .toThrow(/unavailable lens/);
+  });
+
+  it('rejects a valid lens that the wearer disabled', () => {
+    expect(() => parseAutoClassifierResponse(JSON.stringify({ chosenLensId: 'fact-checker' }), ['trivia']))
+      .toThrow(/unavailable lens/);
   });
 
   it('accepts every advertised candidate id', () => {
@@ -1240,11 +1245,11 @@ describe('translation persona', () => {
     expect(omitted).toBe(explicit);
   });
 
-  it('getTranslationSchema(converse) requires 3 reply starters', () => {
+  it('getTranslationSchema(converse) allows empty replies for the no-speech path and caps at 3', () => {
     const schema = getTranslationSchema('converse') as {
       properties: { replyStarters: { minItems: number; maxItems: number } };
     };
-    expect(schema.properties.replyStarters.minItems).toBe(3);
+    expect(schema.properties.replyStarters.minItems).toBe(0);
     expect(schema.properties.replyStarters.maxItems).toBe(3);
   });
 
@@ -1487,13 +1492,13 @@ describe('companion', () => {
     }
   });
 
-  it('throws NoSpeechError on noSpeech=true or empty claims', () => {
+  it('distinguishes no speech from speech with no useful tidbit', () => {
     expect(() =>
       parseCompanionResponse(JSON.stringify({ noSpeech: true, claims: [] })),
     ).toThrow(NoSpeechError);
     expect(() =>
       parseCompanionResponse(JSON.stringify({ claims: [] })),
-    ).toThrow(NoSpeechError);
+    ).toThrow(NoRelevantContentError);
   });
 
   it('buildCompanionPrompt includes the language name', () => {
@@ -1505,8 +1510,8 @@ describe('companion', () => {
 import { personas, getPickerPersonas, getSpecializedPersonas } from '../src/personas/index';
 
 describe('picker / specialized split', () => {
-  it('getPickerPersonas returns exactly the three core lenses in order', () => {
-    expect(getPickerPersonas().map((p) => p.id)).toEqual(['auto', 'translation', 'meeting-prep']);
+  it('getPickerPersonas returns the four core conversation tools in order', () => {
+    expect(getPickerPersonas().map((p) => p.id)).toEqual(['auto', 'respond', 'translation', 'meeting-prep']);
   });
 
   it('getSpecializedPersonas returns the other lenses in BUILTINS order', () => {
@@ -1522,10 +1527,10 @@ describe('picker / specialized split', () => {
     ]);
   });
 
-  it('core and specialized are disjoint and together cover every persona', () => {
+  it('core and specialized are disjoint and cover discoverable lenses; session actions stay out of the picker', () => {
     const core = getPickerPersonas().map((p) => p.id);
     const specialized = getSpecializedPersonas().map((p) => p.id);
     expect(core.filter((id) => specialized.includes(id))).toEqual([]);
-    expect(new Set([...core, ...specialized])).toEqual(new Set(personas().map((p) => p.id)));
+    expect(new Set([...core, ...specialized])).toEqual(new Set(personas().filter(p => !['repair', 'catch-up', 'commitments', 'refine'].includes(p.id)).map((p) => p.id)));
   });
 });

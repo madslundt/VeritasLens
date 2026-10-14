@@ -8,11 +8,11 @@ import {
   TextContainerProperty,
   TextContainerUpgrade,
 } from '@evenrealities/even_hub_sdk';
-import { measureTextWrap } from '@evenrealities/pretext';
+import { getTextWidth, measureTextWrap, pxTruncate } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
-import { getPersona, getPickerPersonas, getSpecializedPersonas, gameDifficultyLabel, gameFormatLabel } from '@veritaslens/core';
-import type { Persona, GamePreset, GameSession, HistoryEntry, LensResult, WebCitation } from '@veritaslens/core';
-import { activePersona, pushDebugEvent, settings } from '@/state/store';
+import { CONVERSATION_PROFILES, formatConversationRecord, getPersona, getPickerPersonas, getSpecializedPersonas, gameDifficultyLabel, gameFormatLabel } from '@veritaslens/core';
+import type { Persona, GamePreset, GameSession, HistoryEntry, LensResult } from '@veritaslens/core';
+import { activePersona, pushDebugEvent, recordingPaused, settings } from '@/state/store';
 
 /**
  * HUD layout for VeritasLens.
@@ -58,6 +58,9 @@ export const CONTAINER = {
   menuSpinner: 28,
   // compact header (used on scroll layouts: page 2+ of a claim)
   compactHeader: 29,
+  answerPosition: 34,
+  answerLanguage: 35,
+  answerPageIndicator: 36,
   // history pages
   historyList: 30,
   historyHint: 31,
@@ -88,6 +91,9 @@ const NAME = {
   clock: 'vl-clock',
   menuSpinner: 'vl-menu-spin',
   compactHeader: 'vl-compact',
+  answerPosition: 'vl-position',
+  answerLanguage: 'vl-language',
+  answerPageIndicator: 'vl-page-pos',
   historyList: 'vl-hist-lst',
   historyHint: 'vl-hist-hint',
   summaryBadge: 'vl-sum-badge',
@@ -128,6 +134,8 @@ export type HudPage =
   | 'translation-picker'
   | 'translation-teleprompter'
   | 'translation-wearer-speak'
+  | 'conversation-options'
+  | 'captions'
   | 'none';
 
 /** Cached starter the wearer most recently picked on the translation-picker
@@ -167,27 +175,33 @@ export const EXIT_LABEL_WITHOUT_SUMMARY = 'Exit - no summary';
 // row is shown (no summary is possible to generate either way).
 let exitGeneratesSummary = false;
 
-// All answer views use the full canvas with a small inset for legibility.
+// All answer views use the full canvas without a content inset.
 // Derive pagination from the actual inner dimensions and firmware font.
 const LINE_PX = measureTextWrap('X', 1000).height;
-const BODY_PADDING = 4;
+const BODY_PADDING = 0;
 const BODY_INNER_W = SCREEN_W - 2 * BODY_PADDING;
 const ANSWER_PAGE_LINES = Math.floor((SCREEN_H - 2 * BODY_PADDING) / LINE_PX);
 const PAGE_CONTENT_CAP = 1000; // safe for both rebuilds and upgrades
+const BOX_PADDING = 2;
+const BOX_BORDER = 1;
+const BOX_INSET = BOX_PADDING + BOX_BORDER;
+const BOX_GAP = 4;
+const BOX_INNER_W = SCREEN_W - 2 * BOX_INSET;
 
 /**
  * One screen-worth of result content. Multi-claim results and long body text
  * expand into a flat list of these — swipe-down increments the index, swipe-up
- * decrements. The unified body (heading + verdict + reason with blank-line
- * separators) is paginated into one or more pages per claim; `text` carries
- * the chunk for this page. `pageWithinClaim === 0` is the first page of a
- * claim (includes the heading + position tag); higher values are continuation
- * chunks of the same claim's body.
+ * decrements. `question` is the subdued context caption, repeated on every
+ * page; `text` carries the answer chunk. `pageWithinClaim` identifies the
+ * continuation page within an entry.
  */
-type PageRef = {
+type AnswerMetadata = { position?: string; language?: string; pageIndicator?: string };
+type AnswerCaption = AnswerMetadata & { question: string };
+type PageRef = AnswerMetadata & {
   claimIdx: number;
   pageWithinClaim: number;
   text: string;
+  question?: string;
 };
 
 /** A page in the session-wide flat list spanning every entry in the current
@@ -207,6 +221,7 @@ let sessionPageIndex = 0;
 // preserved so the next scroll-up can reveal the last session page; the
 // visible layout is demoted to baseline / discreet-minimal in the meantime.
 let activeHidden = false;
+let activeAnswerCaption: AnswerCaption | undefined;
 /** First/last entry index of the most recent analysis. Used to jump the
  *  cursor to the new first claim when a result lands. */
 let latestAnalysisRange: { firstEntry: number; lastEntry: number } | null = null;
@@ -241,6 +256,7 @@ let pendingMenuSpinnerFrame = '';
 // Keep the canonical status even while an answer hides it. Dismissing the
 // answer restores the current recording / processing indicator in the corner.
 let pendingStatusFrame = '';
+let cornerStatusWidth = 1;
 
 // True while the corner status slot may double as a recording indicator —
 // i.e. the mic is hot AND no answer is currently visible. Flipped to false
@@ -261,6 +277,7 @@ let autoModeIndicator = false;
  *  indicator. Answers suppress the corner entirely. */
 function statusDisplayText(): string {
   if (!recordingDotEligible) return '';
+  if (recordingPaused()) return 'PAUSED';
   if (pendingStatusFrame !== '') return pendingStatusFrame;
   if (activeLayout === 'discreet-minimal') return '•';
   if (activeLayout !== 'baseline') return '';
@@ -271,10 +288,20 @@ function statusDisplayText(): string {
 }
 
 function statusBrightness(): number {
-  return recordingDotEligible ? (pendingStatusFrame ? 3 : 1) : 0;
+  return recordingDotEligible ? (recordingPaused() || pendingStatusFrame ? 3 : 1) : 0;
 }
 
 async function upgradeStatus(): Promise<void> {
+  const content = statusDisplayText();
+  const width = cornerStatusGeometry(content).width;
+  // The SDK only upgrades text/brightness in place. Move the tight box when
+  // its measured width changes; same-width animation frames stay flicker-free.
+  // Never rebuild a visible answer just to reposition an empty indicator.
+  if (recordingDotEligible && width !== cornerStatusWidth) {
+    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    if (!ok) throw new Error('rebuildPageContainer (corner status) failed.');
+    return;
+  }
   await upgradeText(CONTAINER.status, NAME.status, statusDisplayText(), statusBrightness());
 }
 
@@ -350,6 +377,33 @@ export async function showUnconfiguredPage(): Promise<void> {
   currentPage = 'unconfigured';
 }
 
+let conversationOptionItems: MenuItem[] = [];
+export function conversationOptionAtIndex(index: number): string { return conversationOptionItems[index]?.id ?? 'conversation-back'; }
+export async function showConversationOptions(title: string, items: MenuItem[]): Promise<void> {
+  conversationOptionItems = [{ id: 'conversation-back', label: '← Back' }, ...items].slice(0, 20);
+  const textObject = [new TextContainerProperty({ containerID: 60, containerName: 'vl-conv-title', xPosition: 16, yPosition: 8, width: 544, height: 36, content: title, isEventCapture: 0 })];
+  const listObject = [new ListContainerProperty({ containerID: 61, containerName: 'vl-conv-list', xPosition: 16, yPosition: 48, width: 544, height: 224, isEventCapture: 1,
+    itemContainer: new ListItemContainerProperty({ itemCount: conversationOptionItems.length, itemWidth: 528, isItemSelectBorderEn: 1, itemName: conversationOptionItems.map(i => i.disabled ? `${i.label} (unavailable)` : i.label) }) })];
+  const ok = await getBridge().rebuildPageContainer(new RebuildPageContainer({ containerTotalNum: 2, listObject, textObject }));
+  if (!ok) throw new Error('Conversation menu could not be displayed.');
+  currentPage = 'conversation-options';
+}
+export async function showCaptionsPage(text: string, status = 'Captured speech · speaker unknown'): Promise<void> {
+  const textObject = [
+    new TextContainerProperty({ containerID: 62, containerName: 'vl-cap-title', xPosition: 16, yPosition: 0, width: 544, height: 36, content: status.slice(0, 100), isEventCapture: 0 }),
+    new TextContainerProperty({ containerID: 63, containerName: 'vl-cap-body', xPosition: 16, yPosition: 40, width: 544, height: 220, content: text.slice(-700) || 'Waiting for speech…', isEventCapture: 0 }),
+  ];
+  const listObject = [new ListContainerProperty({ containerID: 64, containerName: 'vl-cap-input', xPosition: 16, yPosition: 264, width: 544, height: 24, isEventCapture: 1,
+    itemContainer: new ListItemContainerProperty({ itemCount: 1, itemWidth: 528, isItemSelectBorderEn: 0, itemName: ['Tap: menu · Double-tap: help'] }) })];
+  if (!await getBridge().rebuildPageContainer(new RebuildPageContainer({ containerTotalNum: 3, listObject, textObject }))) throw new Error('Captions page could not be displayed.');
+  currentPage = 'captions';
+}
+export async function updateCaptionsPage(text: string, status = 'Captured speech · speaker unknown'): Promise<void> {
+  if (currentPage !== 'captions') return;
+  await upgradeText(62, 'vl-cap-title', status.slice(0, 100));
+  if (currentPage === 'captions') await upgradeText(63, 'vl-cap-body', text.slice(-700) || 'Waiting for speech…');
+}
+
 export async function showPickerPage(): Promise<void> {
   if (!bootstrapped) { await bootstrapHud('picker'); return; }
   const ok = await getBridge().rebuildPageContainer(buildPickerPage('rebuild') as RebuildPageContainer);
@@ -360,6 +414,7 @@ export async function showPickerPage(): Promise<void> {
 export async function showActivePage(persona: Persona): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showActivePage().');
   menuPersona = persona;
+  if (activeHidden) activeAnswerCaption = undefined;
   // If a result arrived while the user was off the active page (e.g. they
   // opened the menu during analysis), promote the discreet layout so the
   // rebuild lays down claim/verdict/reason containers ready to receive it.
@@ -439,12 +494,12 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
   const sessionTag = cachedTotal > 0 && historyDetailIndex >= 0
     ? `${historyDetailIndex + 1}/${cachedTotal}`
     : '';
-  detailPages = computePagesForResult(entry.result, ANSWER_PAGE_LINES, {
+  detailPages = computePagesForResult(entry.result, {
     autoSelected: entry.result.autoSelected === true,
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
     groundingMode: entry.groundingMode,
-    webCitations: entry.webCitations,
+    question: entry.question,
   });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
@@ -471,12 +526,12 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
   const sessionTag = cachedTotal > 0
     ? `${historyDetailIndex + 1}/${cachedTotal}`
     : '';
-  detailPages = computePagesForResult(entry.result, ANSWER_PAGE_LINES, {
+  detailPages = computePagesForResult(entry.result, {
     autoSelected: entry.result.autoSelected === true,
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
     groundingMode: entry.groundingMode,
-    webCitations: entry.webCitations,
+    question: entry.question,
   });
   detailPageIndex = 0;
   const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
@@ -494,7 +549,7 @@ export async function restoreActivePage(): Promise<void> {
 }
 
 export async function setStatus(label: keyof typeof STATUS_LABEL | string): Promise<void> {
-  const content = STATUS_LABEL[label] ?? label;
+  const content = (STATUS_LABEL[label] ?? label).trim();
   // Record the canonical status content even when off the active page so the
   // next rebuild can seed the status container with the current spinner /
   // listening state. The recording-dot fallback is applied at write time by
@@ -570,12 +625,14 @@ function flushStreamingHeading(): Promise<void> {
   streamingWrite = streamingWrite.then(async () => {
     if (generation !== streamingGeneration || currentPage !== 'active') return;
     const wasDotEligible = recordingDotEligible;
+    const hadQuestionBox = activeAnswerCaption !== undefined;
+    activeAnswerCaption = undefined;
     streamingPreviewVisible = true;
     recordingDotEligible = false;
     await setActiveHint('');
     if (generation !== streamingGeneration || currentPage !== 'active') return;
-    if (activeLayout === 'discreet-minimal') {
-      activeLayout = 'discreet-result';
+    if (activeLayout === 'discreet-minimal' || hadQuestionBox) {
+      if (activeLayout === 'discreet-minimal') activeLayout = 'discreet-result';
       const ok = await getBridge().rebuildPageContainer(buildActivePage());
       if (!ok) throw new Error('rebuildPageContainer (streaming answer) failed.');
     } else if (wasDotEligible) {
@@ -655,6 +712,7 @@ const PERSONA_ID_BY_RESULT_TYPE: Record<LensResult['type'], string> = {
   'devils-advocate': 'devils-advocate',
   'key-questions': 'key-questions',
   'companion': 'companion',
+  assistance: 'respond',
   'meeting-prep': 'meeting-prep',
   'session-summary': 'session-summary',
   'game': 'game',
@@ -665,7 +723,9 @@ function synthesizeEntryFromResult(result: LensResult, idx = 0): HistoryEntry {
   // When Auto picked this result, the synthetic entry needs a real lensName so
   // the Auto-chose prefix on the active / history-detail page survives the
   // synthetic round-trip (tests + menu-replay).
-  const personaId = result.autoSelected ? PERSONA_ID_BY_RESULT_TYPE[result.type] : '';
+  const personaId = result.autoSelected
+    ? result.type === 'assistance' ? result.action : PERSONA_ID_BY_RESULT_TYPE[result.type]
+    : '';
   const lensName = personaId ? (getPersona(personaId)?.name ?? '') : '';
   return {
     id: `${SYNTHETIC_ENTRY_ID}-${idx}`,
@@ -703,6 +763,7 @@ function splitForSynthesis(result: LensResult): LensResult[] {
         : result.claims.map((c) => ({ type: 'eli5', claims: [c], autoSelected: result.autoSelected }));
     case 'session-summary':
     case 'meeting-prep':
+    case 'assistance':
       return [result];
     case 'key-questions':
       return result.claims.length <= 1 ? [result]
@@ -750,6 +811,8 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
     // Only write the corner when an answer was previously suppressing the
     // dot, so an already-idle discreet-minimal stays a true no-op.
     const wasSuppressed = !recordingDotEligible;
+    const hadQuestionBox = activeAnswerCaption !== undefined;
+    activeAnswerCaption = undefined;
     recordingDotEligible = true;
     if (currentPage !== 'active') return;
     if (activeLayout === 'discreet-minimal') {
@@ -758,8 +821,8 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
       }
       return;
     }
-    if (isDiscreetLayout(activeLayout)) {
-      setActiveLayout('discreet-minimal');
+    if (isDiscreetLayout(activeLayout) || hadQuestionBox) {
+      if (isDiscreetLayout(activeLayout)) setActiveLayout('discreet-minimal');
       const ok = await getBridge().rebuildPageContainer(buildActivePage());
       if (!ok) throw new Error('rebuildPageContainer (discreet-minimal) failed.');
       return;
@@ -880,6 +943,12 @@ export async function blankActiveForThinking(): Promise<void> {
   await hideActiveResultInPlace();
 }
 
+/** Hide an answer after returning from the menu while preserving swipe recall. */
+export async function dismissActiveAnswer(): Promise<void> {
+  if (currentPage !== 'active') return;
+  await hideActiveResultInPlace();
+}
+
 /** Demote the active page to its idle layout (baseline / discreet-minimal)
  * while keeping `sessionPages` and `sessionPageIndex` intact, so a swipe-up
  * can reveal the last session page again. Shared by swipe-down dismiss and
@@ -889,8 +958,10 @@ async function hideActiveResultInPlace(): Promise<void> {
   activeHidden = true;
   // Re-enable the recording dot — the wearer is back to a listening view.
   recordingDotEligible = true;
+  const hadQuestionBox = activeAnswerCaption !== undefined;
+  activeAnswerCaption = undefined;
   const targetIdle: ActiveLayout = isDiscreetLayout(activeLayout) ? 'discreet-minimal' : 'baseline';
-  if (activeLayout !== targetIdle) {
+  if (activeLayout !== targetIdle || hadQuestionBox) {
     setActiveLayout(targetIdle);
     const ok = await getBridge().rebuildPageContainer(buildActivePage());
     if (!ok) throw new Error('rebuildPageContainer (hide) failed.');
@@ -929,6 +1000,7 @@ export async function setActiveHint(_content: string): Promise<void> {
  * spinner state; only writes to the device when the menu is on screen.
  */
 export async function setMenuSpinner(content: string): Promise<void> {
+  content = content.trim();
   pendingMenuSpinnerFrame = content;
   if (currentPage !== 'menu') return;
   await upgradeText(CONTAINER.menuSpinner, NAME.menuSpinner, content);
@@ -952,8 +1024,8 @@ export function clearMenuSpinnerFrame(): void { pendingMenuSpinnerFrame = ''; }
  * what keeps fire-and-forget spinner writes from out-living stopSpinner and
  * landing on top of the answer view.
  */
-export function seedStatusFrame(content: string): void { pendingStatusFrame = content; }
-export function seedMenuSpinnerFrame(content: string): void { pendingMenuSpinnerFrame = content; }
+export function seedStatusFrame(content: string): void { pendingStatusFrame = content.trim(); }
+export function seedMenuSpinnerFrame(content: string): void { pendingMenuSpinnerFrame = content.trim(); }
 
 let pickerHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -1113,17 +1185,16 @@ function formatUnifiedBody(
   claimIdx: number,
   _autoSelected: boolean,
   groundingMode: 'grounded' | 'groundless' = 'grounded',
+  separator = '\n\n',
 ): string {
-  const { top, middle, bottom } = formatLensResultBase(result, claimIdx, groundingMode);
+  const { top, middle, bottom } = formatLensResultBase(result, claimIdx, groundingMode, separator);
 
-  // Stitch non-empty sections together with a blank line between them so the
-  // visual hierarchy (heading | verdict/source | body) remains legible without
-  // separate positioned containers.
+  // Use blank section rows when they fit; compact pagination uses newlines.
   const sections: string[] = [];
-  if (top) sections.push(top);
-  if (middle) sections.push(middle);
-  if (bottom) sections.push(bottom);
-  return sections.join('\n\n');
+  if (top) sections.push(flowProse(top));
+  if (middle) sections.push(flowProse(middle));
+  if (bottom) sections.push(result.type === 'session-summary' || result.type === 'translation' || result.type === 'assistance' ? bottom : flowProse(bottom));
+  return sections.join(separator);
 }
 
 /** Base heading/verdict/reason triple for a result, *without* position tag or
@@ -1140,6 +1211,7 @@ export function formatLensResultBase(
   result: LensResult,
   claimIdx: number,
   groundingMode: 'grounded' | 'groundless' = 'grounded',
+  separator = '\n\n',
 ): { top: string; middle: string; bottom: string } {
   // `°` after the verdict glyph signals the wearer that this answer came from
   // training data alone — provider couldn't supply web grounding. Only
@@ -1148,6 +1220,7 @@ export function formatLensResultBase(
   // groundedness signal in the badge column.
   const groundlessMark = groundingMode === 'groundless' ? '°' : '';
   switch (result.type) {
+    case 'assistance': return { top: result.headline, middle: '', bottom: [result.detail, ...result.records.map(formatConversationRecord)].filter(Boolean).join('\n') };
     case 'fact-check': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       const verdictLine = c.verdict === 'TRUE' ? '+ TRUE' : c.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED';
@@ -1159,7 +1232,9 @@ export function formatLensResultBase(
     }
     case 'trivia': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: c.question, middle: c.answer, bottom: c.description };
+      return {
+        top: flowProse(c.question), middle: flowProse(c.answer), bottom: flowProse(c.description),
+      };
     }
     case 'logical-fallacy': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
@@ -1185,25 +1260,22 @@ export function formatLensResultBase(
       return { top, middle: '', bottom };
     }
     case 'session-summary':
-      return { top: '', middle: '', bottom: formatSessionSummaryBody(result) };
+      return { top: '', middle: '', bottom: formatSessionSummaryBody(result, separator) };
     case 'meeting-prep': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       // Each claim kind gets its own visual treatment so the user can tell
       // answer / supporting evidence / follow-up apart while swiping.
       switch (c.kind) {
         case 'answer':
-          // Source attribution lives at the BOTTOM (after the detail) so the
-          // wearer reads answer → detail → "From: …" top-to-bottom without the
-          // source line interrupting the answer→detail flow.
           return {
             top: c.text,
             middle: c.detail,
-            bottom: c.source ? `From: ${c.source}` : '',
+            bottom: '',
           };
         case 'evidence':
           return {
             top: `"${c.text}"`,
-            middle: c.source ? `From: ${c.source}` : '',
+            middle: '',
             bottom: '',
           };
         case 'followup':
@@ -1254,13 +1326,12 @@ export function formatLensResultBase(
       // can verify the lens caught it correctly — a bare "DA" is easy to
       // misread. `languageDisplayName` resolves the BCP-47 code to an English
       // name, falling back to the upper-cased code when it can't.
-      const srcLang = languageDisplayName(result.sourceLanguage);
       // When romanization is enabled and the source is a non-Latin script, the
       // model fills `sourceTextRomanized` / each starter's `sourceRomanized`; we
       // show that IN PLACE OF the native script (one line, not both). Empty
       // otherwise (Latin script or feature off) → native text is shown.
       const sourceLine = withRomanized(result.sourceText, result.sourceTextRomanized);
-      const top = sourceLine ? `${srcLang}  ${sourceLine}` : '';
+      const top = sourceLine;
       const middle = result.translatedText;
       const starters = result.replyStarters
         .map((s, i) => `${i + 1}. ${s.translated}\n   ${withRomanized(s.source, s.sourceRomanized)}`)
@@ -1273,6 +1344,10 @@ export function formatLensResultBase(
 function clip(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
+}
+
+function flowProse(text: string): string {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -1307,7 +1382,7 @@ function languageDisplayName(code: string): string {
  * topics and keyPoints are both empty the body collapses to the summary
  * alone, preserving the original pre-expansion rendering as a fallback.
  */
-function formatSessionSummaryBody(result: Extract<LensResult, { type: 'session-summary' }>): string {
+function formatSessionSummaryBody(result: Extract<LensResult, { type: 'session-summary' }>, separator: string): string {
   const sections: string[] = [];
   if (result.summary && result.summary.trim().length > 0) {
     sections.push(result.summary.trim());
@@ -1320,7 +1395,7 @@ function formatSessionSummaryBody(result: Extract<LensResult, { type: 'session-s
   if (keyPoints.length > 0) {
     sections.push(['KEY POINTS', ...keyPoints.map((k) => `• ${k}`)].join('\n'));
   }
-  return sections.join('\n\n');
+  return sections.join(separator);
 }
 
 function badgeGlyph(badge: string): string {
@@ -1346,7 +1421,7 @@ type WrapCache = Map<string, number>;
 function cachedLineCount(cache: WrapCache, text: string, innerW: number): number {
   // Pre-pad the key with the width so two paginations at different widths
   // sharing a cache (we never share, but the key is cheap) can't collide.
-  const key = `${innerW} ${text}`;
+  const key = `${innerW}\0${text}`;
   const hit = cache.get(key);
   if (hit !== undefined) return hit;
   const measured = measureTextWrap(text, innerW).lineCount;
@@ -1379,10 +1454,10 @@ function paginateText(
 
 function takeLines(
   text: string, innerW: number, maxLines: number, cache: WrapCache,
-  prefix: string, maxCharacters: number,
+  prefix: string, maxCharacters: number, suffix = '',
 ): { chunk: string; rest: string } {
-  const fits = (chunk: string) => prefix.length + chunk.length <= maxCharacters
-    && cachedLineCount(cache, prefix + chunk, innerW) <= maxLines;
+  const fits = (chunk: string) => prefix.length + chunk.length + suffix.length <= maxCharacters
+    && cachedLineCount(cache, prefix + chunk + suffix, innerW) <= maxLines;
   if (fits(text)) return { chunk: text, rest: '' };
 
   // Binary search over word boundaries for the largest prefix that fits.
@@ -1449,14 +1524,15 @@ function formatEntryBody(
   result: LensResult,
   autoSelected: boolean,
   groundingMode: 'grounded' | 'groundless' = 'grounded',
+  separator = '\n\n',
 ): string {
   const total = claimCount(result);
   const parts: string[] = [];
   for (let i = 0; i < total; i++) {
-    const body = formatUnifiedBody(result, i, autoSelected, groundingMode);
+    const body = formatUnifiedBody(result, i, autoSelected, groundingMode, separator);
     if (body) parts.push(body);
   }
-  return parts.join('\n\n');
+  return parts.join(separator);
 }
 
 /**
@@ -1474,21 +1550,67 @@ function bulletRow(currentIdx: number, total: number): string {
   return dots.join(' ');
 }
 
-/** Sources sub-page text for a grounded history entry. Up to 5 domains
- *  joined with `·` so the line wraps naturally on the G2's 576px width.
- *  Plain text — the HUD has no link affordance, the wearer goes to a
- *  full URL on their phone via the recall context. */
-const MAX_SOURCES_ON_HUD = 5;
-function buildSourcesPageText(citations: ReadonlyArray<WebCitation>): string {
-  const top = citations.slice(0, MAX_SOURCES_ON_HUD).map((c) => c.domain);
-  if (top.length === 0) return '';
-  return `Sources: ${top.join(' · ')}`;
+function questionCaption(question: string, metadata: AnswerMetadata = {}): string {
+  const width = captionTextWidth(metadata);
+  const lines = metadata.language ? 1 : 2;
+  if (measureTextWrap(question, width).lineCount <= lines && question.length <= PAGE_CONTENT_CAP) return question;
+  const { chunk } = takeLines(question, width, lines, new Map(), '', PAGE_CONTENT_CAP, '…');
+  return `${chunk}…`;
+}
+
+function captionTextWidth(metadata: AnswerMetadata): number {
+  return metadata.language || !metadata.position ? SCREEN_W : SCREEN_W - getTextWidth(metadata.position) - BOX_GAP;
+}
+
+function questionAnswerGeometry(question: string, metadata: AnswerMetadata = {}): {
+  height: number; questionY: number; questionWidth: number; questionHeight: number;
+  positionWidth: number; answerY: number; answerHeight: number; answerLines: number;
+} {
+  const questionY = metadata.language ? LINE_PX : 0;
+  const questionWidth = captionTextWidth(metadata);
+  const questionHeight = measureTextWrap(question, questionWidth).height;
+  const height = questionY + questionHeight;
+  const positionWidth = metadata.position ? getTextWidth(metadata.position) : 0;
+  const answerY = height + BOX_GAP;
+  const answerHeight = SCREEN_H - answerY;
+  return { height, questionY, questionWidth, questionHeight, positionWidth, answerY, answerHeight, answerLines: Math.floor((answerHeight - 2 * BOX_INSET) / LINE_PX) };
+}
+
+function formatAnswerSections(
+  result: LensResult, groundingMode: 'grounded' | 'groundless' | undefined, separator: string, contextQuestion = '',
+): { question: string; answer: string; language?: string } {
+  const { top, middle, bottom } = formatLensResultBase(result, 0, groundingMode, separator);
+  const lensName = getPersona(result.type === 'assistance' ? result.action : PERSONA_ID_BY_RESULT_TYPE[result.type])?.name ?? result.type;
+  const claim = 'claims' in result ? result.claims[0] : undefined;
+  const quote = claim && 'quote' in claim ? flowProse(claim.quote) : '';
+  switch (result.type) {
+    case 'assistance':
+      return { question: flowProse(result.quote) || flowProse(contextQuestion) || lensName, answer: formatEntryBody(result, false, groundingMode, separator) };
+    case 'fact-check':
+    case 'trivia':
+    case 'game':
+      return {
+        question: flowProse(top) || lensName,
+        answer: claimCount(result) > 1
+          ? formatEntryBody(result, false, groundingMode, separator)
+          : [flowProse(middle), flowProse(bottom)].filter(Boolean).join(separator),
+      };
+    case 'translation':
+      return {
+        language: languageDisplayName(result.sourceLanguage), question: flowProse(top) || lensName,
+        answer: [flowProse(middle), bottom].filter(Boolean).join(separator),
+      };
+    case 'session-summary':
+      return { question: flowProse(result.title) || lensName, answer: bottom };
+    default:
+      return { question: quote || flowProse(contextQuestion) || lensName, answer: formatEntryBody(result, false, groundingMode, separator) };
+  }
 }
 
 /**
  * Build the paginated page list for one entry, with all indicator chrome
  * applied:
- *   - Session-relative `"X/N · "` prefix on the first line of every page
+ *   - Session-relative `"X/N"` in a separately dimmed position container
  *     (when the caller passes a non-empty `sessionTag`). Stays the same
  *     across every page of this entry so the wearer always knows which
  *     question they're on; only changes when crossing into a different
@@ -1496,59 +1618,47 @@ function buildSourcesPageText(citations: ReadonlyArray<WebCitation>): string {
  *   - Bottom bullet row showing within-entry page position, only when the
  *     entry expands to more than one page.
  *
- * Measure the prefix together with each chunk, so a short position tag costs
- * only its actual width. Multi-page answers reserve the two footer lines.
+ * Captions take at most two lines. Paginate against the remaining answer-box
+ * dimensions, reserving one indicator line only for multi-page answers.
  */
 function computePagesForResult(
   result: LensResult,
-  pageLines: number,
   options: {
     autoSelected?: boolean;
     sessionTag?: string;
     autoLensLabel?: string;
     groundingMode?: 'grounded' | 'groundless';
-    /** Structured citations from the grounded path. When present and
-     *  non-empty, an extra "Sources: …" sub-page is appended after the body
-     *  pages so the wearer can scroll one more notch to see the domains. */
-    webCitations?: ReadonlyArray<WebCitation>;
+    question?: string;
   } = {},
 ): PageRef[] {
   const autoSelected = options.autoSelected ?? (result.autoSelected === true);
   const sessionTag = options.sessionTag ?? '';
   const autoPrefix =
     autoSelected && options.autoLensLabel ? options.autoLensLabel : '';
-  const body = formatEntryBody(result, autoSelected, options.groundingMode);
-  const sourcesText = options.webCitations && options.webCitations.length > 0
-    ? buildSourcesPageText(options.webCitations)
-    : '';
-  const hasSourcesPage = sourcesText.length > 0;
 
-  // Auto prefix and session tag share the first line, joined by ' · ' so the
-  // shape is `Fact Check · 1/3 · <body>`. Either or both may be empty.
-  const head = [autoPrefix, sessionTag].filter(Boolean).join(' · ');
-  const prefix = head ? `${head} · ` : '';
+  // The Auto lens label belongs to the question. Position is independent so
+  // it can use a dimmer brightness without dimming the question with it.
+  const prefix = autoPrefix ? `${autoPrefix} · ` : '';
   const applyPrefix = (chunk: string) => prefix + chunk;
-  const firstPass = paginateText(body, BODY_INNER_W, pageLines, pageLines, prefix);
 
-  if (firstPass.length <= 1 && !hasSourcesPage) {
-    const text = applyPrefix(firstPass[0] ?? '');
-    return [{ claimIdx: 0, pageWithinClaim: 0, text }];
-  }
-
-  // Multi-page: also reserve 2 lines for the bottom bullet row + blank-line
-  // separator, then re-paginate. The sources sub-page counts toward the bullet
-  // total so the wearer sees "● ○ ○" with the last dot reserved for sources.
-  const finalBudget = Math.max(1, pageLines - 2);
-  const final = paginateText(body, BODY_INNER_W, finalBudget, finalBudget, prefix, PAGE_CONTENT_CAP - 64);
-  const sources = hasSourcesPage
-    ? paginateText(sourcesText, BODY_INNER_W, finalBudget, finalBudget, prefix, PAGE_CONTENT_CAP - 64)
-    : [];
-  const chunks = [...final, ...sources];
+  const sections = formatAnswerSections(result, options.groundingMode, '\n\n', options.question);
+  const metadata: AnswerMetadata = { position: sessionTag || undefined, language: sections.language };
+  const question = questionCaption(applyPrefix(sections.question), metadata);
+  const { answerLines } = questionAnswerGeometry(question, metadata);
+  let answer = sections.answer;
+  const fitsAnswer = (text: string) => text.length <= PAGE_CONTENT_CAP
+    && measureTextWrap(text, BOX_INNER_W).lineCount <= answerLines;
+  if (!fitsAnswer(answer)) answer = formatAnswerSections(result, options.groundingMode, '\n', options.question).answer;
+  if (fitsAnswer(answer)) return [{ claimIdx: 0, pageWithinClaim: 0, question, ...metadata, text: answer }];
+  const chunks = paginateText(answer, BOX_INNER_W, answerLines - 1, answerLines - 1);
   const totalPages = chunks.length;
   return chunks.map((chunk, p) => ({
     claimIdx: 0,
     pageWithinClaim: p,
-    text: `${applyPrefix(chunk)}\n\n${bulletRow(p, totalPages)}`,
+    question,
+    ...metadata,
+    pageIndicator: bulletRow(p, totalPages),
+    text: chunk,
   }));
 }
 
@@ -1556,12 +1666,24 @@ function isDiscreetLayout(layout: ActiveLayout): boolean {
   return layout === 'discreet-minimal' || layout === 'discreet-result';
 }
 
-function pageLinesForActiveLayout(): number {
-  return ANSWER_PAGE_LINES;
-}
-
 function targetLayoutForActivePage(): ActiveLayout {
   return isDiscreetLayout(activeLayout) ? 'discreet-result' : 'baseline';
+}
+
+function captionGeometryKey(caption?: AnswerCaption): string {
+  return caption ? JSON.stringify([questionAnswerGeometry(caption.question, caption), !!caption.pageIndicator]) : '';
+}
+
+function captionLanguageText(metadata: AnswerMetadata): string {
+  const width = SCREEN_W - (metadata.position ? getTextWidth(metadata.position) + BOX_GAP : 0);
+  return pxTruncate(metadata.language ?? '', width);
+}
+
+async function upgradeAnswerCaption(caption: AnswerCaption): Promise<void> {
+  await upgradeText(CONTAINER.claim, NAME.claim, caption.question, 2);
+  if (caption.position) await upgradeText(CONTAINER.answerPosition, NAME.answerPosition, caption.position, 1);
+  if (caption.language) await upgradeText(CONTAINER.answerLanguage, NAME.answerLanguage, captionLanguageText(caption), 2);
+  if (caption.pageIndicator) await upgradeText(CONTAINER.answerPageIndicator, NAME.answerPageIndicator, caption.pageIndicator, 1);
 }
 
 /** The entry the active-page cursor is currently pointing at. */
@@ -1607,7 +1729,6 @@ function firstPageIndexForEntry(entryIdx: number): number {
  *  page sequence crosses into the next entry. Bullets at the bottom show
  *  within-entry page position, only when the entry spans multiple pages. */
 function recomputeSessionPages(): void {
-  const pageLines = pageLinesForActiveLayout();
   const totalEntries = sessionEntries.length;
   const out: SessionPageRef[] = [];
   for (let i = 0; i < totalEntries; i++) {
@@ -1615,25 +1736,21 @@ function recomputeSessionPages(): void {
     // Always show the session-relative tag — even for a 1-entry session
     // ("1/1") so the wearer never wonders whether the indicator is missing.
     const sessionTag = totalEntries > 0 ? `${i + 1}/${totalEntries}` : '';
-    const pages = computePagesForResult(entry.result, pageLines, {
+    const pages = computePagesForResult(entry.result, {
       autoSelected: entry.result.autoSelected === true,
       autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
       sessionTag,
       groundingMode: entry.groundingMode,
-      webCitations: entry.webCitations,
+      question: entry.question,
     });
     for (const p of pages) {
-      out.push({ entryIdx: i, claimIdx: p.claimIdx, pageWithinClaim: p.pageWithinClaim, text: p.text });
+      out.push({ ...p, entryIdx: i });
     }
   }
   sessionPages = out;
 }
 
-/** Render the active page from the session cursor. With the unified-body
- *  layout, every page is the same single container — pagination already baked
- *  the heading + verdict + body into `page.text`, so we just push it. A layout
- *  rebuild is only needed when the mode itself changes (baseline ↔ discreet),
- *  not on every page swipe. */
+/** Rebuild only when the mode or question-caption dimensions change. */
 async function renderActivePage(): Promise<void> {
   if (currentPage !== 'active') return;
   // Clamp the index in case a result that arrived mid-scroll shortened the
@@ -1652,7 +1769,9 @@ async function renderActivePage(): Promise<void> {
   const wasDotEligible = recordingDotEligible;
   recordingDotEligible = false;
   await setActiveHint('');
-  const layoutChanged = target !== activeLayout;
+  const caption = page.question === undefined ? undefined : { question: page.question, position: page.position, language: page.language, pageIndicator: page.pageIndicator };
+  const layoutChanged = target !== activeLayout || captionGeometryKey(activeAnswerCaption) !== captionGeometryKey(caption);
+  activeAnswerCaption = caption;
   if (layoutChanged) {
     setActiveLayout(target);
     const ok = await getBridge().rebuildPageContainer(buildActivePage());
@@ -1665,23 +1784,25 @@ async function renderActivePage(): Promise<void> {
     // Discreet-result has no '•' fallback so no clear write is needed.
     await upgradeStatus();
   }
+  if (caption) await upgradeAnswerCaption(caption);
   await upgradeText(CONTAINER.reason, NAME.reason, page.text, 4);
 }
 
-/** Render `detailPages[detailPageIndex]` on the history-detail page. With the
- *  unified-body layout there is only one container layout — no page-0 vs
- *  scroll-page split — so a swipe just upgrades the body text. */
+/** Keep the context caption fixed while upgrading history answer pages. */
 async function renderHistoryDetailPage(): Promise<void> {
   if (currentPage !== 'history-detail') return;
   const page = detailPages[detailPageIndex];
   const entry = cachedHistoryEntries[historyDetailIndex];
   if (!page || !entry) return;
+  if (page.question !== undefined) await upgradeAnswerCaption({ question: page.question, position: page.position, language: page.language, pageIndicator: page.pageIndicator });
   await upgradeText(CONTAINER.reason, NAME.reason, page.text);
 }
 
 // ------- mid-summary page helpers -----------------------------------------
 
 type MidSummaryResult = Extract<LensResult, { type: 'session-summary' }>;
+let midSummaryQuestion = '';
+let teleprompterQuestion = '';
 
 // ------- page builders ----------------------------------------------------
 
@@ -1727,7 +1848,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: 240, height: 36, borderWidth: 0, paddingLength: 4,
-    content: 'Pick a lens', isEventCapture: 0,
+    content: 'Start a conversation', isEventCapture: 0,
   });
   const summaryBadge = new TextContainerProperty({
     containerID: CONTAINER.summaryBadge, containerName: NAME.summaryBadge,
@@ -1770,10 +1891,12 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
 const PICKER_GAMES_LABEL = 'Games ›';
 const PICKER_SPECIALIZED_LABEL = 'Specialized ›';
 function buildPickerItemNames(): string[] {
-  return [...getPickerPersonas().map((p) => p.name), PICKER_GAMES_LABEL, PICKER_SPECIALIZED_LABEL];
+  const profile = CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile) ?? CONVERSATION_PROFILES[0];
+  return [...getPickerPersonas().map((p) => p.id === 'auto' ? `Start ${profile.name}` : p.name), 'Profiles & saved setups ›', PICKER_GAMES_LABEL, PICKER_SPECIALIZED_LABEL];
 }
 
 export type PickerEntry =
+  | { kind: 'profiles' }
   | { kind: 'games' }
   | { kind: 'specialized' }
   | { kind: 'persona'; persona: Persona };
@@ -1794,8 +1917,9 @@ export function pickerEntryAtIndex(idx: number | undefined | null): PickerEntry 
     const p = personas[safe];
     if (p) return { kind: 'persona', persona: p };
   }
-  if (safe === personas.length) return { kind: 'games' };
-  if (safe === personas.length + 1) return { kind: 'specialized' };
+  if (safe === personas.length) return { kind: 'profiles' };
+  if (safe === personas.length + 1) return { kind: 'games' };
+  if (safe === personas.length + 2) return { kind: 'specialized' };
   const first = personas[0];
   return first ? { kind: 'persona', persona: first } : { kind: 'games' };
 }
@@ -1804,17 +1928,19 @@ function buildMenuPage(): RebuildPageContainer {
   // Title shows the active lens name so the wearer knows which lens this
   // menu belongs to. Clock sized tight around "HH:MM" so LVGL's end-of-label
   // caret sits outside the container clip.
-  const titleText = getPersona(activePersona())?.name ?? 'Menu';
+  const titleText = `${recordingPaused() ? 'Paused · ' : ''}${getPersona(activePersona())?.name ?? 'Menu'}`;
+  const processingWidth = Math.ceil(getTextWidth('99999s'));
+  const processingX = SCREEN_W - 72 - processingWidth;
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
-    width: SCREEN_W - 112, height: 32, borderWidth: 0, paddingLength: 0,
+    width: processingX - 24, height: 32, borderWidth: 0, paddingLength: 0,
     content: titleText, isEventCapture: 0,
   });
   // Spinner sits immediately left of the clock; populated by setMenuSpinner
   // while an analysis is in flight, empty otherwise.
   const spinner = new TextContainerProperty({
     containerID: CONTAINER.menuSpinner, containerName: NAME.menuSpinner,
-    xPosition: SCREEN_W - 96, yPosition: 8, width: 24, height: 32,
+    xPosition: processingX, yPosition: 8, width: processingWidth, height: LINE_PX,
     borderWidth: 0, paddingLength: 0,
     content: pendingMenuSpinnerFrame, isEventCapture: 0,
   });
@@ -1868,14 +1994,14 @@ function buildActivePage(): RebuildPageContainer {
  */
 function buildBaselineActivePage(): RebuildPageContainer {
   const status = makeCornerStatus();
-  const body = makeAnswerBody('', recordingDotEligible ? 0 : 4);
+  const body = makeAnswerSections(activeAnswerCaption?.question, '', recordingDotEligible ? 0 : 4, activeAnswerCaption);
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
     xPosition: BODY_PADDING, yPosition: SCREEN_H - LINE_PX,
     width: BODY_INNER_W, height: LINE_PX,
     borderWidth: 0, paddingLength: 0, content: '', textColor: 2, isEventCapture: 0,
   });
-  const textObject = [body, status, hint];
+  const textObject = [...body, status, hint];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
@@ -1908,8 +2034,8 @@ function buildDiscreetMinimalPage(): RebuildPageContainer {
  */
 function buildDiscreetResultPage(): RebuildPageContainer {
   const status = makeCornerStatus();
-  const body = makeAnswerBody();
-  const textObject = [body, status];
+  const body = makeAnswerSections(activeAnswerCaption?.question, '', 4, activeAnswerCaption);
+  const textObject = [...body, status];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
@@ -1934,15 +2060,62 @@ function makeAnswerBody(content = '', textColor = 4): TextContainerProperty {
   });
 }
 
+function makeAnswerSections(question?: string, content = '', textColor = 4, metadata: AnswerMetadata = {}): TextContainerProperty[] {
+  if (question === undefined) return [makeAnswerBody(content, textColor)];
+  const { questionY, questionWidth, questionHeight, positionWidth, answerY, answerHeight } = questionAnswerGeometry(question, metadata);
+  const box = {
+    xPosition: 0, width: SCREEN_W, borderWidth: BOX_BORDER, borderColor: 8,
+    borderRadius: 6, paddingLength: BOX_PADDING, textColor,
+  };
+  const header = [
+    new TextContainerProperty({
+      containerID: CONTAINER.claim, containerName: NAME.claim,
+      xPosition: 0, yPosition: questionY, width: questionWidth, height: questionHeight,
+      borderWidth: 0, paddingLength: 0, textColor: textColor === 0 ? 0 : 2,
+      content: question, isEventCapture: 0,
+    }),
+  ];
+  if (metadata.position) header.push(new TextContainerProperty({
+    containerID: CONTAINER.answerPosition, containerName: NAME.answerPosition,
+    xPosition: SCREEN_W - positionWidth, yPosition: 0, width: positionWidth, height: LINE_PX,
+    borderWidth: 0, paddingLength: 0, content: metadata.position, textColor: 1, isEventCapture: 0,
+  }));
+  if (metadata.language) header.push(new TextContainerProperty({
+    containerID: CONTAINER.answerLanguage, containerName: NAME.answerLanguage,
+    xPosition: 0, yPosition: 0, width: metadata.position ? SCREEN_W - positionWidth - BOX_GAP : SCREEN_W,
+    height: LINE_PX, borderWidth: 0, paddingLength: 0, content: captionLanguageText(metadata), textColor: 2, isEventCapture: 0,
+  }));
+  const body = new TextContainerProperty({
+      ...box, containerID: CONTAINER.reason, containerName: NAME.reason,
+      yPosition: answerY, height: answerHeight, content, isEventCapture: 1,
+    });
+  const footer = metadata.pageIndicator ? [new TextContainerProperty({
+    containerID: CONTAINER.answerPageIndicator, containerName: NAME.answerPageIndicator,
+    xPosition: BOX_INSET, yPosition: SCREEN_H - BOX_INSET - LINE_PX,
+    width: BOX_INNER_W, height: LINE_PX, borderWidth: 0, paddingLength: 0,
+    content: metadata.pageIndicator, textColor: 1, isEventCapture: 0,
+  })] : [];
+  return [...header, body, ...footer];
+}
+
+/** Tight, padding-free geometry keeps the text at the top-right edge. */
+function cornerStatusGeometry(content: string): { xPosition: number; width: number; height: number } {
+  const width = Math.min(SCREEN_W, Math.max(1, Math.ceil(getTextWidth(content))));
+  const height = Math.max(LINE_PX, measureTextWrap(content, width).height);
+  return { xPosition: SCREEN_W - width, width, height };
+}
+
 /** Dim recording indicator, brighter brief processing / error feedback.
  * No status glyph is drawn over an answer. */
 function makeCornerStatus(): TextContainerProperty {
+  const content = statusDisplayText();
+  const geometry = cornerStatusGeometry(content);
+  cornerStatusWidth = geometry.width;
   return new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 59, yPosition: 4, width: 55,
-    height: LINE_PX + 2 * BODY_PADDING,
-    borderWidth: 0, paddingLength: 4,
-    content: statusDisplayText(),
+    ...geometry, yPosition: 0,
+    borderWidth: 0, paddingLength: 0,
+    content,
     textColor: statusBrightness(),
     isEventCapture: 0,
   });
@@ -1980,15 +2153,15 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
 function buildMidSummaryContentBody(result: MidSummaryResult, loading: boolean): string {
   const parts: string[] = [];
   if (loading) parts.push('Refreshing…');
-  if (result.title.trim()) parts.push(result.title.trim());
-  if (result.summary.trim()) parts.push(result.summary.trim());
-  const kp = result.keyPoints.map((k) => k.trim()).filter(Boolean);
-  if (kp.length > 0) parts.push(kp.join('\n'));
-  return parts.join('\n\n');
+  parts.push(formatSessionSummaryBody(result, '\n\n'));
+  const body = parts.join('\n\n');
+  return measureTextWrap(body, BOX_INNER_W).lineCount <= questionAnswerGeometry(midSummaryQuestion).answerLines
+    ? body
+    : [loading ? 'Refreshing…' : '', formatSessionSummaryBody(result, '\n')].filter(Boolean).join('\n');
 }
 
 function buildMidSummaryPage(pageText: string): RebuildPageContainer {
-  const textObject = [makeAnswerBody(pageText)];
+  const textObject = makeAnswerSections(midSummaryQuestion, pageText);
   return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
@@ -2011,13 +2184,17 @@ export async function showMidSummaryPage(
 ): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showMidSummaryPage().');
 
+  const nextQuestion = questionCaption(flowProse(result?.title ?? '') || getPersona('session-summary')?.name || 'Session Summary');
+  const heightChanged = questionAnswerGeometry(nextQuestion).height !== questionAnswerGeometry(midSummaryQuestion).height;
+  midSummaryQuestion = nextQuestion;
   const body = result
     ? buildMidSummaryContentBody(result, loading)
     : (loading ? 'Generating summary...' : 'Nothing to summarize yet');
 
   // Refresh in place when already on the page so the firmware scroll position
   // is preserved across content updates (e.g. spinner → final summary).
-  if (currentPage === 'mid-summary') {
+  if (currentPage === 'mid-summary' && !heightChanged) {
+    await upgradeText(CONTAINER.claim, NAME.claim, midSummaryQuestion, 2);
     await upgradeText(CONTAINER.reason, NAME.reason, capContent(body, MID_SUMMARY_UPGRADE_CAP));
     return;
   }
@@ -2033,7 +2210,7 @@ export async function showMidSummaryPage(
  * History answers use the full canvas and the same event sink as live answers.
  */
 function buildHistoryDetailPage(_entry: HistoryEntry, page: PageRef): RebuildPageContainer {
-  const textObject = [makeAnswerBody(page.text)];
+  const textObject = makeAnswerSections(page.question, page.text, 4, page);
   return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
@@ -2309,37 +2486,11 @@ function buildGameFeedbackPage(session: GameSession): RebuildPageContainer {
     headline = '✗ Wrong';
     detail = `Answer: ${correctText}\n${q.reveal}`;
   }
-  const title = new TextContainerProperty({
-    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
-    xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 40,
-    borderWidth: 0, paddingLength: 4, content: clip(headline, 80), isEventCapture: 0,
-  });
-  const body = new TextContainerProperty({
-    containerID: CONTAINER.gameBody, containerName: NAME.gameBody,
-    xPosition: 16, yPosition: 52, width: SCREEN_W - 32, height: 192,
-    borderWidth: 0, paddingLength: 4, content: clip(detail, 480), isEventCapture: 0,
-  });
-  const progress = new TextContainerProperty({
-    containerID: CONTAINER.gameProgress, containerName: NAME.gameProgress,
-    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
-    borderWidth: 0, paddingLength: 4,
-    content: formatGameProgress(session.index, session.questions.length),
-    isEventCapture: 0,
-  });
-  // Single-item sink list so click/double-click reach the lifecycle event router.
-  const sink = new ListContainerProperty({
-    containerID: CONTAINER.gameList, containerName: NAME.gameList,
-    xPosition: 0, yPosition: SCREEN_H - 1, width: SCREEN_W, height: 1,
-    borderWidth: 0, paddingLength: 0,
-    itemContainer: new ListItemContainerProperty({
-      itemCount: 1, itemWidth: SCREEN_W, isItemSelectBorderEn: 0, itemName: [' '],
-    }),
-    isEventCapture: 1,
-  });
+  const metadata = { position: `${session.index + 1}/${session.questions.length}` };
+  const question = questionCaption(flowProse(q?.text ?? 'Game'), metadata);
+  const textObject = makeAnswerSections(question, capContent([headline, flowProse(detail)].filter(Boolean).join('\n\n'), PAGE_CONTENT_CAP), 4, metadata);
   return new RebuildPageContainer({
-    containerTotalNum: totalContainers([sink], [title, body, progress]),
-    listObject: [sink],
-    textObject: [title, body, progress],
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
 }
 
@@ -2430,40 +2581,18 @@ function buildGameEndPage(session: GameSession): RebuildPageContainer {
   }
   const headline = scored ? `${score} / ${session.questions.length}` : 'Done';
   const topic = session.preset.topic || 'Random topic';
-  const sub = `${topic} · ${gameFormatLabel(session.preset.format)} · ${gameDifficultyLabel(session.preset.difficulty)}`;
-  const title = new TextContainerProperty({
-    containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
-    xPosition: 16, yPosition: 72, width: SCREEN_W - 32, height: 56,
-    borderWidth: 0, paddingLength: 4, content: headline, isEventCapture: 0,
-  });
-  const body = new TextContainerProperty({
-    containerID: CONTAINER.gameBody, containerName: NAME.gameBody,
-    xPosition: 16, yPosition: 140, width: SCREEN_W - 32, height: 80,
-    borderWidth: 0, paddingLength: 4, content: clip(sub, 200), isEventCapture: 0,
-  });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.gameHint, containerName: NAME.gameHint,
-    xPosition: 16, yPosition: 252, width: SCREEN_W - 32, height: 28,
-    borderWidth: 0, paddingLength: 4, content: 'Tap to return to games', isEventCapture: 0,
-  });
-  const sink = new ListContainerProperty({
-    containerID: CONTAINER.gameList, containerName: NAME.gameList,
-    xPosition: 0, yPosition: SCREEN_H - 1, width: SCREEN_W, height: 1,
-    borderWidth: 0, paddingLength: 0,
-    itemContainer: new ListItemContainerProperty({
-      itemCount: 1, itemWidth: SCREEN_W, isItemSelectBorderEn: 0, itemName: [' '],
-    }),
-    isEventCapture: 1,
-  });
+  const sub = `${gameFormatLabel(session.preset.format)} · ${gameDifficultyLabel(session.preset.difficulty)}`;
+  const textObject = makeAnswerSections(questionCaption(flowProse(topic)), `${headline}\n\n${sub}`);
   return new RebuildPageContainer({
-    containerTotalNum: totalContainers([sink], [title, body, hint]),
-    listObject: [sink],
-    textObject: [title, body, hint],
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
 }
 
 /** Clear per-session HUD state so a fresh session doesn't inherit stale buffers. */
 export function resetHudSessionState(): void {
+  midSummaryQuestion = '';
+  teleprompterQuestion = '';
+  activeAnswerCaption = undefined;
   clearLensStreamingHeading();
   streamingPreviewVisible = false;
   menuPersona = null;
@@ -2484,6 +2613,7 @@ export function resetHudSessionState(): void {
   wearerSpeakState = 'recording';
   pendingMenuSpinnerFrame = '';
   pendingStatusFrame = '';
+  cornerStatusWidth = 1;
   recordingDotEligible = true;
   autoModeIndicator = false;
   // Cancel any pending hint / badge flashes so their 2.5s callbacks can't
@@ -2638,24 +2768,9 @@ function buildTranslationTeleprompterPage(
     extended?.sourceRomanized ?? starter.sourceRomanized,
   );
   const translatedText = extended?.translated || starter.translated || '';
-  const body = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason, xPosition: 16, yPosition: 4,
-    width: SCREEN_W - 32, height: 180, borderWidth: 0, paddingLength: 4,
-    content: sourceText, isEventCapture: 1,
-  });
-  const translation = new TextContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList, xPosition: 16, yPosition: 188,
-    width: SCREEN_W - 32, height: 68, borderWidth: 0, paddingLength: 4,
-    content: translatedText, isEventCapture: 0,
-  });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.activeHint, containerName: NAME.activeHint, xPosition: 16, yPosition: 260,
-    width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
-    content: 'Tap: menu · Double-tap: re-analyze',
-    isEventCapture: 0,
-  });
+  const question = questionCaption(flowProse(translatedText) || 'Reply');
   const listObject: ListContainerProperty[] = [];
-  const textObject = [body, translation, hint];
+  const textObject = makeAnswerSections(question, capContent(flowProse(sourceText), PAGE_CONTENT_CAP));
   return new RebuildPageContainer({
     containerTotalNum: totalContainers(listObject, textObject),
     listObject,
@@ -2668,6 +2783,7 @@ export async function showTranslationTeleprompterPage(
 ): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showTranslationTeleprompterPage().');
   activeTranslationStarter = starter;
+  teleprompterQuestion = questionCaption(flowProse(starter.translated) || 'Reply');
   recordingDotEligible = true;
   const ok = await getBridge().rebuildPageContainer(buildTranslationTeleprompterPage(starter, null));
   if (!ok) throw new Error('rebuildPageContainer (translation-teleprompter) failed.');
@@ -2683,8 +2799,17 @@ export async function updateTranslationTeleprompterExtended(
 ): Promise<void> {
   if (currentPage !== 'translation-teleprompter') return;
   if (!activeTranslationStarter) return;
-  await upgradeText(CONTAINER.reason, NAME.reason, withRomanized(extendedSource, extendedSourceRomanized));
-  await upgradeText(CONTAINER.activeList, NAME.activeList, extendedTranslated);
+  const question = questionCaption(flowProse(extendedTranslated) || 'Reply');
+  if (questionAnswerGeometry(question).height !== questionAnswerGeometry(teleprompterQuestion).height) {
+    const ok = await getBridge().rebuildPageContainer(buildTranslationTeleprompterPage(activeTranslationStarter, {
+      source: extendedSource, translated: extendedTranslated, sourceRomanized: extendedSourceRomanized,
+    }));
+    if (!ok) throw new Error('rebuildPageContainer (extended translation) failed.');
+  } else {
+    await upgradeText(CONTAINER.claim, NAME.claim, question, 2);
+    await upgradeText(CONTAINER.reason, NAME.reason, flowProse(withRomanized(extendedSource, extendedSourceRomanized)));
+  }
+  teleprompterQuestion = question;
 }
 
 /** Read the currently-active starter (the one the wearer picked + landed on
@@ -2772,13 +2897,14 @@ export async function updateTranslationWearerSpeakResult(
 ): Promise<void> {
   if (currentPage !== 'translation-wearer-speak') return;
   wearerSpeakState = 'result';
-  await upgradeText(
-    CONTAINER.reason,
-    NAME.reason,
-    withRomanized(translated || '(no speech detected)', translatedRomanized),
+  const textObject = makeAnswerSections(
+    questionCaption(flowProse(spoken) || 'Translate'),
+    capContent(flowProse(withRomanized(translated || '(no speech detected)', translatedRomanized)), PAGE_CONTENT_CAP),
   );
-  await upgradeText(CONTAINER.activeList, NAME.activeList, spoken || '');
-  await upgradeText(CONTAINER.activeHint, NAME.activeHint, 'Tap: menu · Double-tap: speak again');
+  const ok = await getBridge().rebuildPageContainer(new RebuildPageContainer({
+    containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
+  }));
+  if (!ok) throw new Error('rebuildPageContainer (spoken translation) failed.');
 }
 
 export function _resetHudBootstrapForTesting(): void {

@@ -16,6 +16,7 @@ import {
   loadSettings,
   pushDebugEvent,
   pushHistoryEntry,
+  updateHistoryEntry,
   saveAutoSummaryEnabled,
   saveBufferDuration,
   saveMicSource,
@@ -91,11 +92,7 @@ describe('pushHistoryEntry', () => {
 describe('persistHistory trim semantics', () => {
   it('keeps the persisted JSON under HISTORY_BYTE_BUDGET when overflowing', async () => {
     const ls = fakeLocalStorage();
-    for (let i = 0; i < 400; i++) {
-      pushHistoryEntry(fatEntry(i), ls.set);
-    }
-    // Allow the chained async persistHistory calls to settle.
-    for (let i = 0; i < 20; i++) await Promise.resolve();
+    await Promise.all(Array.from({ length: 400 }, (_, i) => pushHistoryEntry(fatEntry(i), ls.set)));
     const raw = ls.data.get('veritaslens.history') ?? '[]';
     expect(raw.length).toBeLessThanOrEqual(HISTORY_BYTE_BUDGET);
     const parsed = JSON.parse(raw) as HistoryEntry[];
@@ -178,7 +175,7 @@ describe('clearSessionHistory', () => {
   it('empties the in-memory history and persists []', async () => {
     const ls = fakeLocalStorage();
     pushHistoryEntry(fatEntry(0), ls.set);
-    clearSessionHistory(ls.set);
+    await clearSessionHistory(ls.set);
     expect(sessionHistory()).toEqual([]);
     await Promise.resolve();
     expect(ls.data.get('veritaslens.history')).toBe('[]');
@@ -445,5 +442,25 @@ describe('pushHistoryEntry — in-memory cap', () => {
     expect(sessionHistory().length).toBeLessThanOrEqual(500);
     // Newest entry must survive trimming.
     expect(sessionHistory().at(-1)!.question).toContain('claim 1999');
+  });
+});
+
+describe('conversation review persistence', () => {
+  it('does not drop an analysis appended while a pin is being persisted', async () => {
+    const ls = fakeLocalStorage();
+    const id = await pushHistoryEntry(fatEntry(1), ls.set);
+    let release!: () => void;
+    const slowWrite = async (key: string, value: string) => { await new Promise<void>(resolve => { release = resolve; }); return ls.set(key, value); };
+    const pin = updateHistoryEntry(id, { pinned: true }, slowWrite);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const append = pushHistoryEntry(fatEntry(2), ls.set);
+    release(); await Promise.all([pin, append]);
+    expect(sessionHistory()).toHaveLength(2); expect(sessionHistory()[0].pinned).toBe(true);
+    await loadHistory(ls.get); expect(sessionHistory()).toHaveLength(2); expect(sessionHistory()[0].pinned).toBe(true);
+  });
+  it('reports and rolls back a failed review edit', async () => {
+    const id = await pushHistoryEntry(fatEntry(1));
+    await expect(updateHistoryEntry(id, { pinned: true }, async () => false)).rejects.toThrow('Could not save');
+    expect(sessionHistory()[0].pinned).toBeUndefined();
   });
 });

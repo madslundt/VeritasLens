@@ -13,7 +13,7 @@ export const MAX_QUOTE_CHARS = 140;
 export const CONFIDENCE_SCHEMA_PROP = {
   type: 'string',
   enum: ['HIGH', 'MED', 'LOW'],
-  description: "Model self-rated certainty: HIGH = verbatim & verifiable, MED = mostly sure, LOW = inference / unclear audio.",
+  description: "Certainty that the speech was understood and this lens output is supported: HIGH = clear speech and strong support, MED = reasonable support, LOW = unclear speech or weak support.",
 } as const;
 
 /**
@@ -24,10 +24,19 @@ export const CONFIDENCE_SCHEMA_PROP = {
  */
 export const CONFIDENCE_PROMPT_RULES =
   'For each claim, set `confidence` to one of "HIGH", "MED", "LOW". ' +
-  'Use HIGH only when the claim is verbatim from the audio AND verifiable. ' +
-  'Use LOW when the claim depends on inference, unclear audio, or weak evidence. ' +
-  'If `confidence` would be LOW and a verdict-style field would be FALSE / SUSPICIOUS / BIASED, ' +
-  'prefer the neutral verdict (UNVERIFIED / PLAUSIBLE / NEUTRAL) — never accuse on low confidence.';
+  'Rate both your understanding of the speech and the support for your output. ' +
+  'HIGH requires clear speech and strong support appropriate to this lens: reliable evidence for factual answers, ' +
+  'faithful meaning for explanations, or identifiable wording and reasoning for interpretive judgments. ' +
+  'A verbatim quote alone does not verify an answer or a judgment. Use MED for reasonable but incomplete support ' +
+  'and LOW for unclear speech, ambiguous interpretation, or weak evidence. ' +
+  'For LOW confidence, use UNVERIFIED for fact verdicts, NEUTRAL for framing, and "None detected" for fallacies; ' +
+  'leave corrections, counterFrame, and callOut empty. Never accuse on low confidence.';
+
+/** Speech can be clear while offering nothing this particular lens should output. */
+export const LENS_FOCUS_RULES =
+  'Stay within this lens\'s task. Prefer one or two useful items; the maximum is a ceiling, not a target. ' +
+  'If clear speech contains no suitable content for this lens, return {"noSpeech":false,"claims":[]}. ' +
+  'Use noSpeech=true only when no clear human speech is detected. Never invent an item to fill the schema.';
 
 /**
  * Coerce an unknown JSON value into the ClaimConfidence enum. Returns
@@ -79,6 +88,10 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+export class NoRelevantContentError extends Error {
+  constructor() { super('No relevant content for this lens.'); this.name = 'NoRelevantContentError'; }
+}
+
 export class NoSpeechError extends Error {
   constructor() { super('No clear human speech detected.'); this.name = 'NoSpeechError'; }
 }
@@ -95,7 +108,7 @@ export function formatRelativeTime(ts: number): string {
 /**
  * Parse a JSON object from a Gemini text response.
  * Falls back to fenced-JSON extraction if the response has extra prose.
- * Throws NoSpeechError if the model signals no speech was detected.
+ * Throws NoSpeechError for no speech, or NoRelevantContentError for empty claims.
  */
 export function parseJsonResponse(text: string): Record<string, unknown> {
   let raw: unknown;
@@ -108,5 +121,6 @@ export function parseJsonResponse(text: string): Record<string, unknown> {
   }
   if (!isRecord(raw)) throw new Error('Gemini response was not a JSON object.');
   if (raw['noSpeech'] === true) throw new NoSpeechError();
+  if (Array.isArray(raw['claims']) && raw['claims'].length === 0) throw new NoRelevantContentError();
   return raw;
 }

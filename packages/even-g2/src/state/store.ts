@@ -1,3 +1,5 @@
+import { CONVERSATION_KEY, DEFAULT_CONVERSATION, normalizeConversationPreferences, parseAssistanceResponse } from '@veritaslens/core';
+import type { ConversationPreferences } from '@veritaslens/core';
 // src/state/store.ts
 import { createSignal } from 'solid-js';
 import type { DeviceStatus } from '@evenrealities/even_hub_sdk';
@@ -215,7 +217,12 @@ export const [meetingPrepSections, setMeetingPrepSectionsSignal] = createSignal<
 export const [meetingPrepWebGrounding, setMeetingPrepWebGroundingSignal] = createSignal<boolean>(false);
 export const [gamePresets, setGamePresetsSignal] = createSignal<GamePreset[]>([]);
 
+export const [recordingPaused, setRecordingPaused] = createSignal(false);
+export const [liveCaptionText, setLiveCaptionText] = createSignal('');
+export const [liveCaptionStatus, setLiveCaptionStatus] = createSignal('');
+
 const [settings, setSettings] = createSignal<Settings>({
+  conversation: DEFAULT_CONVERSATION,
   provider: DEFAULT_LLM_PROVIDER,
   geminiApiKey: '',
   geminiModel: DEFAULT_GEMINI_MODEL,
@@ -398,6 +405,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     if (value) openaiTranscribeModels[url] = value;
   }
   setSettings({
+    conversation: normalizeConversationPreferences(await safeGet(CONVERSATION_KEY)),
     provider: coerceProvider(rawProvider),
     geminiApiKey: key,
     geminiModel: coerceModel(rawModel),
@@ -822,6 +830,10 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
       migratedResult = { quote: '', ...r, title: existingTitle.length > 0 ? existingTitle : 'Summary of conversation' };
       break;
     }
+    case 'assistance':
+      if (!['respond', 'repair', 'catch-up', 'commitments', 'refine'].includes(String(r['action']))) return null;
+      try { migratedResult = parseAssistanceResponse(JSON.stringify({ ...r, useful: true }), String(r['action']) as import('@veritaslens/core').AssistanceAction) as unknown as Record<string, unknown>; } catch { return null; }
+      break;
     case 'meeting-prep':
       // No legacy shape exists for meeting-prep; require the claims array.
       if (!Array.isArray(r['claims'])) return null;
@@ -865,18 +877,25 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
     badge: String(e['badge'] ?? ''),
     quote: typeof e['quote'] === 'string' ? e['quote'] : '',
     result: migratedResult as HistoryEntry['result'],
+    ...(e['pinned'] === true ? { pinned: true } : {}),
+    ...(e['feedback'] === 'useful' || e['feedback'] === 'not-useful' ? { feedback: e['feedback'] } : {}),
     ...(persistedTags ? { tags: persistedTags } : {}),
     ...(persistedGrounding ? { groundingMode: persistedGrounding } : {}),
     ...(persistedCitations.length > 0 ? { webCitations: persistedCitations } : {}),
   };
 }
 
+let historyWriteChain: Promise<void> = Promise.resolve();
 async function persistHistory(
   setLs: (k: string, v: string) => Promise<boolean>,
   entries: HistoryEntry[]
 ): Promise<void> {
   const json = serializeHistory(entries, { byteBudget: 400 * 1024, maxEntries: 500 });
-  await setLs(HISTORY_KEY, json);
+  const write = historyWriteChain.then(async () => {
+    if (!await setLs(HISTORY_KEY, json)) throw new Error('Could not save conversation history.');
+  });
+  historyWriteChain = write.catch(() => undefined);
+  await write;
 }
 
 /**
@@ -921,9 +940,9 @@ export async function pushHistoryEntries(
   return fresh.map((e) => e.id);
 }
 
-export function clearSessionHistory(setLs?: (k: string, v: string) => Promise<boolean>): void {
+export async function clearSessionHistory(setLs?: (k: string, v: string) => Promise<boolean>): Promise<void> {
   setSessionHistory([]);
-  if (setLs) void setLs(HISTORY_KEY, '[]');
+  if (setLs) await persistHistory(setLs, []);
 }
 
 /**
@@ -1265,4 +1284,18 @@ export function pushDebugEvent(entry: Omit<DebugEvent, 'ts'>): void {
 
 export function clearDebugEvents(): void {
   setDebugEvents([]);
+}
+
+export async function saveConversationPreferences(setLs: SetLs, value: ConversationPreferences): Promise<boolean> {
+  const conversation = normalizeConversationPreferences(value);
+  const ok = await setLs(CONVERSATION_KEY, JSON.stringify(conversation));
+  if (ok) setSettings(s => ({ ...s, conversation }));
+  return ok;
+}
+export async function updateHistoryEntry(id: string, patch: Partial<Pick<HistoryEntry, 'result' | 'pinned' | 'feedback'>>, setLs: SetLs): Promise<void> {
+  const previous = sessionHistory();
+  const next = previous.map(e => e.id === id ? { ...e, ...patch } : e);
+  setSessionHistory(next);
+  try { await persistHistory(setLs, next); }
+  catch (error) { if (sessionHistory() === next) setSessionHistory(previous); throw error; }
 }

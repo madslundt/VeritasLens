@@ -8,6 +8,7 @@ import type { LensResult } from '../types';
  */
 export function toSpeech(result: LensResult): string {
   switch (result.type) {
+    case 'assistance': return result.headline;
     case 'fact-check': {
       const total = result.claims.length;
       const trueCount = result.claims.filter((c) => c.verdict === 'TRUE').length;

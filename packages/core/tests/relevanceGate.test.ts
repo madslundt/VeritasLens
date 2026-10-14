@@ -80,10 +80,10 @@ describe('relevanceGate.shouldAnalyze — fact-checker', () => {
     expect(shouldAnalyze([seg('it was the largest in the world')], 'fact-checker')).toBe(true);
   });
 
-  it('chitchat with no checkable content → suppress', () => {
+  it('chitchat with no checkable content reaches the lens for a semantic relevance decision', () => {
     expect(
       shouldAnalyze([seg('I really like your shoes'), seg('they look comfortable')], 'fact-checker'),
-    ).toBe(false);
+    ).toBe(true);
   });
 });
 
@@ -96,8 +96,8 @@ describe('relevanceGate.shouldAnalyze — trivia', () => {
     expect(shouldAnalyze([seg('is that really true?')], 'trivia')).toBe(true);
   });
 
-  it('no question → suppress', () => {
-    expect(shouldAnalyze([seg('I went for a walk earlier')], 'trivia')).toBe(false);
+  it('no question reaches the lens for a semantic relevance decision', () => {
+    expect(shouldAnalyze([seg('I went for a walk earlier')], 'trivia')).toBe(true);
   });
 });
 
@@ -108,8 +108,8 @@ describe('relevanceGate.shouldAnalyze — key-questions', () => {
     expect(shouldAnalyze([seg('the plan is to ship before March')], 'key-questions')).toBe(true);
   });
 
-  it('chitchat → suppress', () => {
-    expect(shouldAnalyze([seg('the coffee here is fine')], 'key-questions')).toBe(false);
+  it('chitchat reaches the lens for a semantic relevance decision', () => {
+    expect(shouldAnalyze([seg('the coffee here is fine')], 'key-questions')).toBe(true);
   });
 });
 
@@ -122,8 +122,8 @@ describe('relevanceGate.shouldAnalyze — eli5', () => {
     expect(shouldAnalyze([seg('the implementation has heavy parallelization')], 'eli5')).toBe(true);
   });
 
-  it('plain conversation → suppress', () => {
-    expect(shouldAnalyze([seg('I made pancakes for breakfast')], 'eli5')).toBe(false);
+  it('plain conversation reaches the lens for a semantic relevance decision', () => {
+    expect(shouldAnalyze([seg('I made pancakes for breakfast')], 'eli5')).toBe(true);
   });
 });
 
@@ -133,8 +133,8 @@ describe('relevanceGate.shouldAnalyze — logical-fallacy', () => {
     expect(shouldAnalyze([seg('if we cut the budget then everything breaks')], 'logical-fallacy')).toBe(true);
   });
 
-  it('measured statement → suppress', () => {
-    expect(shouldAnalyze([seg('that seems reasonable to me')], 'logical-fallacy')).toBe(false);
+  it('measured statement reaches the lens for a semantic relevance decision', () => {
+    expect(shouldAnalyze([seg('that seems reasonable to me')], 'logical-fallacy')).toBe(true);
   });
 });
 
@@ -144,8 +144,8 @@ describe('relevanceGate.shouldAnalyze — bias-detector', () => {
     expect(shouldAnalyze([seg('the left wants to ban everything')], 'bias-detector')).toBe(true);
   });
 
-  it('neutral content → suppress', () => {
-    expect(shouldAnalyze([seg('I think the weather is changing')], 'bias-detector')).toBe(false);
+  it('neutral content reaches the lens for a semantic relevance decision', () => {
+    expect(shouldAnalyze([seg('I think the weather is changing')], 'bias-detector')).toBe(true);
   });
 });
 
@@ -171,5 +171,33 @@ describe('relevanceGate.shouldAnalyze — tail window size', () => {
   it('tail of exactly GATE_TAIL_SEGMENTS works regardless of size', () => {
     const tail = Array.from({ length: GATE_TAIL_SEGMENTS }, () => seg('okay'));
     expect(shouldAnalyze(tail, 'auto')).toBe(false);
+  });
+});
+
+
+describe('relevanceGate — meaningful speech missed by keyword heuristics', () => {
+  it.each([
+    ['fact-checker', 'Dolphins are mammals'],
+    ['fact-checker', 'Mars has two moons'],
+    ['trivia', 'Name the capital of Peru'],
+    ['eli5', 'Explain compound interest'],
+    ['eli5', 'what does api mean'],
+    ['logical-fallacy', 'Her proposal fails because she dresses badly'],
+    ['bias-detector', 'The parasites running this company'],
+    ['devils-advocate', 'We should close the library to save money'],
+    ['key-questions', 'The launch date moved to Monday'],
+    ['fact-checker', 'Jorden har en maane'],
+    ['trivia', '42'],
+  ])('%s passes: %s', (lens, text) => {
+    expect(shouldAnalyze([seg(text)], lens)).toBe(true);
+  });
+
+  it.each(['translation', 'meeting-prep'])('%s receives acknowledgments too', (lens) => {
+    expect(shouldAnalyze([seg('no')], lens)).toBe(true);
+    expect(shouldAnalyze([seg('thank you')], lens)).toBe(true);
+  });
+
+  it.each(['auto', 'fact-checker', 'trivia', 'eli5', 'logical-fallacy', 'bias-detector', 'devils-advocate', 'key-questions', 'companion'])('%s still suppresses filler', (lens) => {
+    expect(shouldAnalyze([seg('mm-hmm'), seg('okay')], lens)).toBe(false);
   });
 });

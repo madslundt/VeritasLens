@@ -21,9 +21,10 @@ The wearer is listening to someone else speak in a foreign language. From the au
 
 1. Detect the language being spoken and return it as \`sourceLanguage\` (BCP-47 short code like "es", "fr", "de", or "unknown" if you cannot tell).
 2. Transcribe the most recent meaningful utterance verbatim in the ORIGINAL language as \`sourceText\` (≤200 chars; if the audio is longer, take the latest complete thought).
+Preserve names, numbers, negation, uncertainty, and social register. Translate what was actually said without answering it, adding explanation, or completing unclear fragments.
 3. Provide a natural translation of \`sourceText\` into the wearer's display language as \`translatedText\`.`;
 
-const CONVERSE_STARTERS_CLAUSE = `4. Suggest EXACTLY 3 short reply starters the wearer could say back, each ≤10 words. Vary the intent across the 3 — for example: a direct/affirmative reply, a follow-up question, and an empathetic or acknowledging line. Match the social register implied by the conversation (formal at a café or interview, casual with a friend). Each starter object has:
+const CONVERSE_STARTERS_CLAUSE = `4. Suggest EXACTLY 3 short reply starters the wearer could say back, each ≤10 words. Vary the intent across the 3 — for example: a direct/affirmative reply, a follow-up question, and an empathetic or acknowledging line. Match the social register implied by the conversation (formal at a café or interview, casual with a friend). Do not invent personal details, preferences, promises, or commitments for the wearer. Offer neutral options when their intent is unknown. Each starter object has:
    - \`source\`: starter in the SAME language as \`sourceText\` (what the wearer would say out loud).
    - \`translated\`: same starter rendered in the wearer's display language.`;
 
@@ -94,7 +95,9 @@ const CONVERSE_SCHEMA = {
     translatedText: { type: 'string', description: 'Natural translation into the wearer display language.' },
     replyStarters: {
       type: 'array',
-      minItems: 3,
+      // Silence and source-language filtering must allow the empty path.
+      // The prompt still requests exactly three starters for a translation.
+      minItems: 0,
       maxItems: 3,
       items: STARTER_ITEM_SCHEMA,
     },

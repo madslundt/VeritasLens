@@ -1,3 +1,5 @@
+import { ConversationPanel, ConversationReview } from './ConversationPanel';
+import { resultText } from '@veritaslens/core';
 // src/views/SettingsView.tsx
 import { createEffect, createMemo, createSignal, For, Index, Match, on, onCleanup, Show, Switch, untrack, type Component } from 'solid-js';
 import {
@@ -73,6 +75,7 @@ import { ApiKeyInput, SettingsIcon, lensDescription } from '@/views/SettingsUi';
 import { isHudRunning, providerConfigurationError, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import { probeAndCacheLocation, probeLocation } from '@/runtime/location';
 import {
+  preparedConversationSections,
   resolveProviderGrounding,
   resolveSearchFallback,
   fetchAvailableModels,
@@ -264,6 +267,7 @@ function badgeClass(badge: string): string {
 // same utterance) — otherwise the question text would appear twice.
 function formatResultText(result: LensResult): string {
   switch (result.type) {
+    case 'assistance': return resultText(result);
     case 'fact-check': {
       return result.claims.map((c, i) => {
         const icon = c.verdict === 'TRUE' ? '✓' : c.verdict === 'FALSE' ? '✗' : '?';
@@ -863,10 +867,12 @@ export const SettingsView: Component = () => {
   };
   const anyTestRunning = (): boolean =>
     mainTest().state === 'running' || autoTest().state === 'running';
-  type SettingsTab = 'lenses' | 'history' | 'settings' | 'llm';
-  const [activeTab, setActiveTab] = createSignal<SettingsTab>('lenses');
+  type SettingsTab = 'session' | 'lenses' | 'games' | 'history' | 'settings' | 'llm';
+  const [activeTab, setActiveTab] = createSignal<SettingsTab>('session');
   const pageCopy = {
-    lenses: { title: 'Your lenses', description: 'Choose a lens on your glasses. Double-tap to analyze.' },
+    session: { title: 'Your conversation', description: 'Choose your situation, then ask for the help you need.' },
+    lenses: { title: 'Lenses', description: 'Choose a tool for a particular moment, or configure its behavior.' },
+    games: { title: 'Games', description: 'Quizzes, true-or-false rounds, and riddles for your glasses.' },
     history: { title: 'History', description: 'A second look at the conversation.' },
     settings: { title: 'Settings', description: 'Fine-tune your listening experience.' },
     llm: { title: 'AI setup', description: 'Bring your provider. Make it yours.' },
@@ -875,13 +881,15 @@ export const SettingsView: Component = () => {
     setActiveTab(tab);
     window.scrollTo({ top: 0, behavior: 'instant' });
   };
+  const [lensCategory, setLensCategory] = createSignal<'conversation' | 'knowledge' | 'arguments'>('conversation');
+  const lensCategories = [
+    { id: 'conversation' as const, label: 'Conversation', ids: ['auto', 'respond', 'translation', MEETING_PREP_ID] },
+    { id: 'knowledge' as const, label: 'Knowledge', ids: ['eli5', 'fact-checker', 'trivia', 'companion'] },
+    { id: 'arguments' as const, label: 'Arguments', ids: ['key-questions', 'logical-fallacy', 'bias-detector', 'devils-advocate'] },
+  ];
   const lensRows = createMemo(() => {
-    const primary = ['auto', 'translation', MEETING_PREP_ID];
-    const all = personas();
-    return [
-      ...primary.flatMap((id) => all.filter((p) => p.id === id)),
-      ...all.filter((p) => !primary.includes(p.id)),
-    ];
+    const ids = lensCategories.find(category => category.id === lensCategory())!.ids;
+    return ids.flatMap(id => personas().filter(p => p.id === id));
   });
   const providerHint = createMemo(() => {
     if (draftProvider() === 'gemini') return 'Understands audio directly. Supports web search.';
@@ -927,7 +935,7 @@ export const SettingsView: Component = () => {
     cancelDelete();
     setSelectedSessionId(null);
     setExpandedEntryId(null);
-    clearSessionHistory(getSetLs());
+    await clearSessionHistory(getSetLs());
     await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
   };
 
@@ -1112,7 +1120,7 @@ export const SettingsView: Component = () => {
   );
   /** Whether anything at all is configured — gates the empty/ok badge style. */
   const prepConfigured = createMemo(
-    () => prepGeneralSet() || prepAttachmentCount() > 0,
+    () => preparedConversationSections(prepDraft(), settings().conversation).some(section => section.body.trim()),
   );
   /** Short label shown on the lens row badge. */
   const prepBadgeText = createMemo(() => {
@@ -1122,7 +1130,7 @@ export const SettingsView: Component = () => {
     if (prepAttachmentCount() > 0) {
       parts.push(`${prepAttachmentCount()} attachment${prepAttachmentCount() === 1 ? '' : 's'}`);
     }
-    return parts.join(' · ');
+    return parts.join(' · ') || 'Session setup';
   });
   /** Reactive view onto just the attachments (rows 1+) for the Index loop. */
   const prepAttachments = createMemo(() => prepDraft().slice(1));
@@ -1570,14 +1578,14 @@ export const SettingsView: Component = () => {
           <span class={`history-icon ${badgeClass(entry.badge)}`}>{badgeIcon(entry.badge)}</span>
           <span class="history-time">{formatTime(entry.timestamp)}</span>
           <Show when={entry.result.autoSelected && entry.lensName}>
-            <span class="history-lens">Auto → {entry.lensName}</span>
+            <span class="history-lens">Best next help → {entry.lensName}</span>
           </Show>
           <span class="history-q">{entry.question}</span>
         </button>
         <Show when={expandedEntryId() === entry.id}>
           <div class="history-detail">
             <Show when={entry.result.autoSelected && entry.lensName}>
-              <p class="history-detail-lens">Auto → {entry.lensName}</p>
+              <p class="history-detail-lens">Best next help → {entry.lensName}</p>
             </Show>
             <p class="history-detail-question">{entry.question}</p>
             <pre>{formatResultText(entry.result)}</pre>
@@ -1587,6 +1595,7 @@ export const SettingsView: Component = () => {
     );
     return (
       <div class="session-detail">
+        <ConversationReview entries={selectedSessionEntries()} />
         <div class="field-header">
           <button type="button" class="link-button" onClick={() => { setSelectedSessionId(null); setExpandedEntryId(null); }}>
             ← Back
@@ -1778,9 +1787,8 @@ export const SettingsView: Component = () => {
         <p>{pageCopy[activeTab()].description}</p>
       </div>
 
-      <div class="tab-content" id="settings-panel" role="tabpanel" aria-labelledby={`tab-${activeTab()}`}>
-      <Show when={activeTab() === 'lenses'}>
-        <>
+      <div class="tab-content" id="settings-panel" role="tabpanel" aria-labelledby={`tab-${activeTab() === 'games' ? 'lenses' : activeTab()}`}>
+      <Show when={activeTab() === 'session'}>
           <Show when={providerConfigurationError(settings()) !== null}>
             <section class="setup-prompt" aria-label="Connect your AI">
               <div class="setup-prompt-copy">
@@ -1793,17 +1801,22 @@ export const SettingsView: Component = () => {
             </section>
           </Show>
 
+      </Show>
+      <div hidden={activeTab() !== 'session'}><ConversationPanel /></div>
+      <Show when={activeTab() === 'lenses'}>
+        <>
+          <div class="lens-category-nav" role="group" aria-label="Lens categories">
+            <For each={lensCategories}>{category => <button type="button" class="secondary" aria-pressed={lensCategory() === category.id} onClick={() => setLensCategory(category.id)}>{category.label}</button>}</For>
+            <button type="button" class="secondary" onClick={() => changeTab('games')}>Games →</button>
+          </div>
           <section class="lenses-card lens-catalog">
             <div class="field-header">
-              <h2>Everyday lenses</h2>
+              <h2>{lensCategories.find(c => c.id === lensCategory())!.label} tools</h2>
             </div>
             <ul class="lens-list">
               <For each={lensRows()}>
-                {(p, index) => (
+                {(p) => (
                   <>
-                  <Show when={index() === 3}>
-                    <li class="lens-group-heading"><h2>Specialized lenses</h2></li>
-                  </Show>
                   <Switch
                     fallback={
                       <li class="lens-row lens-row--catalog">
@@ -1854,7 +1867,7 @@ export const SettingsView: Component = () => {
                         <Show when={autoConfigExpanded()}>
                           <div class="meeting-prep-inline">
                             <p class="field-hint">
-                              Toggle which lenses Auto mode can choose from.
+                              Toggle which lenses Hands-free mode can choose from.
                             </p>
                             <ul class="meeting-prep-list">
                               <For each={autoLensItems()}>
@@ -1925,7 +1938,7 @@ export const SettingsView: Component = () => {
                                 languages so you can hold up your end of a conversation;
                                 <strong> Listen-in</strong> drops the starters so you just see what's
                                 being said (cheaper request and a less crowded HUD). Tip: enable
-                                Auto mode in Settings for hands-free continuous translation.
+                                Hands-free mode in Settings for hands-free continuous translation.
                               </span>
                               <label class="toggle-row" style="margin-top: 8px;">
                                 <input
@@ -2194,6 +2207,12 @@ export const SettingsView: Component = () => {
             </ul>
           </section>
 
+
+        </>
+      </Show>
+
+      <Show when={activeTab() === 'games'}>
+        <button type="button" class="link-button" onClick={() => changeTab('lenses')}>← Back to lenses</button>
           <section class="lenses-card">
             <div class="field-header">
               <h2>Games</h2>
@@ -2295,7 +2314,6 @@ export const SettingsView: Component = () => {
               {renderGameEditor()}
             </Show>
           </section>
-        </>
       </Show>
 
       <Show when={activeTab() === 'llm'}>
@@ -2817,7 +2835,7 @@ export const SettingsView: Component = () => {
                   checked={draftAutoMode()}
                   onChange={(e) => setDraftAutoMode(e.currentTarget.checked)}
                 />
-                <span>Auto mode</span>
+                <span>Hands-free mode</span>
               </label>
 
               <span class="field-hint">
@@ -3141,6 +3159,7 @@ export const SettingsView: Component = () => {
             every platform.
           */}
           <For each={[
+            { id: 'session' as const, label: 'Session', dirty: (): boolean => false, icon: 'companion' },
             { id: 'lenses' as const, label: 'Lenses', dirty: lensDirty, icon: 'lens' },
             { id: 'history' as const, label: 'History', dirty: (): boolean => false, icon: 'history' },
             { id: 'settings' as const, label: 'Settings', dirty: appDirty, icon: 'settings' },
@@ -3151,14 +3170,14 @@ export const SettingsView: Component = () => {
                 type="button"
                 role="tab"
                 class="bottom-nav-btn"
-                classList={{ active: activeTab() === t.id }}
-                aria-selected={activeTab() === t.id}
+                classList={{ active: (activeTab() === t.id || (activeTab() === 'games' && t.id === 'lenses')) }}
+                aria-selected={(activeTab() === t.id || (activeTab() === 'games' && t.id === 'lenses'))}
                 id={`tab-${t.id}`}
                 aria-controls="settings-panel"
-                tabIndex={activeTab() === t.id ? 0 : -1}
+                tabIndex={(activeTab() === t.id || (activeTab() === 'games' && t.id === 'lenses')) ? 0 : -1}
                 onClick={() => changeTab(t.id)}
                 onKeyDown={(e) => {
-                  const tabs: SettingsTab[] = ['lenses', 'history', 'settings', 'llm'];
+                  const tabs: SettingsTab[] = ['session', 'lenses', 'history', 'settings', 'llm'];
                   const index = tabs.indexOf(t.id);
                   const next = e.key === 'ArrowRight' ? tabs[(index + 1) % tabs.length]
                     : e.key === 'ArrowLeft' ? tabs[(index + tabs.length - 1) % tabs.length]

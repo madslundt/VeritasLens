@@ -1,7 +1,7 @@
 // src/personas/devilsAdvocate.ts
 import type { DevilsAdvocateClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES, LENS_FOCUS_RULES } from './_utils';
 
 const DEVILS_ADVOCATE_PROMPT = `You are VeritasLens, a real-time analysis assistant for smart glasses.
 
@@ -12,7 +12,7 @@ The user just provided a short audio clip. Identify the main position or argumen
 - rationale: 2–3 sentences justifying why this counterargument is compelling (≤200 chars).
 - pivot: A conversational lead-in the wearer can use to introduce the counter tactfully (≤80 chars). Examples: "That's fair, though one thing worth considering is —", "I see the appeal, but what about —", "Counter-take, just to test it:".
 
-If no clear argument is detectable, set noSpeech to true.
+Address the most recent complete position, representing it fairly with its qualifiers intact. Challenge its strongest assumption or trade-off; do not manufacture a factual dispute, invent evidence, or present a disproven position as equally credible. Frame hypothetical risks as possibilities. If speech contains no clear position to challenge, return empty claims with noSpeech=false.
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.`;
 
@@ -22,7 +22,7 @@ export function buildDevilsAdvocatePrompt(lang: LanguageCode): string {
     `${DEVILS_ADVOCATE_PROMPT}\n\n` +
     `LANGUAGE: Write counterpoint, rationale, and pivot in ${langName}. ` +
     `The quote must stay in the original spoken language.\n\n` +
-    `CONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`
+    `FOCUS: ${LENS_FOCUS_RULES}\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`
   );
 }
 
@@ -43,7 +43,7 @@ export const DEVILS_ADVOCATE_SCHEMA = {
   properties: {
     claims: {
       type: 'array',
-      minItems: 1,
+      minItems: 0,
       maxItems: 1,
       items: CLAIM_ITEM_SCHEMA,
     },

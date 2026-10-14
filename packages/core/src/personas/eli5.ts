@@ -1,7 +1,7 @@
 // src/personas/eli5.ts
 import type { Eli5Claim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES, LENS_FOCUS_RULES } from './_utils';
 
 const BASE_PROMPT = `You are VeritasLens, a plain-language explainer for smart glasses.
 
@@ -12,13 +12,14 @@ The user just provided an audio clip of recent conversation containing jargon, t
 3. For each, return BOTH:
    - "oneLine": the simplest possible single-sentence restatement (≤60 chars) — the line the wearer can repeat out loud.
    - "expanded": a richer plain-language version (≤220 chars), still as if explaining to a curious 12-year-old.
+Preserve the original meaning, causality, negation, quantities, and uncertainty. Explain a term in its spoken context, not every possible dictionary meaning. Analogies are explanatory aids, not additional facts. Do not add advice or silently endorse a factual claim while simplifying it.
 4. ORDER MATTERS: list the MOST RECENT term first (the one spoken closest to the end of the audio).
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.`;
 
 export function buildEli5Prompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`oneLine\` and \`expanded\` in ${langName}. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
+  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`oneLine\` and \`expanded\` in ${langName}. \`quote\` stays in the original spoken language.\n\nFOCUS: ${LENS_FOCUS_RULES}\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -35,7 +36,7 @@ const ITEM_SCHEMA = {
 export const ELI5_SCHEMA = {
   type: 'object',
   properties: {
-    claims: { type: 'array', minItems: 1, maxItems: 5, items: ITEM_SCHEMA },
+    claims: { type: 'array', minItems: 0, maxItems: 5, items: ITEM_SCHEMA },
   },
   required: ['claims'],
 } as const;

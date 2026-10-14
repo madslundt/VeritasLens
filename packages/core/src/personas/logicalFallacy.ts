@@ -1,13 +1,14 @@
 // src/personas/logicalFallacy.ts
 import type { FallacyClaim, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES, LENS_FOCUS_RULES } from './_utils';
 
 const BASE_PROMPT = `You are VeritasLens, a logical reasoning assistant for smart glasses.
 
 The user just provided an audio clip of recent conversation. Analyze it and:
 
 1. Identify the logical fallacies in the argument(s). Return up to FIVE distinct fallacies, but ONLY include one if you clearly understand the argument and the fallacy is genuinely present. Skip mid-sentences, unclear phrases, weak hunches, and arguments you don't fully understand — fewer high-confidence fallacies is always better than padding the list. ORDER MATTERS: list the MOST RECENT fallacy first (the one spoken closest to the end of the audio). If no fallacy is found, return a single claim with fallacy "None detected".
+A fallacy is a flaw in the link between premises and conclusion, not merely a false fact, disagreement, emotional wording, or a view you dislike. Identify that link before naming a fallacy. Legitimate expertise is not automatically an appeal-to-authority fallacy. When an understandable argument is sound, use "None detected" and leave callOut empty; when no argument is present, return empty claims.
 2. For each, name the fallacy precisely (e.g. "Strawman", "Ad Hominem", "False Dilemma", "Appeal to Authority").
 3. For each, include a short verbatim quote (≤140 chars) from the audio that contains the fallacy.
 4. For each, provide a brief explanation (max 160 characters) of why this is or is not a fallacy.
@@ -17,7 +18,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildLogicalFallacyPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`explanation\` and \`callOut\` in ${langName}. Keep \`fallacy\` as the English name. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
+  return `${BASE_PROMPT}\n\nLANGUAGE: Write each \`explanation\` and \`callOut\` in ${langName}. Keep \`fallacy\` as the English name. \`quote\` stays in the original spoken language.\n\nFOCUS: ${LENS_FOCUS_RULES}\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -35,7 +36,7 @@ const ITEM_SCHEMA = {
 export const LOGICAL_FALLACY_SCHEMA = {
   type: 'object',
   properties: {
-    claims: { type: 'array', minItems: 1, maxItems: 5, items: ITEM_SCHEMA },
+    claims: { type: 'array', minItems: 0, maxItems: 5, items: ITEM_SCHEMA },
   },
   required: ['claims'],
 } as const;
@@ -48,10 +49,10 @@ export function parseLogicalFallacyResponse(text: string): LensResult {
     const callOut = trimTo(typeof c['callOut'] === 'string' ? c['callOut'] : '', 80);
     const claim: FallacyClaim = {
       quote: coerceQuote(c['quote']),
-      fallacy: trimTo(typeof c['fallacy'] === 'string' ? c['fallacy'] : 'Unknown', 40),
+      fallacy: confidence === 'LOW' ? 'None detected' : trimTo(typeof c['fallacy'] === 'string' ? c['fallacy'] : 'Unknown', 40),
       explanation: trimTo(typeof c['explanation'] === 'string' ? c['explanation'] : '', 160),
     };
-    if (callOut) claim.callOut = callOut;
+    if (callOut && claim.fallacy !== 'None detected') claim.callOut = callOut;
     if (confidence) claim.confidence = confidence;
     return claim;
   });

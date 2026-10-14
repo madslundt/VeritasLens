@@ -21,6 +21,8 @@ import {
   parseTranslationResponse,
 } from './translation';
 import { settings } from '@/state/store';
+import { ASSISTANCE_SCHEMA, buildAssistancePrompt, parseAssistanceResponse } from './assistance';
+import type { AssistanceAction } from '@/types';
 
 export type PersonaId = string;
 
@@ -95,11 +97,18 @@ export interface Persona {
 }
 
 const BUILTINS: Persona[] = [
+  ...(['respond', 'repair', 'catch-up', 'commitments', 'refine'] as AssistanceAction[]).map((action): Persona => ({
+    id: action, name: ({ respond: 'Help me respond', repair: 'Clarify or disagree', 'catch-up': 'Catch me up', commitments: 'Decisions & commitments', refine: 'Refine answer' })[action],
+    description: action === 'respond' ? 'One natural response, acknowledgment, or follow-up for this exchange.' : 'Help grounded in captured conversation moments.',
+    hint: 'Double-tap for help', buildPrompt: (lang) => buildAssistancePrompt(action, lang), schema: ASSISTANCE_SCHEMA,
+    parse: (text) => parseAssistanceResponse(text, action), builtin: true,
+    streamHeading: { field: 'headline', synthesize: (headline) => ({ type: 'assistance', action, headline, detail: '', quote: '', records: [] }) },
+  })),
   {
     id: 'auto',
-    name: 'Auto',
+    name: 'Best next help',
     description:
-      'Picks the best lens for what you asked, then runs it. Covers every lens except Meeting Prep. Makes an extra request to choose the lens, so it takes a bit longer.',
+      'Chooses useful help for your profile and goal, or stays quiet. Specialized criticism is available on demand. With multiple candidates, a routing request runs before analysis.',
     hint: 'Tap and let VeritasLens choose',
     buildPrompt: buildAutoPrompt,
     schema: AUTO_CLASSIFIER_SCHEMA,
@@ -131,7 +140,7 @@ const BUILTINS: Persona[] = [
   },
   {
     id: 'trivia',
-    name: 'Trivia',
+    name: 'Quick Answer',
     description: 'Answers trivia questions with a direct answer and brief description.',
     hint: 'Tap for the answer',
     buildPrompt: buildTriviaPrompt,
@@ -155,7 +164,7 @@ const BUILTINS: Persona[] = [
   {
     id: 'logical-fallacy',
     name: 'Fallacy Check',
-    description: 'Names any logical fallacy present in the argument.',
+    description: 'Checks premise-to-conclusion reasoning and names supported fallacies.',
     hint: 'Tap to check the argument',
     buildPrompt: buildLogicalFallacyPrompt,
     schema: LOGICAL_FALLACY_SCHEMA,
@@ -165,7 +174,7 @@ const BUILTINS: Persona[] = [
   {
     id: 'bias-detector',
     name: 'Framing Check',
-    description: 'Detects political, factional, emotional, or tonal framing in statements.',
+    description: 'Identifies loaded wording and one-sided framing, with a neutral restatement.',
     hint: 'Tap to check the framing',
     buildPrompt: buildBiasDetectorPrompt,
     schema: BIAS_DETECTOR_SCHEMA,
@@ -215,7 +224,7 @@ const BUILTINS: Persona[] = [
   },
   {
     id: 'companion',
-    name: 'Companion',
+    name: 'Interesting context',
     description:
       'Surfaces up to 5 short tidbits — facts, stats, anecdotes, or unexpected connections — about what the speakers just brought up.',
     hint: 'Tap for tidbits',
@@ -281,7 +290,7 @@ const BUILTINS: Persona[] = [
   },
   {
     id: MEETING_PREP_ID,
-    name: 'Meeting Prep',
+    name: 'Prepared assistance',
     description:
       'Real-time answers grounded in context you prepared on your phone — general notes plus optional labeled attachments (contracts, prepared questions).',
     hint: 'Tap to ask about what was said',
@@ -309,7 +318,7 @@ export function getPersona(id: PersonaId): Persona | undefined {
  * every other lens lives behind the "Specialized ›" sub-picker (see
  * `getSpecializedPersonas`). Order here is the visible picker order.
  */
-const CORE_PICKER_IDS: readonly PersonaId[] = ['auto', 'translation', MEETING_PREP_ID];
+const CORE_PICKER_IDS: readonly PersonaId[] = ['auto', 'respond', 'translation', MEETING_PREP_ID];
 
 /**
  * Top-level picker personas — Auto, Translate, Meeting Prep — in
@@ -330,6 +339,6 @@ export function getPickerPersonas(): Persona[] {
  */
 export function getSpecializedPersonas(): Persona[] {
   const core = new Set<PersonaId>(CORE_PICKER_IDS);
-  return personasSignal().filter((p) => !core.has(p.id));
+  return personasSignal().filter((p) => !core.has(p.id) && !['repair', 'catch-up', 'commitments', 'refine'].includes(p.id));
 }
 

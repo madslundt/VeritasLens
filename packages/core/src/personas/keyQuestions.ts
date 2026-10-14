@@ -1,13 +1,15 @@
 // src/personas/keyQuestions.ts
 import type { KeyQuestionClaim, KeyQuestionPriority, LensResult, LanguageCode } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, readClaimsArray } from './_utils';
+import { trimTo, parseJsonResponse, readClaimsArray, LENS_FOCUS_RULES } from './_utils';
 
 const KEY_QUESTIONS_PROMPT = `You are VeritasLens, a real-time analysis assistant for smart glasses.
 
 The user just provided a short audio clip. Listen for topics, decisions, or claims where important questions remain open, unaddressed, or unanswered. Return up to 4, most important first.
 
 Distinguish from Trivia: these are questions WITHOUT a known answer, not questions the speaker asked that have a direct factual reply.
+
+Focus on the latest active topic or decision. Ask specific, answerable questions whose answers could change the next decision or action. Do not re-ask questions already answered in the current audio or prepared context. Prefer one or two material gaps over generic prompts; return empty claims when none remain.
 
 For each question:
 - question: The question as a full sentence (≤160 chars).
@@ -21,7 +23,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 export function buildKeyQuestionsPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
   return (
-    `${KEY_QUESTIONS_PROMPT}\n\n` +
+    `${KEY_QUESTIONS_PROMPT}\n\nFOCUS: ${LENS_FOCUS_RULES}\n\n` +
     `LANGUAGE: Write question and context in ${langName}. Keep \`priority\` as one of the literal values "CRITICAL" / "IMPORTANT" / "NICE" regardless of language.`
   );
 }
@@ -45,7 +47,7 @@ export const KEY_QUESTIONS_SCHEMA = {
   properties: {
     claims: {
       type: 'array',
-      minItems: 1,
+      minItems: 0,
       maxItems: 4,
       items: CLAIM_ITEM_SCHEMA,
     },

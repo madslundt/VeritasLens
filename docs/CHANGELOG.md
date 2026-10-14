@@ -2,6 +2,15 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.18.0] — 2026-10-14
+
+- Add Everyday, Work, and Understand conversation profiles, with optional goals, constraints, selected background notes, and reusable saved setups.
+- Add response assistance, tactful clarification, catch-up, and structured decisions and commitments. Best next help uses the profile and goal and can stay quiet.
+- Add opt-in live captions through the configured speech-to-text host, microphone pause/resume, same-exchange refinement, cue expiry, pinning, and usefulness feedback.
+- Add editable conversation review with supporting quotes, ownership and deadline corrections, text export, and explicitly selected notes for future sessions.
+- Split the phone interface into Session, Lenses, and Games pages. Fold preparation into a disclosure line, group lenses by purpose, preserve session drafts across navigation, and fix list corners in every lens category.
+- Tighten lens relevance, uncertainty, and evidence boundaries; preserve later speech for the next check and prevent canceled work from updating the HUD. Keep minimal compatibility handling for the shared result model.
+
 ## [0.17.5] — 2026-10-14
 
 - Add optional Tavily evidence to factual game batches across AI providers, including saved topics, Random, and Near me. Search once per batch, outside generation retries; riddles skip search.

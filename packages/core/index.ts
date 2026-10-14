@@ -85,6 +85,9 @@ export * from './src/runtime/transcriptSource';
 export * from './src/runtime/recallContext';
 export * from './src/runtime/gameHistory';
 export * from './src/runtime/history';
+export * from './src/runtime/conversation';
+export * from './src/runtime/captions';
+export * from './src/personas/assistance';
 export * from './src/runtime/ttsText';
 // VAD — re-export everything except VoiceBufferAnalysis (already exported from audioBuffer above)
 export {

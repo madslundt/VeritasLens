@@ -87,6 +87,29 @@ import type { HistoryEntry, LensResult } from '@veritaslens/core';
 
 const fakeSetLs = (_k: string, _v: string): Promise<boolean> => Promise.resolve(true);
 
+function visibleHudText(name: string): string | undefined {
+  const texts = new Map<string, string>();
+  const writes = [
+    ...(bridge.rebuildPageContainer.mock.calls as unknown as Array<[unknown]>).map(([page], i) => ({
+      order: bridge.rebuildPageContainer.mock.invocationCallOrder[i]!, page,
+    })),
+    ...(bridge.textContainerUpgrade.mock.calls as unknown as Array<[unknown]>).map(([upgrade], i) => ({
+      order: bridge.textContainerUpgrade.mock.invocationCallOrder[i]!, upgrade,
+    })),
+  ].sort((a, b) => a.order - b.order);
+  for (const write of writes) {
+    if ('page' in write) {
+      texts.clear();
+      const page = write.page as unknown as { payload: { textObject: Array<{ payload: { containerName: string; content: string } }> } };
+      for (const { payload } of page.payload.textObject) texts.set(payload.containerName, payload.content);
+    } else {
+      const { payload } = write.upgrade as unknown as { payload: { containerName: string; content: string } };
+      texts.set(payload.containerName, payload.content);
+    }
+  }
+  return texts.get(name);
+}
+
 afterEach(async () => {
   // Always reset discreet + layout + result so test order does not bleed state.
   await saveDiscreet(fakeSetLs, false);
@@ -148,14 +171,15 @@ describe('pickerEntryAtIndex', () => {
     });
   });
 
-  it('maps index C to Games and C+1 to Specialized', () => {
-    expect(pickerEntryAtIndex(core.length)).toEqual({ kind: 'games' });
-    expect(pickerEntryAtIndex(core.length + 1)).toEqual({ kind: 'specialized' });
+  it('maps the trailing entries to Profiles, Games, and Specialized', () => {
+    expect(pickerEntryAtIndex(core.length)).toEqual({ kind: 'profiles' });
+    expect(pickerEntryAtIndex(core.length + 1)).toEqual({ kind: 'games' });
+    expect(pickerEntryAtIndex(core.length + 2)).toEqual({ kind: 'specialized' });
   });
 
   it('falls back to the first core persona for out-of-range / invalid indices', () => {
     const firstId = core[0]!.id;
-    for (const idx of [core.length + 2, 999, -3, undefined]) {
+    for (const idx of [core.length + 3, 999, -3, undefined]) {
       const entry = pickerEntryAtIndex(idx);
       expect(entry.kind).toBe('persona');
       if (entry.kind === 'persona') expect(entry.persona.id).toBe(firstId);
@@ -241,7 +265,7 @@ describe('page lifecycle', () => {
     // Scrolling down should issue a textContainerUpgrade.
     bridge.textContainerUpgrade.mockClear();
     await scrollHistoryDetail(1);
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledOnce();
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(4);
   });
 
   it('scrollHistoryDetail clamps at 0 when already at the top', async () => {
@@ -276,14 +300,13 @@ describe('setLensResult', () => {
     // 2 upgrades on first answer landing: clear the listening-state '•' in
     // the corner status slot, then push the unified body. The body composes
     // heading + verdict glyph + reason with blank-line separators.
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(2);
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
-    const statusCall = calls.find((c) => c[0].payload.containerName === 'vl-status');
-    expect(statusCall?.[0].payload.content).toBe('');
+    expect(visibleHudText('vl-status')).toBe('');
     const bodyCall = calls.find((c) => c[0].payload.containerName === 'vl-reason');
     expect(bodyCall).toBeDefined();
     const body = bodyCall![0].payload.content;
-    expect(body).toContain('The Earth is round.');
+    expect(visibleHudText('vl-claim')).toContain('The Earth is round.');
     expect(body).toContain('+ TRUE');
     expect(body).toContain('Established by science.');
   });
@@ -312,7 +335,7 @@ describe('setLensResult', () => {
     // The chosen lens name is composed with the existing session tag on the
     // first line so the wearer can see at a glance which lens Auto picked
     // for this result.
-    expect(bodyCall![0].payload.content).toContain('Fact Check · 1/1 · X');
+    expect(visibleHudText('vl-claim')).toContain('Fact Check · X');
     expect(bodyCall![0].payload.content).not.toContain('Auto');
     expect(bodyCall![0].payload.content).toContain('+ TRUE');
     expect(bodyCall![0].payload.content).toContain('Y');
@@ -332,7 +355,9 @@ describe('setLensResult', () => {
     const bodyCall = calls.find((c) => c[0].payload.containerName === 'vl-reason');
     expect(bodyCall).toBeDefined();
     // Manual-lens entries keep the original session-tag-only prefix shape.
-    expect(bodyCall![0].payload.content).toBe('1/1 · X\n\n+ TRUE\n\nY');
+    expect(visibleHudText('vl-position')).toBe('1/1');
+    expect(visibleHudText('vl-claim')).toBe('X');
+    expect(bodyCall![0].payload.content).toBe('+ TRUE\n\nY');
     expect(bodyCall![0].payload.content).not.toContain('Auto');
   });
 
@@ -357,7 +382,7 @@ describe('setLensResult', () => {
     const lastRebuild = calls.at(-1)![0].payload;
     const body = lastRebuild.textObject.find((t) => t.payload.containerName === 'vl-reason')?.payload.content;
     expect(body).toBeDefined();
-    expect(body!).toContain('Fact Check · 1/1 · X');
+    expect(lastRebuild.textObject.find((t) => t.payload.containerName === 'vl-claim')?.payload.content).toContain('Fact Check · X');
     expect(body!).not.toContain('Auto');
   });
 });
@@ -527,10 +552,7 @@ describe('discreet mode', () => {
     bridge.textContainerUpgrade.mockClear();
     const { setStatus } = await import('../src/runtime/hud');
     await setStatus('thinking');
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
-    expect(calls).toHaveLength(1);
-    expect(calls[0]![0].payload.containerName).toBe('vl-status');
-    expect(calls[0]![0].payload.content).toBe('...');
+    expect(findText(lastRebuildPayload(), 'vl-status')?.content).toBe('...');
   });
 
   it('setStatus on discreet-result writes to the corner status slot (so the spinner stays visible while reviewing previous answers)', async () => {
@@ -541,10 +563,7 @@ describe('discreet mode', () => {
     bridge.textContainerUpgrade.mockClear();
     const { setStatus } = await import('../src/runtime/hud');
     await setStatus('thinking');
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
-    expect(calls).toHaveLength(1);
-    expect(calls[0]![0].payload.containerName).toBe('vl-status');
-    expect(calls[0]![0].payload.content).toBe('...');
+    expect(findText(lastRebuildPayload(), 'vl-status')?.content).toBe('...');
   });
 
   it('setLensResult(null) in discreet-minimal stays on the empty idle slot (no upgrades, no rebuild)', async () => {
@@ -571,10 +590,10 @@ describe('discreet mode', () => {
     // status + unified body — the body is its own event capturer).
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
     const payload = lastRebuildPayload();
-    expect(payload.containerTotalNum).toBe(2);
+    expect(payload.containerTotalNum).toBe(4);
     expect(findText(payload, 'vl-clock')).toBeUndefined();
     // 1 upgrade: the unified body container.
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
   });
 
   it('setLensResult(null) on discreet-result demotes back to discreet-minimal', async () => {
@@ -620,7 +639,7 @@ describe('resetHudSessionState', () => {
     // Sanity check: scroll moves the buffer (textContainerUpgrade fires).
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledOnce();
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(4);
 
     // After reset, scrolling should be a no-op even on the active page —
     // because the cached full-reason is empty, maxOffset is 0.
@@ -683,15 +702,15 @@ describe('pending result on menu', () => {
     await restoreActivePage();
 
     expect(currentHudPage()).toBe('active');
-    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledTimes(2);
     // 2 upgrades on first answer landing: clear the corner '•' + push body.
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(2);
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
     const reason = calls.find((c) => c[0].payload.containerName === 'vl-reason');
     expect(reason).toBeDefined();
     // Unified body contains the heading, verdict glyph, and reason text together.
     expect(reason![0].payload.content).toContain('east');
-    expect(reason![0].payload.content).toContain('The Sun rises in the west.');
+    expect(visibleHudText('vl-claim')).toContain('The Sun rises in the west.');
     expect(reason![0].payload.content).toContain('- FALSE');
     expect(hasPendingActiveResult()).toBe(false);
   });
@@ -733,9 +752,9 @@ describe('pending result on menu', () => {
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { containerTotalNum: number; textObject: Array<{ payload: { containerName: string } }> } }]>;
     expect(calls.length).toBeGreaterThanOrEqual(1);
     const lastRebuild = calls.at(-1)![0].payload;
-    expect(lastRebuild.containerTotalNum).toBe(2);
+    expect(lastRebuild.containerTotalNum).toBe(4);
     expect(lastRebuild.textObject.some((t) => t.payload.containerName === 'vl-reason')).toBe(true);
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(3);
     expect(hasPendingActiveResult()).toBe(false);
   });
 
@@ -752,14 +771,9 @@ describe('pending result on menu', () => {
 });
 
 describe('multi-claim active page', () => {
-  type TextBag = { payload: { containerName: string; content: string } };
 
   function lastUpgradeByName(name: string): string | undefined {
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
-    for (let i = calls.length - 1; i >= 0; i--) {
-      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
-    }
-    return undefined;
+    return visibleHudText(name);
   }
 
   it('prefixes every page with the session-relative X/Y when the session has multiple entries', async () => {
@@ -778,7 +792,9 @@ describe('multi-claim active page', () => {
         { quote: 'q2', verdict: 'FALSE', claim: 'C2', reason: 'R2' },
       ],
     });
-    expect(lastUpgradeByName('vl-reason')).toBe('1/2 · C1\n\n+ TRUE\n\nR1');
+    expect(lastUpgradeByName('vl-position')).toBe('1/2');
+    expect(lastUpgradeByName('vl-claim')).toBe('C1');
+    expect(lastUpgradeByName('vl-reason')).toBe('+ TRUE\n\nR1');
   });
 
   it('always shows the session-relative indicator — even for a 1-entry session ("1/1")', async () => {
@@ -791,7 +807,9 @@ describe('multi-claim active page', () => {
       claims: [{ quote: 'q1', verdict: 'TRUE', claim: 'C1', reason: 'R1' }],
     });
     // Single-entry single-claim body: "1/1 · " prefix + heading + verdict + reason.
-    expect(lastUpgradeByName('vl-reason')).toBe('1/1 · C1\n\n+ TRUE\n\nR1');
+    expect(lastUpgradeByName('vl-position')).toBe('1/1');
+    expect(lastUpgradeByName('vl-claim')).toBe('C1');
+    expect(lastUpgradeByName('vl-reason')).toBe('+ TRUE\n\nR1');
   });
 
   it('translation view shows romanization IN PLACE OF non-Latin source (not both)', async () => {
@@ -808,9 +826,9 @@ describe('multi-claim active page', () => {
       replyStarters: [{ source: 'はい', translated: 'Yes', sourceRomanized: 'Hai' }],
     });
     const body = lastUpgradeByName('vl-reason')!;
-    expect(body).toContain('Japanese'); // spelled out, not the bare "JA" code
+    expect(lastUpgradeByName('vl-language')).toContain('Japanese'); // spelled out, not the bare "JA" code
     expect(body).not.toMatch(/\bJA\b/);
-    expect(body).toContain('Konnichiwa');
+    expect(lastUpgradeByName('vl-claim')).toContain('Konnichiwa');
     expect(body).not.toContain('こんにちは'); // native script replaced, not shown alongside
     expect(body).toContain('Hai');
     expect(body).not.toContain('はい');
@@ -830,8 +848,8 @@ describe('multi-claim active page', () => {
       replyStarters: [{ source: 'Sí', translated: 'Yes' }],
     });
     const body = lastUpgradeByName('vl-reason')!;
-    expect(body).toContain('Spanish'); // code resolved to its English name
-    expect(body).toContain('Hola');
+    expect(lastUpgradeByName('vl-language')).toContain('Spanish'); // code resolved to its English name
+    expect(lastUpgradeByName('vl-claim')).toContain('Hola');
     expect(body).toContain('Sí');
   });
 
@@ -850,11 +868,15 @@ describe('multi-claim active page', () => {
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-reason')).toBe('2/2 · C2\n\n- FALSE\n\nR2');
+    expect(lastUpgradeByName('vl-position')).toBe('2/2');
+    expect(lastUpgradeByName('vl-claim')).toBe('C2');
+    expect(lastUpgradeByName('vl-reason')).toBe('- FALSE\n\nR2');
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(-1);
-    expect(lastUpgradeByName('vl-reason')).toBe('1/2 · C1\n\n+ TRUE\n\nR1');
+    expect(lastUpgradeByName('vl-position')).toBe('1/2');
+    expect(lastUpgradeByName('vl-claim')).toBe('C1');
+    expect(lastUpgradeByName('vl-reason')).toBe('+ TRUE\n\nR1');
   });
 
   it('scrollActiveReason past the last claim falls back to reason pagination', async () => {
@@ -886,13 +908,8 @@ describe('multi-claim active page', () => {
 });
 
 describe('hide / reveal active result via scroll edges', () => {
-  type TextBag = { payload: { containerName: string; content: string } };
   function lastUpgradeByName(name: string): string | undefined {
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
-    for (let i = calls.length - 1; i >= 0; i--) {
-      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
-    }
-    return undefined;
+    return visibleHudText(name);
   }
 
   const twoClaims: LensResult = {
@@ -916,7 +933,7 @@ describe('hide / reveal active result via scroll edges', () => {
     const outcome = await scrollActiveReason(-1);
     expect(outcome).toBe('revealed');
     expect(isActiveHidden()).toBe(false);
-    expect(lastUpgradeByName('vl-reason')).toContain('C2');
+    expect(lastUpgradeByName('vl-claim')).toContain('C2');
   });
 
   it('scroll-up while hidden with no result in memory is a noop', async () => {
@@ -946,7 +963,7 @@ describe('hide / reveal active result via scroll edges', () => {
     const followUp = await scrollActiveReason(-1);
     expect(followUp).toBe('revealed');
     expect(isActiveHidden()).toBe(false);
-    expect(lastUpgradeByName('vl-reason')).toContain('C2');
+    expect(lastUpgradeByName('vl-claim')).toContain('C2');
   });
 
   it('scroll-down while hidden is a noop', async () => {
@@ -980,13 +997,8 @@ describe('hide / reveal active result via scroll edges', () => {
 });
 
 describe('session-wide swipe scroll', () => {
-  type TextBag = { payload: { containerName: string; content: string } };
   function lastUpgradeByName(name: string): string | undefined {
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
-    for (let i = calls.length - 1; i >= 0; i--) {
-      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
-    }
-    return undefined;
+    return visibleHudText(name);
   }
 
   function entry(opts: { id: string; sessionId?: string; verdict: 'TRUE' | 'FALSE'; claim: string; reason?: string }): HistoryEntry {
@@ -1009,7 +1021,7 @@ describe('session-wide swipe scroll', () => {
     await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e1', 'e2']) });
 
     // Cursor at first new entry → unified body starts with "1/2 · CLAIM-A".
-    expect(lastUpgradeByName('vl-reason')).toContain('CLAIM-A');
+    expect(lastUpgradeByName('vl-claim')).toContain('CLAIM-A');
 
     // Swipe-up from first claim: there's no earlier entry, so noop.
     bridge.textContainerUpgrade.mockClear();
@@ -1033,12 +1045,12 @@ describe('session-wide swipe scroll', () => {
 
     // Indicator is uniformly session-relative: new first claim is position
     // 3 of 4 total claims.
-    expect(lastUpgradeByName('vl-reason')).toContain('NEW-1');
+    expect(lastUpgradeByName('vl-claim')).toContain('NEW-1');
 
     // Swipe down advances within the session → 4/4 · NEW-2.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-reason')).toContain('NEW-2');
+    expect(lastUpgradeByName('vl-claim')).toContain('NEW-2');
 
     // Swipe down past the last page hides (session end).
     const outcome = await scrollActiveReason(1);
@@ -1049,7 +1061,7 @@ describe('session-wide swipe scroll', () => {
     bridge.textContainerUpgrade.mockClear();
     const reveal = await scrollActiveReason(-1);
     expect(reveal).toBe('revealed');
-    expect(lastUpgradeByName('vl-reason')).toContain('NEW-2');
+    expect(lastUpgradeByName('vl-claim')).toContain('NEW-2');
   });
 
   it('indicator is always session-relative X/Y, with no mode transitions', async () => {
@@ -1064,17 +1076,17 @@ describe('session-wide swipe scroll', () => {
     await setLensResult(eNew2.result, { sessionEntries: [eOld1, eOld2, eNew1, eNew2], newEntryIds: new Set(['n1', 'n2']) });
 
     // Cursor lands on the new first claim with session indicator 3/4.
-    expect(lastUpgradeByName('vl-reason')).toContain('NEW-1');
+    expect(lastUpgradeByName('vl-claim')).toContain('NEW-1');
 
     // Swipe up walks back into older entries — still X/Y session-relative.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(-1);
-    expect(lastUpgradeByName('vl-reason')).toContain('OLD-2');
+    expect(lastUpgradeByName('vl-claim')).toContain('OLD-2');
 
     // Swipe back down to the new first claim — same X/Y format, same number.
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-reason')).toContain('NEW-1');
+    expect(lastUpgradeByName('vl-claim')).toContain('NEW-1');
   });
 
   it('no indicator on a single-claim, single-entry session', async () => {
@@ -1083,7 +1095,7 @@ describe('session-wide swipe scroll', () => {
 
     const eOnly = entry({ id: 'a', verdict: 'TRUE', claim: 'ONLY' });
     await setLensResult(eOnly.result, { sessionEntries: [eOnly], newEntryIds: new Set(['a']) });
-    expect(lastUpgradeByName('vl-reason')).toContain('ONLY');
+    expect(lastUpgradeByName('vl-claim')).toContain('ONLY');
   });
 
   it('hidden reveal after new analysis lands on Y/Y (last session page)', async () => {
@@ -1103,7 +1115,7 @@ describe('session-wide swipe scroll', () => {
     // is done" expectation).
     await setLensResult(eNew.result, { sessionEntries: [eOld, eNew], newEntryIds: new Set(['n']) });
     expect(isActiveHidden()).toBe(false);
-    expect(lastUpgradeByName('vl-reason')).toContain('NEW');
+    expect(lastUpgradeByName('vl-claim')).toContain('NEW');
   });
 
   it('manual hide (without new analysis) preserves the cursor; reveal returns to where the user was', async () => {
@@ -1116,7 +1128,7 @@ describe('session-wide swipe scroll', () => {
 
     // Walk to claim 2 and hide.
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-reason')).toContain('B');
+    expect(lastUpgradeByName('vl-claim')).toContain('B');
     await scrollActiveReason(1); // hides (past last page)
     expect(isActiveHidden()).toBe(true);
 
@@ -1124,7 +1136,7 @@ describe('session-wide swipe scroll', () => {
     bridge.textContainerUpgrade.mockClear();
     const outcome = await scrollActiveReason(-1);
     expect(outcome).toBe('revealed');
-    expect(lastUpgradeByName('vl-reason')).toContain('B');
+    expect(lastUpgradeByName('vl-claim')).toContain('B');
   });
 
   function companionEntry(opts: { id: string; sessionId?: string; headline: string; kind?: 'fact' | 'stat' | 'story' | 'connection' }): HistoryEntry {
@@ -1197,6 +1209,30 @@ describe('menu spinner', () => {
     expect(names).toContain('vl-clock');
   });
 
+  it('fits seconds and retry labels without overlapping the menu clock or resetting focus', async () => {
+    const { getTextWidth, measureTextWrap } = await import('@evenrealities/pretext');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await showMenuPage();
+    const rebuilds = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{
+      payload: { textObject: Array<{ payload: { containerName: string; xPosition: number; yPosition: number; width: number; height: number; paddingLength: number } }> }
+    }]>;
+    const page = rebuilds.at(-1)![0];
+    const texts = page.payload.textObject.map((item) => item.payload);
+    const spinner = texts.find((text) => text.containerName === 'vl-menu-spin')!;
+    const clock = texts.find((text) => text.containerName === 'vl-clock')!;
+    expect(spinner.paddingLength).toBe(0);
+    expect(spinner.xPosition + spinner.width).toBeLessThanOrEqual(clock.xPosition);
+    expect(spinner.xPosition).toBeGreaterThanOrEqual(0);
+    bridge.rebuildPageContainer.mockClear();
+    for (const content of ['/', '\\', 'R1/3/', '10s', '100s', '99999s']) {
+      await setMenuSpinner(content);
+      expect(getTextWidth(content)).toBeLessThanOrEqual(spinner.width);
+      expect(measureTextWrap(content, spinner.width).height).toBeLessThanOrEqual(spinner.height);
+    }
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+  });
+
   it('setMenuSpinner writes to the spinner slot when on the menu page', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
@@ -1249,11 +1285,7 @@ describe('line-aware pagination', () => {
     return payload.textObject.find((t) => t.payload.containerName === name)?.payload;
   }
   function lastUpgradeByName(name: string): string | undefined {
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
-    for (let i = calls.length - 1; i >= 0; i--) {
-      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
-    }
-    return undefined;
+    return visibleHudText(name);
   }
 
   it('paginates a long reason into multiple pages, each fitting the line budget', async () => {
@@ -1304,7 +1336,7 @@ describe('line-aware pagination', () => {
     // line and a left-aligned bullet row "● ○ ○…" at the bottom — strip
     // both for the word-boundary check on the body chunk itself.
     const strip = (page: string) =>
-      page.replace(/^\d+\/\d+ · /, '').replace(/\n\n[●○]( [●○])+$/, '');
+      page.replace(/^\d+\/\d+ · /, '').replace(/\n[●○]( [●○])+$/, '');
     const page0Body = strip(lastUpgradeByName('vl-reason')!);
     expect(page0Body).toBeDefined();
     expect(/[a-z]$/.test(page0Body)).toBe(true);
@@ -1336,7 +1368,7 @@ describe('line-aware pagination', () => {
     // Page 0 of claim A's entry: unified body has the heading and verdict.
     // Per-answer X/Y prefix appears because the long reason makes the entry
     // multi-page (split by splitForSynthesis into per-claim entries).
-    expect(lastUpgradeByName('vl-reason')).toContain('CLAIM-A');
+    expect(lastUpgradeByName('vl-claim')).toContain('CLAIM-A');
     expect(lastUpgradeByName('vl-reason')).toContain('+ TRUE');
 
     // Walk forward until we reach claim B's body. CLAIM-B's reason is short
@@ -1346,7 +1378,7 @@ describe('line-aware pagination', () => {
       bridge.textContainerUpgrade.mockClear();
       await scrollActiveReason(1);
       const body = lastUpgradeByName('vl-reason');
-      if (body && body.includes('CLAIM-B')) {
+      if (body && lastUpgradeByName('vl-claim')?.includes('CLAIM-B')) {
         expect(body).toContain('- FALSE');
         expect(body).toContain('short B reason');
         return;
@@ -1371,7 +1403,7 @@ describe('line-aware pagination', () => {
     expect(findText(payload, 'vl-status')).toBeDefined();
     expect(findText(payload, 'vl-act-hint')).toBeDefined();
     expect(findText(payload, 'vl-reason')).toBeDefined();
-    expect(findText(payload, 'vl-claim')).toBeUndefined();
+    expect(findText(payload, 'vl-claim')).toBeDefined();
     expect(findText(payload, 'vl-verdict')).toBeUndefined();
     expect(findText(payload, 'vl-compact')).toBeUndefined();
 
@@ -1383,9 +1415,9 @@ describe('line-aware pagination', () => {
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
     expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
-    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(1);
+    expect(bridge.textContainerUpgrade).toHaveBeenCalledTimes(4);
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string } }]>;
-    expect(calls[0]![0].payload.containerName).toBe('vl-reason');
+    expect(calls.map(([call]) => call.payload.containerName)).toEqual(['vl-claim', 'vl-position', 'vl-page-pos', 'vl-reason']);
   });
 
   it('continuation pages still carry the body in vl-reason (no separate compact header)', async () => {
@@ -1403,7 +1435,7 @@ describe('line-aware pagination', () => {
     // Page 0 unified body contains heading + verdict + start of reason.
     // The long-reason entry paginates to multiple pages so it carries the
     // per-answer X/Y prefix (e.g. "1/9 · ") on its first line.
-    expect(lastUpgradeByName('vl-reason')).toMatch(/^\d+\/\d+ · /);
+    expect(lastUpgradeByName('vl-position')).toMatch(/^\d+\/\d+$/);
     expect(lastUpgradeByName('vl-reason')).toContain('+ TRUE');
 
     // Scroll forward — continuation page carries more of the body, no
@@ -1432,8 +1464,8 @@ describe('line-aware pagination', () => {
     const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette tilbud SLUTORD.';
     const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(20);
     await setLensResult({
-      type: 'fact-check',
-      claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: longReason }],
+      type: 'devils-advocate',
+      claims: [{ quote: '', counterpoint: longClaim, rationale: longReason }],
     });
 
     // Page 0 body starts with the heading (possibly truncated by pagination).
@@ -1462,8 +1494,8 @@ describe('line-aware pagination', () => {
     const longClaim = 'Danske Banks tilbud har en ÅOP på 3,86%, mens Teslas er 1,30%. Spørg banken hvordan de matcher dette tilbud SLUTORD.';
     const longReason = ('The quick brown fox jumps over the lazy dog. ').repeat(40);
     await setLensResult({
-      type: 'fact-check',
-      claims: [{ quote: '', verdict: 'TRUE', claim: longClaim, reason: longReason }],
+      type: 'devils-advocate',
+      claims: [{ quote: '', counterpoint: longClaim, rationale: longReason }],
     });
 
     // In the unified body, the heading + verdict + reason appear in that
@@ -1518,7 +1550,7 @@ describe('line-aware pagination', () => {
 
     // Page 0's body should hold the entire content: heading + verdict + reason.
     const body = lastUpgradeByName('vl-reason')!;
-    expect(body).toContain(claim);
+    expect(lastUpgradeByName('vl-claim')).toContain(claim);
     expect(body).toContain('+ TRUE');
     expect(body).toContain('short');
     // The result has a single page, so swipe-down past it hides the answer
@@ -1554,7 +1586,8 @@ describe('line-aware pagination', () => {
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     const payload = calls.at(-1)![0].payload;
     const body = payload.textObject.find((t) => t.payload.containerName === 'vl-reason');
-    expect(body?.payload.content).toContain('c2');
+    expect(payload.textObject.find((t) => t.payload.containerName === 'vl-claim')?.payload.content).toContain('c2');
+    expect(body?.payload.content).toContain('r2');
   });
 });
 
@@ -1579,11 +1612,7 @@ describe('unified-body regression guards', () => {
     return calls.at(-1)![0].payload;
   }
   function lastUpgradeByName(name: string): string | undefined {
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
-    for (let i = calls.length - 1; i >= 0; i--) {
-      if (calls[i]![0].payload.containerName === name) return calls[i]![0].payload.content;
-    }
-    return undefined;
+    return visibleHudText(name);
   }
   function bodyCallCount(): number {
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[TextBag]>;
@@ -1600,16 +1629,16 @@ describe('unified-body regression guards', () => {
       type: 'fact-check',
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: 'R' }],
     });
-    expect(lastUpgradeByName('vl-reason')).toBe('1/1 · C\n\n+ TRUE\n\nR');
+    expect(lastUpgradeByName('vl-position')).toBe('1/1');
+    expect(lastUpgradeByName('vl-claim')).toBe('C');
+    expect(lastUpgradeByName('vl-reason')).toBe('+ TRUE\n\nR');
 
     // ELI5: no top, no middle → just the explanation, prefixed with "1/1 · ".
     bridge.textContainerUpgrade.mockClear();
     await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'because reasons' }] });
-    expect(lastUpgradeByName('vl-reason')).toBe('1/1 · because reasons');
+    expect(lastUpgradeByName('vl-reason')).toBe('because reasons');
 
-    // Meeting-prep answer: "1/1 · " prefix + heading + detail + "From: …".
-    // Source attribution sits at the BOTTOM so the answer→detail flow isn't
-    // interrupted by the source line.
+    // Meeting-prep answer: heading and detail, without source attribution.
     bridge.textContainerUpgrade.mockClear();
     await setLensResult({
       type: 'meeting-prep',
@@ -1618,12 +1647,11 @@ describe('unified-body regression guards', () => {
     const body = lastUpgradeByName('vl-reason')!;
     expect(body).toContain('4.2% beats your 4.8%');
     expect(body).toContain('Saves ~€120/month');
-    expect(body).toContain('From: Bank contract');
+    expect(body).not.toContain('From:');
     // Sections separated by blank lines; "1/1 · " sits inline on the heading.
     expect(body.split('\n\n')).toEqual([
-      '1/1 · 4.2% beats your 4.8%',
+      '4.2% beats your 4.8%',
       'Saves ~€120/month',
-      'From: Bank contract',
     ]);
   });
 
@@ -1640,7 +1668,7 @@ describe('unified-body regression guards', () => {
     });
     const body = lastUpgradeByName('vl-reason')!;
     // No trailing blanks, no doubled \n\n\n\n separator.
-    expect(body).toBe('1/1 · → Did you compare ECB fixed-rate?');
+    expect(body).toBe('→ Did you compare ECB fixed-rate?');
     expect(body).not.toContain('\n\n\n');
   });
 
@@ -1730,7 +1758,7 @@ describe('unified-body regression guards', () => {
     const combined = pages.join('\n');
     expect(combined).toContain('A');           // answer text
     expect(combined).toContain('D');           // detail
-    expect(combined).toContain('From: S');     // source
+    expect(combined).not.toContain('From:');
     expect(combined).toContain('"E"');         // evidence quote
     expect(combined).toContain('→ F');         // followup arrow
 
@@ -1756,14 +1784,14 @@ describe('unified-body regression guards', () => {
     expect(lastUpgradeByName('vl-reason')).toContain('A');
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-reason')).toContain('B');
+    expect(lastUpgradeByName('vl-claim')).toContain('B');
   });
 
   it('scrolling within a layout never rebuilds the page container — only upgrades the body', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
 
-    const longReason = ('alpha beta gamma delta epsilon zeta eta theta iota kappa ').repeat(25);
+    const longReason = ('alpha beta gamma delta epsilon zeta eta theta iota kappa ').repeat(60);
     await setLensResult({
       type: 'fact-check',
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
@@ -1819,7 +1847,7 @@ describe('unified-body regression guards', () => {
     // Page 0 should have a bullet row at the bottom because the entry is
     // multi-page now.
     const page0 = lastUpgradeByName('vl-reason')!;
-    expect(page0).toMatch(/●/);
+    expect(lastUpgradeByName('vl-page-pos')).toMatch(/●/);
 
     // Swipe forward → next page of the same entry. Swipe back → page 0.
     // Symmetric.
@@ -1849,21 +1877,24 @@ describe('unified-body regression guards', () => {
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: 'R' }],
     });
     const shortBody = lastUpgradeByName('vl-reason')!;
-    expect(shortBody).toBe('1/1 · C\n\n+ TRUE\n\nR');
+    expect(lastUpgradeByName('vl-position')).toBe('1/1');
+    expect(lastUpgradeByName('vl-claim')).toBe('C');
+    expect(shortBody).toBe('+ TRUE\n\nR');
     expect(shortBody).not.toMatch(/[●○]/);
 
     // Single-entry multi-page (Meeting Prep with a long detail): "1/1 · "
     // prefix on every page; bullets at the bottom show within-entry page
     // position.
     bridge.textContainerUpgrade.mockClear();
-    const longDetail = ('This is a long answer detail sentence. ').repeat(15);
+    const longDetail = ('This is a long answer detail sentence. ').repeat(25);
     await setLensResult({
       type: 'meeting-prep',
       claims: [{ kind: 'answer', text: 'A', source: 'S', detail: longDetail }],
     });
     const page0 = lastUpgradeByName('vl-reason')!;
-    expect(page0.startsWith('1/1 · ')).toBe(true);
-    expect(page0).toMatch(/●/);
+    expect(lastUpgradeByName('vl-position')).toBe('1/1');
+    expect(page0).not.toMatch(/[●○]/);
+    expect(lastUpgradeByName('vl-page-pos')).toMatch(/●/);
   });
 
   it('multi-entry sessions show session-relative X/Y on every page (constant within an entry, changes across entries)', async () => {
@@ -1887,12 +1918,14 @@ describe('unified-body regression guards', () => {
 
     bridge.textContainerUpgrade.mockClear();
     await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e2']) });
-    expect(lastUpgradeByName('vl-reason')!.startsWith('2/2 · Q2')).toBe(true);
+    expect(lastUpgradeByName('vl-position')).toBe('2/2');
+    expect(lastUpgradeByName('vl-claim')!.startsWith('Q2')).toBe(true);
 
     bridge.textContainerUpgrade.mockClear();
     const outcome = await scrollActiveReason(-1);
     expect(outcome).toBe('scrolled');
-    expect(lastUpgradeByName('vl-reason')!.startsWith('1/2 · Q1')).toBe(true);
+    expect(lastUpgradeByName('vl-position')).toBe('1/2');
+    expect(lastUpgradeByName('vl-claim')!.startsWith('Q1')).toBe(true);
   });
 
   it('session-relative X/Y stays constant while scrolling within the same entry, then changes on entry crossover', async () => {
@@ -1925,13 +1958,14 @@ describe('unified-body regression guards', () => {
     // Walk to the start: jump back to Q1's first page.
     let safety = 30;
     while (safety-- > 0) {
-      const cur = lastUpgradeByName('vl-reason') ?? '';
-      if (cur.startsWith('1/2 · Q1')) break;
+      const cur = lastUpgradeByName('vl-position') ?? '';
+      if (cur === '1/2') break;
       bridge.textContainerUpgrade.mockClear();
       const outcome = await scrollActiveReason(-1);
       if (outcome !== 'scrolled') break;
     }
-    expect(lastUpgradeByName('vl-reason')!.startsWith('1/2 · Q1')).toBe(true);
+    expect(lastUpgradeByName('vl-position')).toBe('1/2');
+    expect(lastUpgradeByName('vl-claim')!.startsWith('Q1')).toBe(true);
 
     // Advance forward; every page until Q2's start must still say "1/2 · ".
     let crossedToQ2 = false;
@@ -1940,9 +1974,9 @@ describe('unified-body regression guards', () => {
       bridge.textContainerUpgrade.mockClear();
       const outcome = await scrollActiveReason(1);
       if (outcome !== 'scrolled') break;
-      const cur = lastUpgradeByName('vl-reason')!;
-      if (cur.startsWith('2/2 · ')) { crossedToQ2 = true; break; }
-      expect(cur.startsWith('1/2 · ')).toBe(true);
+      const cur = lastUpgradeByName('vl-position')!;
+      if (cur === '2/2') { crossedToQ2 = true; break; }
+      expect(cur === '1/2').toBe(true);
     }
     expect(crossedToQ2).toBe(true);
   });
@@ -1965,15 +1999,18 @@ describe('unified-body regression guards', () => {
     const e2 = mkEntry('e2', 'Q2');
 
     await setLensResult(e2.result, { sessionEntries: [e1, e2], newEntryIds: new Set(['e2']) });
-    expect(lastUpgradeByName('vl-reason')!.startsWith('2/2 · Q2')).toBe(true);
+    expect(lastUpgradeByName('vl-position')).toBe('2/2');
+    expect(lastUpgradeByName('vl-claim')!.startsWith('Q2')).toBe(true);
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(-1);
-    expect(lastUpgradeByName('vl-reason')!.startsWith('1/2 · Q1')).toBe(true);
+    expect(lastUpgradeByName('vl-position')).toBe('1/2');
+    expect(lastUpgradeByName('vl-claim')!.startsWith('Q1')).toBe(true);
 
     bridge.textContainerUpgrade.mockClear();
     await scrollActiveReason(1);
-    expect(lastUpgradeByName('vl-reason')!.startsWith('2/2 · Q2')).toBe(true);
+    expect(lastUpgradeByName('vl-position')).toBe('2/2');
+    expect(lastUpgradeByName('vl-claim')!.startsWith('Q2')).toBe(true);
   });
 
   it('the active-page body container captures events itself (isEventCapture=1)', async () => {
@@ -2003,7 +2040,7 @@ describe('unified-body regression guards', () => {
     expect(body!.payload.isEventCapture).toBe(1);
   });
 
-  it('the history-detail layout has exactly one result text container', async () => {
+  it('the history-detail layout has a context caption and answer container', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('fact-checker')!);
     const entry: HistoryEntry = {
@@ -2021,8 +2058,8 @@ describe('unified-body regression guards', () => {
       || t.payload.containerName === 'vl-verdict'
       || t.payload.containerName === 'vl-compact'
     );
-    expect(resultContainers).toHaveLength(1);
-    expect(resultContainers[0]!.payload.containerName).toBe('vl-reason');
+    expect(resultContainers).toHaveLength(2);
+    expect(resultContainers.map((t) => t.payload.containerName)).toEqual(['vl-claim', 'vl-reason']);
   });
 });
 
@@ -2155,7 +2192,7 @@ describe('showMidSummaryPage', () => {
     await showMidSummaryPage(false, result);
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     const body = getBodyContent(calls)!;
-    expect(body).toContain('Meeting Recap');
+    expect(visibleHudText('vl-claim')).toBe('Meeting Recap');
     expect(body).toContain('We discussed budget.');
     expect(currentHudPage()).toBe('mid-summary');
   });
@@ -2175,7 +2212,7 @@ describe('showMidSummaryPage', () => {
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>;
     const body = getBodyContent(calls)!;
     expect(body).toContain('Refreshing…');
-    expect(body).toContain('Old Summary');
+    expect(visibleHudText('vl-claim')).toBe('Old Summary');
   });
 
   it('showMidSummaryPage hands the full body to the firmware-scrolled body container', async () => {
@@ -2194,7 +2231,7 @@ describe('showMidSummaryPage', () => {
     const body = getBodyContent(calls)!;
     // No app-side line slicing or page indicator — the firmware scrolls the
     // full composed body inside the body container.
-    expect(body).toContain('Title');
+    expect(visibleHudText('vl-claim')).toBe('Title');
     expect(body).toContain('concise body');
     expect(body).toContain('kp one');
     expect(body).toContain('kp two');
@@ -2216,6 +2253,18 @@ describe('showMidSummaryPage', () => {
     const body = getBodyContent(calls)!;
     expect(body.length).toBeLessThanOrEqual(1000);
     expect(body.endsWith('…')).toBe(true);
+  });
+
+  it('removes blank section rows when that lets the full summary fit on screen', async () => {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    await bootstrapHud('picker');
+    const summary = Array.from({ length: 3 }, (_, i) => `Summary line ${i + 1}`).join('\n');
+    const keyPoints = Array.from({ length: 5 }, (_, i) => `Point ${i + 1}`);
+    await showMidSummaryPage(false, { type: 'session-summary', title: 'Recap', summary, topics: [], keyPoints });
+    const body = getBodyContent(bridge.rebuildPageContainer.mock.calls as unknown as Array<[RebuildBag]>)!;
+    expect(visibleHudText('vl-claim')).toBe('Recap');
+    expect(body).toBe([summary, 'KEY POINTS', ...keyPoints.map((p) => `• ${p}`)].join('\n'));
+    expect(measureTextWrap(body, 570).lineCount).toBe(9);
   });
 
   it('refreshing the mid-summary in place uses textContainerUpgrade so firmware scroll position is preserved', async () => {
@@ -2317,7 +2366,7 @@ describe('blankActiveForThinking', () => {
 describe('full-screen answers and quiet recording', () => {
   type Text = {
     containerName: string; content: string; xPosition: number; yPosition: number;
-    width: number; height: number; paddingLength: number; textColor: number; isEventCapture: number;
+    width: number; height: number; paddingLength: number; borderWidth: number; borderRadius: number; textColor: number; isEventCapture: number;
   };
   function rebuiltTexts(): Text[] {
     const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { textObject: Array<{ payload: Text }> } }]>;
@@ -2325,8 +2374,53 @@ describe('full-screen answers and quiet recording', () => {
   }
   function lastText(name: string): string {
     const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
-    return calls.map((c) => c[0].payload).filter((c) => c.containerName === name).at(-1)?.content ?? '';
+    const renders = calls.flatMap((call, i) => call[0].payload.containerName === name
+      ? [{ order: bridge.textContainerUpgrade.mock.invocationCallOrder[i]!, content: call[0].payload.content }] : []);
+    const rebuilds = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { textObject: Array<{ payload: Text }> } }]>;
+    for (let i = 0; i < rebuilds.length; i++) {
+      const text = rebuilds[i]![0].payload.textObject.find((item) => item.payload.containerName === name)?.payload;
+      if (text) renders.push({ order: bridge.rebuildPageContainer.mock.invocationCallOrder[i]!, content: text.content });
+    }
+    return renders.sort((a, b) => a.order - b.order).at(-1)?.content ?? '';
   }
+  async function proseWithLines(lines: number, width = 570, prefix = ''): Promise<string> {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    let words = 1;
+    while (measureTextWrap(prefix + 'word '.repeat(words).trim(), width).lineCount < lines) words++;
+    return 'word '.repeat(words).trim();
+  }
+
+  it.each(['baseline', 'discreet-minimal', 'discreet-result'] as const)('keeps every corner label fully visible and flush to the top-right in %s', async (layout) => {
+    const { getTextWidth, measureTextWrap } = await import('@evenrealities/pretext');
+    const { setStatus } = await import('../src/runtime/hud');
+    setActiveLayout(layout);
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    for (const content of ['•', '/', '\\', 'AUTO', '...', 'R1/3/', 'ERR', 'T/O', '○', '~', '10s', '11s', '99s', '100s', '99999s']) {
+      await setStatus(content);
+      const status = rebuiltTexts().find((t) => t.containerName === 'vl-status')!;
+      expect(lastText('vl-status')).toBe(content);
+      expect(status.paddingLength).toBe(0);
+      expect(status.borderWidth).toBe(0);
+      expect(status.yPosition).toBe(0);
+      expect(status.xPosition).toBeGreaterThanOrEqual(0);
+      expect(status.xPosition + status.width).toBe(576);
+      expect(status.width).toBe(getTextWidth(content));
+      expect(measureTextWrap(content, status.width).height).toBeLessThanOrEqual(status.height);
+      expect(status.height).toBeLessThanOrEqual(288);
+    }
+  });
+
+  it('animates equal-width spinner frames without rebuilding the page', async () => {
+    const { setStatus } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    await setStatus('/');
+    bridge.rebuildPageContainer.mockClear();
+    for (const content of ['\\', '/', '\\', '/']) await setStatus(content);
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+    expect(lastText('vl-status')).toBe('/');
+  });
 
   it('dims the recording indicator and keeps routine instructions off the HUD', async () => {
     const { measureTextWrap } = await import('@evenrealities/pretext');
@@ -2336,17 +2430,16 @@ describe('full-screen answers and quiet recording', () => {
     expect(rebuiltTexts().filter((t) => t.content.trim())).toEqual([
       expect.objectContaining({ containerName: 'vl-status', content: '•', textColor: 1 }),
     ]);
-    const status = rebuiltTexts().find((t) => t.containerName === 'vl-status')!;
-    for (const content of ['•', 'AUTO', 'R1/3|', 'ERR']) {
-      expect(measureTextWrap(content, status.width - 2 * status.paddingLength).height)
-        .toBeLessThanOrEqual(status.height - 2 * status.paddingLength);
+    for (const content of ['•', 'AUTO', 'R1/3/', 'ERR', '10s', '99999s']) {
+      await setStatus(content);
+      const status = rebuiltTexts().find((t) => t.containerName === 'vl-status')!;
+      expect(measureTextWrap(content, status.width).height).toBeLessThanOrEqual(status.height);
     }
     bridge.textContainerUpgrade.mockClear();
     await setActiveHint('Fact Check · Double-tap to cancel');
     expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
     await setStatus('thinking');
-    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { textColor: number } }]>;
-    expect(calls.at(-1)![0].payload.textColor).toBe(3);
+    expect(rebuiltTexts().find((t) => t.containerName === 'vl-status')!.textColor).toBe(3);
   });
 
   it.each(['baseline', 'discreet-result'] as const)('gives %s answers the entire canvas and exactly one event capturer', async (layout) => {
@@ -2355,19 +2448,167 @@ describe('full-screen answers and quiet recording', () => {
     await showActivePage(getPersona('fact-checker')!);
     const texts = rebuiltTexts();
     const body = texts.find((t) => t.containerName === 'vl-reason')!;
-    expect(body).toMatchObject({ xPosition: 0, yPosition: 0, width: 576, height: 288, paddingLength: 4, isEventCapture: 1 });
+    expect(body).toMatchObject({ xPosition: 0, yPosition: 0, width: 576, height: 288, paddingLength: 0, isEventCapture: 1 });
     expect(texts.filter((t) => t.isEventCapture === 1)).toHaveLength(1);
   });
 
-  it('fits all ten lines on one page without reserving a line for a short position tag', async () => {
+  it('fits nine answer lines below a one-line caption without a page indicator', async () => {
     await bootstrapHud('picker');
     await showActivePage(getPersona('eli5')!);
-    const explanation = Array.from({ length: 10 }, (_, i) => `Line ${i + 1}`).join('\n');
+    const explanation = await proseWithLines(9);
     await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation }] });
-    expect(lastText('vl-reason')).toBe(`1/1 · ${explanation}`);
+    expect(lastText('vl-reason')).toBe(explanation);
     expect(await scrollActiveReason(1)).toBe('hidden');
     expect(await scrollActiveReason(-1)).toBe('revealed');
-    expect(lastText('vl-reason')).toBe(`1/1 · ${explanation}`);
+    expect(lastText('vl-reason')).toBe(explanation);
+  });
+
+  it.each(['baseline', 'discreet-result'] as const)('uses a quiet question caption above a rounded %s answer box', async (layout) => {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    await bootstrapHud('picker');
+    setActiveLayout(layout);
+    await showActivePage(getPersona('trivia')!);
+    const question = await proseWithLines(2, 576, '1/1 · ');
+    const answer = await proseWithLines(3);
+    const description = await proseWithLines(5);
+    await setLensResult({ type: 'trivia', claims: [{ quote: '', question, answer, description }] });
+    const body = lastText('vl-reason');
+    expect(lastText('vl-claim')).toBe(question);
+    expect(body).toBe(`${answer}\n${description}`);
+    expect(body).not.toMatch(/Q:|A:/);
+    const boxes = rebuiltTexts().filter((t) => ['vl-claim', 'vl-reason'].includes(t.containerName));
+    expect(boxes).toHaveLength(2);
+    expect(boxes[0]).toMatchObject({ borderWidth: 0, paddingLength: 0, textColor: 2 });
+    expect(boxes[1]).toMatchObject({ borderRadius: 6, borderWidth: 1, textColor: 4 });
+    for (const box of boxes) {
+      const text = lastText(box.containerName);
+      const inset = box.paddingLength + box.borderWidth;
+      expect(measureTextWrap(text, box.width - 2 * inset).height).toBeLessThanOrEqual(box.height - 2 * inset);
+    }
+    expect(measureTextWrap(lastText('vl-claim'), boxes[0]!.width).lineCount + measureTextWrap(body, 570).lineCount).toBe(10);
+    expect(boxes[1]!.yPosition).toBe(boxes[0]!.height + 4);
+    expect(boxes[1]!.yPosition + boxes[1]!.height).toBe(288);
+    expect(rebuiltTexts().filter((t) => t.isEventCapture === 1)).toHaveLength(1);
+    expect(await scrollActiveReason(1)).toBe('hidden');
+    expect(rebuiltTexts().some((t) => t.containerName === 'vl-claim')).toBe(false);
+    expect(await scrollActiveReason(-1)).toBe('revealed');
+    expect(lastText('vl-claim')).toBe(question);
+  });
+
+  it('omits sources from both live and history views without adding a sources page', async () => {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    const entry: HistoryEntry = {
+      id: 'grounded', timestamp: 1, sessionId: 's', lensId: 'trivia', lensName: 'Trivia',
+      question: 'Question', badge: '', quote: '',
+      result: { type: 'trivia', claims: [{ quote: '', question: 'Question', answer: 'Answer', description: 'Supporting detail.' }] },
+      webCitations: [{ domain: 'example.org' }],
+    };
+    await setLensResult(entry.result, { sessionEntries: [entry], newEntryIds: new Set([entry.id]) });
+    const live = lastText('vl-reason');
+    expect(live).not.toContain('Sources:');
+    expect(live).not.toContain('example.org');
+    expect(measureTextWrap(live, 576).height).toBeLessThanOrEqual(288);
+    expect(await scrollActiveReason(1)).toBe('hidden');
+    await showHistoryDetailPage(entry);
+    expect(rebuiltTexts()).toEqual([
+      expect.objectContaining({ containerName: 'vl-claim', content: 'Question', borderWidth: 0, textColor: 2 }),
+      expect.objectContaining({ containerName: 'vl-position', content: '1/1', textColor: 1 }),
+      expect.objectContaining({ containerName: 'vl-reason', content: live, borderRadius: 6 }),
+    ]);
+    bridge.textContainerUpgrade.mockClear();
+    await scrollHistoryDetail(1);
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('uses eight answer lines and one indicator line below the caption for long answers', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('eli5')!);
+    const explanation = await proseWithLines(16);
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation }] });
+    expect(lastText('vl-page-pos')).toBe('● ○');
+    expect(await scrollActiveReason(1)).toBe('scrolled');
+    expect(lastText('vl-page-pos')).toBe('○ ●');
+    expect(await scrollActiveReason(1)).toBe('hidden');
+  });
+
+  it('keeps the question visible while paging a long boxed answer without rebuilding', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    const answer = await proseWithLines(18);
+    await setLensResult({ type: 'trivia', claims: [{ quote: '', question: 'Question?', answer, description: '' }] });
+    const question = lastText('vl-claim');
+    const firstPage = lastText('vl-reason');
+    const firstIndicator = lastText('vl-page-pos');
+    bridge.rebuildPageContainer.mockClear();
+    expect(await scrollActiveReason(1)).toBe('scrolled');
+    expect(lastText('vl-claim')).toBe(question);
+    expect(lastText('vl-page-pos')).not.toBe(firstIndicator);
+    expect(bridge.rebuildPageContainer).not.toHaveBeenCalled();
+    expect(await scrollActiveReason(-1)).toBe('scrolled');
+    expect(lastText('vl-reason')).toBe(firstPage);
+    expect(lastText('vl-page-pos')).toBe(firstIndicator);
+  });
+
+  it('flows Q&A prose across the full width instead of preserving short hard-wrapped lines', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    await setLensResult({ type: 'trivia', claims: [{
+      quote: '', question: 'Which planet\nhas this volcano?',
+      answer: 'Mars.\nOlympus Mons\nrises about 22 km.',
+      description: 'It is roughly\n600 km wide.',
+    }] });
+    expect(lastText('vl-position')).toBe('1/1');
+    expect(lastText('vl-claim')).toBe('Which planet has this volcano?');
+    expect(lastText('vl-reason')).toBe('Mars. Olympus Mons rises about 22 km.\n\nIt is roughly 600 km wide.');
+    expect(rebuiltTexts().find((t) => t.containerName === 'vl-reason')).toMatchObject({ xPosition: 0, width: 576, paddingLength: 2 });
+  });
+
+  it('caps long questions at two lines and rebuilds when caption height changes', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    const longQuestion = await proseWithLines(4, 576, '2/2 · ');
+    await setLensResult({ type: 'trivia', claims: [
+      { quote: '', question: 'Short?', answer: 'First', description: '' },
+      { quote: '', question: longQuestion, answer: 'Second', description: '' },
+    ] });
+    const firstHeight = rebuiltTexts().find((t) => t.containerName === 'vl-claim')!.height;
+    await scrollActiveReason(1);
+    expect(rebuiltTexts().find((t) => t.containerName === 'vl-claim')!.height).toBeGreaterThan(firstHeight);
+    expect(rebuiltTexts().find((t) => t.containerName === 'vl-claim')!.height).toBe(54);
+    expect(lastText('vl-claim')).toMatch(/^word .+…$/);
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'Explanation' }] });
+    expect(lastText('vl-claim')).toContain(getPersona('eli5')!.name);
+    expect(rebuiltTexts().find((t) => t.containerName === 'vl-reason')).toMatchObject({ height: 257, yPosition: 31, borderRadius: 6 });
+  });
+
+  it('removes the question box when an answer is hidden through the menu', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    await setLensResult({ type: 'trivia', claims: [{ quote: '', question: 'Question?', answer: 'Answer', description: '' }] });
+    await showMenuPage();
+    markActiveHidden();
+    await showActivePage(getPersona('trivia')!);
+    expect(rebuiltTexts().some((t) => t.containerName === 'vl-claim')).toBe(false);
+    expect(await scrollActiveReason(-1)).toBe('revealed');
+    expect(lastText('vl-position')).toBe('1/1');
+    expect(lastText('vl-claim')).toBe('Question?');
+  });
+
+  it('restores a full-screen body for a streaming preview after a boxed answer', async () => {
+    const { setLensStreamingHeading, clearLensStreamingHeading } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    await setLensResult({ type: 'trivia', claims: [{ quote: '', question: 'Question?', answer: 'Answer', description: '' }] });
+    try {
+      setLensStreamingHeading('Next answer');
+      await vi.waitFor(() => expect(lastText('vl-reason')).toBe('Next answer'));
+      expect(rebuiltTexts().some((t) => t.containerName === 'vl-claim')).toBe(false);
+      expect(rebuiltTexts().find((t) => t.containerName === 'vl-reason')).toMatchObject({ height: 288, yPosition: 0 });
+    } finally {
+      clearLensStreamingHeading();
+    }
   });
 
   it('clears transient feedback before an answer and keeps background processing off its text', async () => {
@@ -2383,7 +2624,6 @@ describe('full-screen answers and quiet recording', () => {
       bridge.textContainerUpgrade.mockClear();
       await setStatus('R1/3');
       expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
-      expect(lastText('vl-status')).toBe('');
       await vi.advanceTimersByTimeAsync(3000);
       expect(lastText('vl-act-hint')).toBe('');
       await scrollActiveReason(1);
@@ -2401,7 +2641,7 @@ describe('full-screen answers and quiet recording', () => {
     while (await scrollActiveReason(1) === 'scrolled') pages.push(lastText('vl-reason'));
     expect(pages.some((p) => p.includes('TAIL_MARKER'))).toBe(true);
     for (const page of pages) {
-      expect(measureTextWrap(page, 568).height).toBeLessThanOrEqual(280);
+      expect(measureTextWrap(page, 576).height).toBeLessThanOrEqual(288);
       expect(page.length).toBeLessThanOrEqual(1000);
     }
   });
@@ -2412,14 +2652,157 @@ describe('full-screen answers and quiet recording', () => {
     await showActivePage(getPersona('eli5')!);
     const explanation = 'i'.repeat(14000);
     await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation }] });
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: {
+      textObject: Array<{ payload: { containerName: string; textColor: number } }>;
+    } }]>;
+    const texts = calls.at(-1)![0].payload.textObject.map((t) => t.payload);
+    expect(texts.find((t) => t.containerName === 'vl-page-pos')).toMatchObject({ textColor: 1 });
+    expect(texts.find((t) => t.containerName === 'vl-claim')).toMatchObject({ textColor: 2 });
+    expect(texts.find((t) => t.containerName === 'vl-reason')).toMatchObject({ textColor: 4 });
     const pages = [lastText('vl-reason')];
     while (await scrollActiveReason(1) === 'scrolled') pages.push(lastText('vl-reason'));
     expect(pages.length).toBeGreaterThan(12);
-    expect(pages.map((p) => p.replace(/^1\/1 · /, '').replace(/\n\n\d+\/\d+$/, '')).join('')).toBe(explanation);
+    expect(pages.join('')).toBe(explanation);
     for (const page of pages) {
       expect(page.length).toBeLessThanOrEqual(1000);
-      expect(measureTextWrap(page, 568).height).toBeLessThanOrEqual(280);
+      expect(measureTextWrap(page, 576).height).toBeLessThanOrEqual(288);
     }
+  });
+});
+
+describe('shared answer layout across lenses and history', () => {
+  const cases: Record<LensResult['type'], { result: LensResult; caption: string; answers: string[] }> = {
+    'fact-check': { result: { type: 'fact-check', claims: [{ quote: 'Spoken claim', claim: 'Claim to check', verdict: 'TRUE', reason: 'Supporting evidence' }] }, caption: 'Claim to check', answers: ['+ TRUE', 'Supporting evidence'] },
+    trivia: { result: { type: 'trivia', claims: [{ quote: '', question: 'Which planet?', answer: 'Mars', description: 'Volcanic detail' }] }, caption: 'Which planet?', answers: ['Mars', 'Volcanic detail'] },
+    'logical-fallacy': { result: { type: 'logical-fallacy', claims: [{ quote: 'Original argument', fallacy: 'Circular reasoning', explanation: 'The premise repeats the conclusion' }] }, caption: 'Original argument', answers: ['CIRCULAR REASONING', 'The premise repeats the conclusion'] },
+    bias: { result: { type: 'bias', claims: [{ quote: 'Original statement', direction: 'Loaded wording', verdict: 'BIASED', reason: 'The phrasing favors one side' }] }, caption: 'Original statement', answers: ['Loaded wording', '- BIASED', 'The phrasing favors one side'] },
+    eli5: { result: { type: 'eli5', claims: [{ quote: 'Technical term', oneLine: 'Simple restatement', expanded: 'Detailed explanation' }] }, caption: 'Technical term', answers: ['Simple restatement', 'Detailed explanation'] },
+    'devils-advocate': { result: { type: 'devils-advocate', claims: [{ quote: 'Original position', counterpoint: 'Alternative position', rationale: 'Reason for the alternative' }] }, caption: 'Original position', answers: ['Alternative position', 'Reason for the alternative'] },
+    'key-questions': { result: { type: 'key-questions', claims: [{ question: 'Who owns the decision?', context: 'Ownership is unclear' }] }, caption: 'Input context', answers: ['Who owns the decision?', 'Ownership is unclear'] },
+    companion: { result: { type: 'companion', claims: [{ quote: 'Conversation topic', kind: 'fact', headline: 'Useful fact', detail: 'Supporting detail' }] }, caption: 'Conversation topic', answers: ['Useful fact', 'FACT', 'Supporting detail'] },
+    'meeting-prep': { result: { type: 'meeting-prep', claims: [
+      { kind: 'answer', text: 'Main response', detail: 'Important detail', source: 'Noisy source' },
+      { kind: 'evidence', text: 'Evidence excerpt', detail: '', source: 'Noisy source' },
+      { kind: 'followup', text: 'Useful follow-up', detail: '', source: '' },
+    ] }, caption: 'Input context', answers: ['Main response', 'Important detail', 'Evidence excerpt', 'Useful follow-up'] },
+    'session-summary': { result: { type: 'session-summary', title: 'Meeting recap', summary: 'Summary narrative', topics: ['Budget'], keyPoints: ['Decision made'] }, caption: 'Meeting recap', answers: ['Summary narrative', 'Budget', 'Decision made'] },
+    translation: { result: { type: 'translation', sourceLanguage: 'ja', sourceText: 'こんにちは', sourceTextRomanized: 'Konnichiwa', translatedText: 'Hello', replyStarters: [{ source: 'はい', sourceRomanized: 'Hai', translated: 'Yes' }] }, caption: 'Konnichiwa', answers: ['Hello', 'Yes', 'Hai'] },
+    game: { result: { type: 'game', preset: { id: 'quiz', format: 'quiz-mc', topic: 'Science', difficulty: 'easy', saveToHistory: true }, questions: [{ text: 'Quiz question', options: ['Answer'], correctIndex: 0, reveal: 'Quiz explanation' }], answers: [0], score: 1 }, caption: 'Science', answers: ['1 / 1', 'Quiz'] },
+    assistance: { result: { type: 'assistance', action: 'commitments', headline: 'Send the report', detail: 'Confirm the deadline', quote: 'Original request', records: [{ id: 'record', kind: 'commitment', status: 'agreed', text: 'Deliver the report', owner: 'Sam', deadline: 'Friday', quote: 'I will send it' }] }, caption: 'Original request', answers: ['Send the report', 'Confirm the deadline', 'AGREED', 'Sam', 'Friday'] },
+  };
+
+  function assertLayout() {
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { textObject: Array<{ payload: {
+      containerName: string; xPosition: number; yPosition: number; width: number; height: number;
+      textColor: number; borderRadius: number; borderWidth: number; isEventCapture: number;
+    } }> } }]>;
+    const texts = calls.at(-1)![0].payload.textObject.map((t) => t.payload);
+    const caption = texts.find((t) => t.containerName === 'vl-claim')!;
+    const answer = texts.find((t) => t.containerName === 'vl-reason')!;
+    expect(caption).toMatchObject({ xPosition: 0, textColor: 2, borderWidth: 0, isEventCapture: 0 });
+    const position = texts.find((t) => t.containerName === 'vl-position');
+    if (position) {
+      expect(position).toMatchObject({ textColor: 1, yPosition: 0, isEventCapture: 0 });
+      expect(position.xPosition + position.width).toBe(576);
+      expect(position.textColor).toBeLessThan(caption.textColor);
+    }
+    const language = texts.find((t) => t.containerName === 'vl-language');
+    if (language) {
+      expect(language.yPosition).toBe(0);
+      expect(caption.yPosition).toBe(27);
+      expect(language.width).toBeLessThanOrEqual(position?.xPosition ?? 576);
+    } else {
+      expect(caption.yPosition).toBe(0);
+      expect(caption.width).toBeLessThanOrEqual(position?.xPosition ?? 576);
+    }
+    expect(caption.height).toBeLessThanOrEqual(54);
+    expect(caption.yPosition + caption.height).toBeLessThanOrEqual(54);
+    expect(answer).toMatchObject({ xPosition: 0, width: 576, textColor: 4, borderWidth: 1, borderRadius: 6, isEventCapture: 1 });
+    expect(answer.height).toBeGreaterThanOrEqual(230);
+    expect(answer.yPosition).toBe(caption.yPosition + caption.height + 4);
+    expect(answer.yPosition + answer.height).toBe(288);
+    expect(texts.filter((t) => t.isEventCapture === 1)).toHaveLength(1);
+  }
+
+  it.each(Object.entries(cases))('%s uses the same answer layout and content in live and history views', async (_type, fixture) => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    const entry: HistoryEntry = { id: 'result', timestamp: 1, sessionId: 's', lensId: 'trivia', lensName: 'Lens',
+      question: 'Input context', badge: '', quote: '', result: fixture.result,
+      webCitations: [{ domain: 'noisy.example' }],
+    };
+    await setLensResult(fixture.result, { sessionEntries: [entry], newEntryIds: new Set([entry.id]) });
+    assertLayout();
+    const caption = visibleHudText('vl-claim')!;
+    const answer = visibleHudText('vl-reason')!;
+    expect(caption).toContain(fixture.caption);
+    for (const text of fixture.answers) expect(answer).toContain(text);
+    expect(answer).not.toMatch(/Sources:|Noisy source|noisy.example/);
+    await showHistoryDetailPage(entry);
+    assertLayout();
+    expect(visibleHudText('vl-claim')).toBe(caption);
+    expect(visibleHudText('vl-reason')).toBe(answer);
+  });
+
+  it('translation replies and spoken translations use the same caption and answer box', async () => {
+    const { showTranslationTeleprompterPage, updateTranslationTeleprompterExtended, showTranslationWearerSpeakPage, updateTranslationWearerSpeakResult } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showTranslationTeleprompterPage({ source: 'Bonjour', translated: 'Hello' });
+    assertLayout();
+    expect(visibleHudText('vl-reason')).toBe('Bonjour');
+    await updateTranslationTeleprompterExtended('Bonjour tout le monde', 'Hello everyone');
+    expect(visibleHudText('vl-claim')).toBe('Hello everyone');
+    expect(visibleHudText('vl-reason')).toBe('Bonjour tout le monde');
+    await showTranslationWearerSpeakPage();
+    await updateTranslationWearerSpeakResult('Good evening', 'こんばんは', 'Konbanwa');
+    assertLayout();
+    expect(visibleHudText('vl-claim')).toBe('Good evening');
+    expect(visibleHudText('vl-reason')).toBe('Konbanwa');
+  });
+
+  it('game answer reveals use the same caption and answer box', async () => {
+    const { showGameFeedbackPage, showGameEndPage } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    const game = cases.game.result as Extract<LensResult, { type: 'game' }>;
+    await showGameFeedbackPage({ ...game, index: 0, phase: 'feedback' });
+    assertLayout();
+    expect(visibleHudText('vl-claim')).toContain('Quiz question');
+    expect(visibleHudText('vl-reason')).toContain('Correct');
+    expect(visibleHudText('vl-reason')).toContain('Quiz explanation');
+    await showGameEndPage({ ...game, index: 0, phase: 'end' });
+    assertLayout();
+    expect(visibleHudText('vl-claim')).toBe('Science');
+    expect(visibleHudText('vl-reason')).toContain('1 / 1');
+  });
+
+  it('translation places language on its own row and dims position more than the question', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('translation')!);
+    await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Buenas tardes. Como estas?',
+      translatedText: 'Good afternoon. How are you?', replyStarters: [] });
+    assertLayout();
+    expect(visibleHudText('vl-language')).toBe('Spanish');
+    expect(visibleHudText('vl-claim')).toBe('Buenas tardes. Como estas?');
+    expect(visibleHudText('vl-position')).toBe('1/1');
+    expect(visibleHudText('vl-reason')).toBe('Good afternoon. How are you?');
+  });
+
+  it('keeps question and position bounds apart when the position gains a digit', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    const entries: HistoryEntry[] = Array.from({ length: 10 }, (_, i) => ({
+      id: String(i), timestamp: i, sessionId: 's', lensId: 'trivia', lensName: 'Trivia',
+      question: 'A question about a topic', badge: '', quote: '',
+      result: { type: 'trivia', claims: [{ quote: '', question: 'A question about a topic', answer: `Answer ${i + 1}`, description: '' }] },
+    }));
+    await setLensResult(entries[8]!.result, { sessionEntries: entries, newEntryIds: new Set(['8']) });
+    expect(visibleHudText('vl-position')).toBe('9/10');
+    bridge.rebuildPageContainer.mockClear();
+    expect(await scrollActiveReason(1)).toBe('scrolled');
+    expect(visibleHudText('vl-position')).toBe('10/10');
+    expect(visibleHudText('vl-reason')).toBe('Answer 10');
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    assertLayout();
   });
 });
 

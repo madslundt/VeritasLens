@@ -1,13 +1,14 @@
 // src/personas/trivia.ts
 import type { LensResult, LanguageCode, TriviaClaim } from '@/types';
 import { LANGUAGES } from '@/types';
-import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES } from './_utils';
+import { trimTo, parseJsonResponse, coerceQuote, readClaimsArray, coerceConfidence, CONFIDENCE_SCHEMA_PROP, CONFIDENCE_PROMPT_RULES, LENS_FOCUS_RULES, NoRelevantContentError } from './_utils';
 
 const TRIVIA_BASE_PROMPT = `You are VeritasLens, a trivia assistant for smart glasses.
 
 The user just provided an audio clip likely containing one or more trivia or factual questions.
 
 1. Identify the trivia or factual questions being asked. Return up to FIVE distinct questions, but ONLY include one if you clearly understand what was asked and it has a definitive factual answer. Skip mid-sentences, unclear phrases, repeated points, and questions you can't answer with confidence — fewer high-confidence answers is always better than padding the list.
+Do not turn an assertion into a question or answer rhetorical questions as trivia. Preserve question scope, units, dates, and qualifiers. Use current evidence for changing facts; if an answer is uncertain or sources disagree, omit it rather than guessing.
 2. For each, include a short verbatim quote (≤140 chars) from the audio that captures how the question was asked.
 3. For each, restate the question (max 140 chars), provide the correct definitive answer in one short phrase (max 60 chars), and one brief explanatory sentence (max 140 chars). The FIRST half of the description should be the single most repeatable supporting fact (a number, a date, a place) — the wearer skims that and uses it in their next sentence.
 4. Optionally include "alt": a common alternative phrasing of the answer (≤60 chars). Examples: "Paris" + alt "Paris, France"; "Einstein" + alt "Albert Einstein". Use "" when there is no useful alternative phrasing.
@@ -17,7 +18,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildTriviaPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${TRIVIA_BASE_PROMPT}\n\nLANGUAGE: Write each \`question\`, \`answer\`, \`alt\`, and \`description\` in ${langName}. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
+  return `${TRIVIA_BASE_PROMPT}\n\nLANGUAGE: Write each \`question\`, \`answer\`, \`alt\`, and \`description\` in ${langName}. \`quote\` stays in the original spoken language.\n\nFOCUS: ${LENS_FOCUS_RULES}\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -36,14 +37,15 @@ const ITEM_SCHEMA = {
 export const TRIVIA_SCHEMA = {
   type: 'object',
   properties: {
-    claims: { type: 'array', minItems: 1, maxItems: 5, items: ITEM_SCHEMA },
+    claims: { type: 'array', minItems: 0, maxItems: 5, items: ITEM_SCHEMA },
   },
   required: ['claims'],
 } as const;
 
 export function parseTriviaResponse(text: string): LensResult {
   const raw = parseJsonResponse(text);
-  const items = readClaimsArray(raw);
+  const items = readClaimsArray(raw).filter((item) => coerceConfidence(item['confidence']) !== 'LOW');
+  if (Array.isArray(raw['claims']) && items.length === 0) throw new NoRelevantContentError();
   const claims: TriviaClaim[] = items.map((c) => {
     const confidence = coerceConfidence(c['confidence']);
     const alt = trimTo(typeof c['alt'] === 'string' ? c['alt'] : '', 60);

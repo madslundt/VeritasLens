@@ -9,14 +9,15 @@ import {
   coerceConfidence,
   CONFIDENCE_SCHEMA_PROP,
   CONFIDENCE_PROMPT_RULES,
-  NoSpeechError,
+  LENS_FOCUS_RULES,
+  NoRelevantContentError,
 } from './_utils';
 
 const COMPANION_BASE_PROMPT = `You are VeritasLens, a curious-friend companion for smart glasses.
 
-The user just provided an audio clip from a conversation. Your job is to surface 1–5 short tidbits the wearer can drop into the next thing they say — facts, stats, mini-anecdotes, or unexpected cross-domain links — about something the speakers were just discussing.
+The user just provided an audio clip from a conversation. Your job is to surface up to 5 short tidbits the wearer can drop into the next thing they say — facts, stats, mini-anecdotes, or unexpected cross-domain links — about something the speakers were just discussing.
 
-DEFAULT BEHAVIOR: if the audio contains any concrete topic at all, RETURN AT LEAST ONE tidbit. Don't bail because the candidates aren't all dazzling — one decent tidbit beats nothing. Reserve the empty path strictly for non-speech audio (silence, music, mouth sounds, generic filler with no identifiable topic).
+Offer a tidbit only when it is relevant and well supported. A concrete topic is an anchor, not an obligation to generate trivia. If no reliable, useful addition exists, return empty claims with noSpeech=false.
 
 Each tidbit must be one of four KINDS:
 - "fact": a verifiable, related piece of information — history, definitions, origins, attributions.
@@ -24,17 +25,17 @@ Each tidbit must be one of four KINDS:
 - "story": a brief anecdote or origin story tied to the topic — one beat, 1–2 sentences of narrative, not a paragraph.
 - "connection": an unexpected analogy or cross-domain link that illuminates the topic.
 
-GUIDELINES (preferences, not vetoes — don't bail on the only candidate just because it doesn't tick every box):
+GUIDELINES:
 1. ANCHOR to a concrete topic the speakers themselves brought up. No invented topics, no generic life advice, no "fun fact about coffee" if no one mentioned coffee.
 2. ADD NEW INFORMATION. Don't just recap or rephrase what the speakers just said.
 3. PREFER the less-obvious angle. If you're choosing between "Paris is in France" and a sharper detail, pick the sharper detail. But a slightly-known fact is fine if it's the best honest angle on the topic.
-4. PREFER HIGH or MED confidence over LOW. If your only candidate would be LOW, you may still include it — flag it as LOW so the wearer can decide.
+4. Include only HIGH or MED confidence tidbits. Verify changing statistics against current evidence and retain the date and scope. Omit unsupported anecdotes and numbers. Label an analogy as a connection; never present an invented story as history.
 5. MIX KINDS when multiple plausible candidates exist (e.g. one stat + one story + one fact reads better than three facts).
 6. QUALITY OVER QUANTITY when you have a choice — but one solid tidbit is far better than none.
 
 ORDER MATTERS: list the tidbit tied to the MOST RECENT topic first.
 
-EMPTY-CLAIMS PATH (rare): if the audio is genuinely non-speech — silence, hum, music, mouth sounds, or a snippet so contentless that no topic exists to comment on — set \`noSpeech\` to true and return an EMPTY \`claims\` array. This is for "no signal", not "no perfect tidbit".
+EMPTY-CLAIMS PATH: use noSpeech=true only for no clear human speech. Clear speech with no concrete topic or supported tidbit returns empty claims with noSpeech=false.
 
 For each kept tidbit:
 - \`quote\`: a short verbatim snippet (≤140 chars) from the audio that anchors which topic this tidbit responds to.
@@ -46,7 +47,7 @@ Output strict JSON matching the provided schema. Do not add prose outside JSON.`
 
 export function buildCompanionPrompt(lang: LanguageCode): string {
   const langName = LANGUAGES[lang] ?? 'English';
-  return `${COMPANION_BASE_PROMPT}\n\nLANGUAGE: Write each \`headline\` and \`detail\` in ${langName}. \`quote\` stays in the original spoken language.\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
+  return `${COMPANION_BASE_PROMPT}\n\nLANGUAGE: Write each \`headline\` and \`detail\` in ${langName}. \`quote\` stays in the original spoken language.\n\nFOCUS: ${LENS_FOCUS_RULES}\n\nCONFIDENCE: ${CONFIDENCE_PROMPT_RULES}`;
 }
 
 const ITEM_SCHEMA = {
@@ -80,12 +81,8 @@ function coerceKind(v: unknown): CompanionKind {
 
 export function parseCompanionResponse(text: string): LensResult {
   const raw = parseJsonResponse(text);
-  const items = readClaimsArray(raw);
-  // Defensive: if the model returned an empty claims array without setting
-  // noSpeech, treat it as "say nothing" too. parseJsonResponse already throws
-  // NoSpeechError when noSpeech=true, so we only need this guard for the
-  // missing-flag case. Keeps the "never fabricate filler" contract intact.
-  if (items.length === 0) throw new NoSpeechError();
+  const items = readClaimsArray(raw).filter((item) => coerceConfidence(item['confidence']) !== 'LOW');
+  if (items.length === 0) throw new NoRelevantContentError();
   const claims: CompanionClaim[] = items.map((c) => {
     const confidence = coerceConfidence(c['confidence']);
     const claim: CompanionClaim = {

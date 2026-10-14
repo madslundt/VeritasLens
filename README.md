@@ -2,7 +2,7 @@
 
 A real-time **contextual intelligence layer** for smart glasses. VeritasLens listens to a configurable rolling buffer of conversation audio and — on a single temple tap — streams it to your chosen LLM, displaying a glanceable result on the HUD or phone.
 
-> **Silent intelligence for your glasses.** Built as a single web bundle for the Even App WebView and a React Native companion for Ray-Ban Meta. No server, no native code on G2, no audio leaves the device until *you* trigger a check.
+> **Silent intelligence for your glasses.** Built as a single web bundle for the Even App WebView and a React Native companion for Ray-Ban Meta. No server, no native code on G2, audio uploads happen on request or through explicitly enabled hands-free assistance, live captions, or summaries.
 
 ---
 
@@ -40,29 +40,72 @@ npm start     --workspace=@veritaslens/rayban      # Expo dev server
 
 ---
 
-## Lenses (11 built-in)
+## Lenses (12 available tools)
 
 Pick one in the picker, or let **Auto** decide. Every lens streams structured JSON via `StreamingJsonParser`, so the HUD fills in as the response arrives.
 
 | Lens | What it does | Web grounding |
 |---|---|---|
-| **Auto** | Classifies the audio and routes to the best lens. Two-call: fast classifier + full analysis. | inherited |
+| **Best next help** | Uses your session profile and goal to choose useful help, or stays quiet. | inherited |
+| **Help me respond** | One natural response, acknowledgment, clarification, or follow-up grounded in the exchange. | — |
 | **Fact Check** | Labels up to 5 check-worthy claims (including numerical ones) `TRUE / FALSE / UNVERIFIED`, with a `correction` line on FALSE. | ✓ |
-| **Trivia** | Direct answer + brief description, with optional alt phrasing. | ✓ |
+| **Quick Answer** | Direct answer + brief description, with optional alt phrasing. | ✓ |
 | **Fallacy Check** | Names the logical fallacy and gives a polite `callOut` phrase. | — |
 | **Framing Check** | Detects political, factional, emotional, or tonal framing; offers a `counterFrame`. | — |
 | **Simplify** | Plain-language restatement: punchy `oneLine` + richer `expanded`. | — |
 | **Devil's Advocate** | Strongest counterargument plus a conversational `pivot` lead-in. | ✓ |
 | **Key Questions** | Open / unanswered questions ranked `CRITICAL / IMPORTANT / NICE`. | — |
-| **Companion** | Up to 5 short tidbits — facts, stats, anecdotes, or unexpected connections. | ✓ |
+| **Interesting context** | Up to 5 short tidbits — facts, stats, anecdotes, or unexpected connections. | ✓ |
 | **Translate** | Listens to a foreign-language speaker, shows their words + translation, and (Converse mode) suggests 3 reply starters. Auto mode = hands-free continuous translation. | — |
-| **Meeting Prep** | Real-time answers grounded in notes + labeled attachments you wrote on your phone beforehand. Every answer carries a verbatim **evidence** excerpt; an opt-in **follow-up** fires only when prep is silent on a decision-changing detail. Opt-in **"Verify public claims with web search"** checkbox lets the lens cross-check what the other party says against current web results — web-sourced answers show `Web · domain` attribution. | opt-in |
+| **Prepared assistance** | Real-time answers grounded in notes + labeled attachments you wrote on your phone beforehand. Every answer carries a verbatim **evidence** excerpt; an opt-in **follow-up** fires only when prep is silent on a decision-changing detail. Opt-in **"Verify public claims with web search"** checkbox lets the lens cross-check what the other party says against current web results — web-sourced answers show `Web · domain` attribution. | opt-in |
 
 Each lens also returns a self-rated `HIGH / MED / LOW` confidence per claim and a verbatim ≤140-char `quote` from the audio.
 
 Plus a built-in **Lens Game** mode (`personas/game.ts`, `runtime/gameHistory.ts`) that turns recent conversation into a 1-question quiz.
 
 ---
+
+## Conversation profiles and flows (Even G2)
+
+The phone opens on **Session**. Choose Everyday, Work, or Understand, then start
+without preparation or expand **Goals, notes & saved setups** to add a goal,
+constraints, selected person/project notes, and a named setup. Selected notes
+are sent to the configured analysis provider; unrelated notes are excluded.
+Prepared assistance uses selected session notes alongside its labeled attachments.
+
+**Lenses** is a separate catalogue with Conversation, Knowledge, and Arguments
+categories. **Games** has its own page, reached from Lenses. History, Settings,
+and AI setup retain their own navigation sections. Session drafts survive page
+changes until saved; saved setups are also selectable on the glasses.
+
+On glasses, single-tap opens the menu. **Help with this exchange** offers Reply,
+Explain, Check, Ask, Clarify/disagree, Remember, Catch up, Translate, and prepared
+assistance. **Examine the argument** contains the optional argument tools.
+**Refine or correct** reuses the latest captured exchange for shorter/more natural
+answers, explanations, or corrections. Double-tap captures a new exchange or
+cancels an in-flight request. Refinement leaves later speech available for the
+next check. The temporary audio snapshot is cleared when the session ends.
+
+**Session tools** separates microphone pause/resume, hands-free triggering, and
+live captions. Pausing preserves the session while stopping audio capture and
+caption/automatic requests. Dismissing a cue only hides its display. Unpinned
+cues expire after the configured duration; pinned cues suppress hands-free
+interventions and remain in history. Best next help can return no intervention;
+standard profiles reserve argument criticism for deliberate requests.
+
+Live captions are opt-in and use the configured Whisper host/key (or a custom
+Whisper endpoint). Speech is transcribed in serial chunks, approximately every
+four seconds plus provider latency, without requiring an analysis tap. Captions
+are not a complete permanent transcript and do not establish speaker identity.
+Their display is available on the phone and under Session tools on glasses.
+
+Remember and end-of-session review capture structured decisions, commitments,
+and questions. Proposals remain distinct from agreements; missing owners and
+deadlines stay explicit. History review separates my, other, and unassigned
+commitments, exposes supporting quotes, permits corrections, and exports the
+session or pinned moments as text. A saved moment can become a background note
+that must be explicitly selected for a future session. Catch-up answers only
+from captured audio/context, which may cover only part of a conversation.
 
 ## LLM providers
 
@@ -351,7 +394,7 @@ Add `--check` after `pack` to verify `package_id` availability on the store befo
 ## Privacy
 
 - Audio is held in a configurable rolling **in-memory** PCM ring buffer (30 s – 5 min). Eviction is FIFO; the buffer is released when the session ends.
-- Nothing is written to disk, IndexedDB, or any external audio store.
+- Raw audio is not written to disk or a persistent audio store. Captured speech is sent to the selected provider for analysis or opt-in transcription.
 - Voice-activity detection (Silero v6 + Earshot WASM) runs **locally** in the G2 WebView before analysis uploads. FFT is the fallback when model assets cannot load; native consumers use the FFT adapter without browser WASM.
 - Session history (analysis results, not audio) is persisted on-device — Even App KV on G2, `AsyncStorage` on Rayban — and never sent to any server.
 - API keys are stored per-provider on-device. On Rayban they land in `expo-secure-store` (iOS Keychain); on G2 they sit in the Even App KV store alongside other settings.

@@ -129,3 +129,7 @@ describe('cursor rule against PcmRingBuffer', () => {
     expect(buffer.linearPcmSince(afterSuccess).length).toBe(0);
   });
 });
+
+it('advances the cursor when speech had no relevant lens content', () => {
+  expect(resolveAnalysisCursor('noContent', 800, 400)).toBe(800);
+});

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the native modules — vitest's resolve.extensions already resolves
 // '../modules/expo-meta-camera' to the .web.ts file, so we don't vi.mock them here.
@@ -29,7 +29,7 @@ vi.mock('@veritaslens/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@veritaslens/core')>();
   return {
     ...actual,
-    callLensStream: vi.fn().mockResolvedValue('{"noSpeech":false,"claims":[]}'),
+    callLensStream: vi.fn(),
   };
 });
 
@@ -37,11 +37,19 @@ import { startLifecycle, stopLifecycle, triggerAnalysis, cancelAnalysis } from '
 import { useStore } from '../src/state/store';
 import * as core from '@veritaslens/core';
 
+const answer = JSON.stringify({ noSpeech: false, claims: [{
+  quote: 'Paris is in France', verdict: 'TRUE', claim: 'Paris is in France',
+  correction: '', reason: 'Paris is the French capital.', confidence: 'HIGH',
+}] });
+
 describe('lifecycle', () => {
   beforeEach(() => {
     useStore.setState(useStore.getInitialState(), true);
     vi.clearAllMocks();
+    vi.mocked(core.callLensStream).mockReset().mockResolvedValue(answer);
   });
+
+  afterEach(async () => { await stopLifecycle(); });
 
   it('startLifecycle sets up subscriptions and starts streams', async () => {
     await startLifecycle();
@@ -67,6 +75,16 @@ describe('lifecycle', () => {
     await stopLifecycle();
   });
 
+  it.each([false, true])('speech empty path returns to idle without a history entry (noSpeech=%s)', async (noSpeech) => {
+    await startLifecycle();
+    await new Promise((r) => setTimeout(r, 150));
+    vi.mocked(core.callLensStream).mockResolvedValueOnce(JSON.stringify({ noSpeech, claims: [] }));
+    await triggerAnalysis();
+    expect(useStore.getState().appPhase).toBe('idle');
+    expect(useStore.getState().sessionHistory).toHaveLength(0);
+    expect(useStore.getState().streamingResult).toBeNull();
+  });
+
   it('triggerAnalysis blocks when glasses are not connected', async () => {
     // Don't start lifecycle - leave glasses disconnected.
     await triggerAnalysis();
@@ -81,7 +99,7 @@ describe('lifecycle', () => {
     let resolveCallLens: (() => void) | null = null;
     (core.callLensStream as ReturnType<typeof vi.fn>).mockImplementation(async (opts: { signal?: AbortSignal }) => {
       return new Promise((resolve, reject) => {
-        resolveCallLens = () => resolve('{"noSpeech":false,"claims":[]}');
+        resolveCallLens = () => resolve(answer);
         opts.signal?.addEventListener('abort', () => {
           const err = new Error('aborted'); err.name = 'AbortError'; reject(err);
         });

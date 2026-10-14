@@ -35,6 +35,8 @@ The user has provided an audio clip of a conversation. Produce a thorough record
 
 4. \`summary\`: a thorough narrative that walks through the WHOLE conversation in the order it unfolded. Target 600–1500 characters across 2–4 paragraphs. Do NOT open with "The meeting ended …" or limit yourself to a conclusion — describe what was actually discussed from start to finish, weaving in the topics and key points above.
 
+Preserve who said what and distinguish proposals, opinions, disagreements, decisions, and completed actions. Do not convert a suggestion into a commitment or invent an owner, deadline, number, or agreement. Keep unresolved contradictions visible. Use fewer bullets for short clips; the target lengths are ceilings, not padding requirements.
+
 5. \`quote\` (optional, ≤140 chars): a verbatim line from the audio that best captures the conversation.
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.`;

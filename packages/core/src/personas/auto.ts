@@ -5,6 +5,8 @@ import { parseJsonResponse } from './_utils';
 
 /** Lens IDs the Auto classifier is allowed to pick. */
 export const AUTO_LENS_CANDIDATES = [
+  'respond',
+  'commitments',
   'fact-checker',
   'trivia',
   'logical-fallacy',
@@ -19,10 +21,12 @@ export type AutoLensCandidate = (typeof AUTO_LENS_CANDIDATES)[number];
 
 /** Per-candidate descriptions injected into the classifier prompt. */
 const CANDIDATE_DESCRIPTIONS: Record<string, string> = {
+  respond: '"respond": A natural response, acknowledgment, tactful clarification or useful follow-up would help the wearer participate in the latest exchange.',
+  commitments: '"commitments": Explicit decisions, proposed actions, agreed commitments, changed deadlines, or unresolved ownership should be captured.',
   'fact-checker': '"fact-checker": A specific factual claim is being made that can be verified against reliable knowledge — including numerical or statistical claims (percentages, counts, ratios, prices, comparisons) alongside history, geography, science, and attributions.',
   'trivia': '"trivia": The speaker asks a direct factual question that has a settled, well-known answer in general knowledge — names, dates, distances, capitals, definitions, numbers, who/what/when/where/how-many style lookups (e.g., "how far is the moon?", "who wrote Hamlet?", "what year did WW2 end?"). Phrased as a question, not an assertion.',
   'logical-fallacy': '"logical-fallacy": An argument is being made that likely contains a logical fallacy (ad hominem, straw man, false dilemma, slippery slope, etc.).',
-  'bias-detector': '"bias-detector": Loaded language, charged political/factional rhetoric, one-sided framing, OR purely emotional/tonal loading (anger, dismissiveness, catastrophising, enthusiasm) worth flagging.',
+  'bias-detector': '"bias-detector": Observable loaded wording, selective framing, or unsupported group generalizations worth examining. Emotion or disagreement alone does not establish bias; do not infer tone from a text transcript.',
   'eli5': '"eli5": Jargon-heavy, technical, or unusually complex language that a listener would benefit from having explained in plain terms.',
   'devils-advocate': '"devils-advocate": Someone makes a strong one-sided argument or assertion and the most compelling counterargument is worth surfacing.',
   'key-questions': '"key-questions": The speakers are discussing a topic but failing to raise important follow-up questions a careful listener would want answered. Use this to SURFACE questions the participants are NOT asking but should — not to answer a direct question the speaker just asked.',
@@ -33,8 +37,10 @@ const AUTO_CLASSIFIER_PREAMBLE = `You are VeritasLens, a real-time analysis assi
 
 The user just provided a short audio clip. Your job is to pick the SINGLE best analysis lens to apply, from these options:`;
 
-const DISAMBIGUATION_NOTES = `Pick exactly one. If multiple lenses could plausibly apply, pick the SINGLE most useful one for the listener.
-Choose based on the MOST RECENT complete question or claim in the current audio, not an older topic from conversation history. Preserve negation and qualifiers; do not infer a question or claim from an unfinished or unclear sentence.
+const DISAMBIGUATION_NOTES = `Pick exactly one of the enabled options listed above. Apply a preference below only when both named lenses are enabled. If multiple lenses could plausibly apply, pick the SINGLE most useful one for the listener.
+Choose based on the MOST RECENT complete question or claim in the current audio, not an older topic from conversation history. Preserve negation and qualifiers; do not infer a question or claim from an unfinished or unclear sentence. Choose "none" when no assistance is useful now; ordinary conversation does not always need an intervention. Consider the wearer's profile and goal before choosing criticism or trivia. Prefer respond for interpersonal exchanges and commitments for explicit work agreements.
+An explicit request to simplify or explain jargon takes priority over merely checking facts contained in that request: choose "eli5".
+Choose "logical-fallacy" for a defect in the premise-to-conclusion reasoning, "bias-detector" for loaded wording, and "devils-advocate" for a credible competing position; these are different tasks.
 Prefer "fact-checker" over "trivia" when the speaker is asserting a claim rather than asking.
 Prefer "fact-checker" over "devils-advocate" when a specific factual claim can be verified.
 Prefer "fact-checker" over "companion" when the speaker is asserting a check-worthy claim. Prefer "companion" over "fact-checker" when the audio is open discussion of a topic without a specific verifiable assertion.
@@ -75,7 +81,7 @@ export function buildAutoClassifierSchema(enabledCandidates: string[]) {
     properties: {
       chosenLensId: {
         type: 'string' as const,
-        enum: enabledCandidates,
+        enum: [...enabledCandidates, 'none'],
         description: 'The lens that best fits the audio content.',
       },
       reason: {
@@ -91,16 +97,21 @@ export function buildAutoClassifierSchema(enabledCandidates: string[]) {
 export const AUTO_CLASSIFIER_SCHEMA = buildAutoClassifierSchema([...AUTO_LENS_CANDIDATES]);
 
 export interface AutoClassification {
-  chosenLensId: AutoLensCandidate;
+  chosenLensId: AutoLensCandidate | 'none';
   reason?: string;
 }
 
-export function parseAutoClassifierResponse(text: string): AutoClassification {
+export function parseAutoClassifierResponse(
+  text: string,
+  enabledCandidates: readonly string[] = AUTO_LENS_CANDIDATES,
+): AutoClassification {
   const raw = parseJsonResponse(text);
   const id = typeof raw['chosenLensId'] === 'string' ? raw['chosenLensId'] : '';
-  const chosenLensId = (AUTO_LENS_CANDIDATES as readonly string[]).includes(id)
-    ? (id as AutoLensCandidate)
-    : 'fact-checker';
+  if (id === 'none') return { chosenLensId: 'none' };
+  if (!(AUTO_LENS_CANDIDATES as readonly string[]).includes(id) || !enabledCandidates.includes(id)) {
+    throw new Error(`Auto classifier returned an unavailable lens: ${id || '(missing)'}`);
+  }
+  const chosenLensId = id as AutoLensCandidate;
   const reason = typeof raw['reason'] === 'string' ? raw['reason'] : undefined;
   return { chosenLensId, reason };
 }

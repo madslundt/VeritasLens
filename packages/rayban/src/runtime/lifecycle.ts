@@ -219,7 +219,9 @@ export async function triggerAnalysis(): Promise<void> {
     // If this was an abort triggered by cancelAnalysis, the phase is already 'idle'.
     // Don't clobber it with 'error'.
     const isAbort = err instanceof Error && (err.name === 'AbortError' || err.message.includes('aborted'));
-    if (!isAbort) {
+    if (err instanceof Error && (err.name === 'NoRelevantContentError' || err.name === 'NoSpeechError')) {
+      state.setAppPhase('idle');
+    } else if (!isAbort) {
       state.setAppPhase('error');
     }
   } finally {

@@ -1493,8 +1493,8 @@ button.lens-info--clickable:focus-visible {
 }
 .lens-catalog > .lens-list > .lens-row:first-child,
 .lens-catalog > .lens-list > .lens-group-heading + .lens-row { border-radius: 12px 12px 0 0; }
-.lens-catalog > .lens-list > .lens-row:nth-child(3),
 .lens-catalog > .lens-list > .lens-row:last-child { border-radius: 0 0 12px 12px; border-bottom: 1px solid var(--border); }
+.lens-catalog > .lens-list > .lens-row:only-child { border-radius: 12px; }
 .lens-group-heading { padding: 24px 0 12px; }
 .lens-symbol { display: flex; align-items: center; justify-content: center; flex: 0 0 24px; color: #c4d4ca; }
 .lens-symbol svg { width: 24px; height: 24px; }
@@ -1642,3 +1642,39 @@ button.lens-info--clickable:focus-visible { outline: 2px solid var(--accent); ou
 
 .tab-content button, .tab-content input, .tab-content select,
 .tab-content textarea, .tab-content summary { scroll-margin-block: 140px; }
+
+.conversation-card { padding: 20px; margin-bottom: 24px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface, #18221d); }
+.conversation-card h2 { font-size: 18px; margin: 0 0 12px; }
+.conversation-card h3 { margin: 20px 0 8px; font-size: 15px; }
+.conversation-profiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.conversation-profile { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 14px; min-width: 0; text-align: left; color: var(--text); background: transparent; border: 1px solid var(--border); border-radius: 10px; cursor: pointer; }
+.conversation-profile[aria-pressed="true"] { border-color: var(--accent); background: #2a3326; }
+.conversation-profile span { font-size: 12px; line-height: 1.5; color: var(--muted); }
+.conversation-field { display: flex; flex-direction: column; gap: 7px; margin-block: 14px; min-width: 0; font-size: 13px; }
+.conversation-field input, .conversation-field textarea, .conversation-field select { width: 100%; box-sizing: border-box; padding: 12px; min-height: 44px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: #101b15; font: inherit; }
+.conversation-field textarea { resize: vertical; min-height: 90px; }
+.conversation-buttons { display: flex; flex-wrap: wrap; gap: 8px; margin-block: 12px; }
+.conversation-buttons button { min-height: 44px; }
+.conversation-context, .conversation-caption { padding: 14px; margin-block: 12px; background: #101b15; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
+.conversation-context p, .conversation-context blockquote { white-space: pre-wrap; font-size: 13px; line-height: 1.5; }
+.conversation-context blockquote { margin: 12px 0 0; padding-left: 12px; border-left: 2px solid var(--accent); color: var(--muted); }
+.conversation-preparation { border-bottom: 1px solid var(--border); padding-bottom: 16px; }
+.conversation-live { padding-top: 8px; }
+.conversation-card .toggle-row { margin-block: 14px; }
+.conversation-card button:disabled { opacity: .5; cursor: default; }
+@media (max-width: 480px) {
+  .conversation-card { padding: 14px; }
+  .conversation-profiles { grid-template-columns: 1fr; }
+  .conversation-profile { padding: 12px; gap: 4px; }
+}
+
+.conversation-disclosure { border-top: 1px solid var(--border); margin-top: 16px; }
+.conversation-disclosure > summary { min-height: 48px; padding: 14px 0; cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 14px; list-style: none; }
+.conversation-disclosure > summary::-webkit-details-marker { display: none; }
+.conversation-disclosure > summary > svg { width: 18px; height: 18px; color: var(--muted); transition: transform 120ms ease; }
+.conversation-disclosure[open] > summary > svg { transform: rotate(180deg); }
+.lens-category-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.lens-category-nav button { min-height: 44px; }
+.lens-category-nav button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); background: #2a3326; }
+.bottom-nav { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+@media (max-width: 359px) { .bottom-nav-label { font-size: 10px; } }
