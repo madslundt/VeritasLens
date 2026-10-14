@@ -87,6 +87,92 @@ describe('custom endpoints', () => {
     expect(calls[0]![1].headers).toEqual({ 'content-type': 'application/json' });
   });
 
+  it.each(['analysis', 'game'] as const)('runs %s with a cancellation signal in older WebViews', async (operation) => {
+    useCustomSettings();
+    const controller = new AbortController();
+    const original = Object.getOwnPropertyDescriptor(AbortSignal.prototype, 'throwIfAborted');
+    Object.defineProperty(AbortSignal.prototype, 'throwIfAborted', { value: undefined, configurable: true });
+    try {
+      const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+        if (url.endsWith('/audio/transcriptions')) return json({ text: 'test speech' });
+        if (operation === 'game' || !JSON.parse(init!.body as string).stream) {
+          return json({ choices: [{ message: { content: '{"answer":"ok"}' } }] });
+        }
+        return new Response('data: {"choices":[{"delta":{"content":"{\\"answer\\":\\"ok\\"}"}}]}\n\ndata: [DONE]\n\n');
+      });
+      vi.stubGlobal('fetch', fetch);
+      // The phone's connection test has no outer cancellation signal. It
+      // succeeds even on WebViews where the real gesture paths used to fail.
+      await runSelfTest('', 'local-model');
+      fetch.mockClear();
+      const opts = { prompt: 'Return JSON', schema, signal: controller.signal };
+      const result = operation === 'game' ? await callGame(opts)
+        : await callLensStream({ ...opts, wav: new Uint8Array(4) });
+      expect(JSON.parse(result)).toEqual({ answer: 'ok' });
+      expect(fetch.mock.calls.at(-1)?.[0]).toBe(`${endpoint}/chat/completions`);
+    } finally {
+      if (original) Object.defineProperty(AbortSignal.prototype, 'throwIfAborted', original);
+      else Reflect.deleteProperty(AbortSignal.prototype, 'throwIfAborted');
+    }
+  });
+
+  it('generates games on servers that require a user query', async () => {
+    useCustomSettings();
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(init.body as string);
+      if (!body.messages.some((message: { role: string; content: string }) => message.role === 'user' && message.content.trim())) {
+        return json({ error: { message: 'No user query found in messages.' } }, 400);
+      }
+      return json({ choices: [{ message: { content: '{"answer":"game"}' } }] });
+    });
+    vi.stubGlobal('fetch', fetch);
+    expect(await callGame({ prompt: 'Generate a game', schema })).toBe('{"answer":"game"}');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a complete game batch to take longer than one minute without restarting it', async () => {
+    useCustomSettings();
+    vi.useFakeTimers();
+    const controller = new AbortController();
+    const retry = vi.fn();
+    const fetch = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        init.signal?.removeEventListener('abort', abort);
+        resolve(json({ choices: [{ message: { content: '{"answer":"game"}' } }] }));
+      }, 65_000);
+      const abort = () => { clearTimeout(timer); reject(init.signal!.reason); };
+      init.signal!.addEventListener('abort', abort, { once: true });
+    }));
+    vi.stubGlobal('fetch', fetch);
+    const result = callGame({ prompt: 'Generate a game', schema, signal: controller.signal, onRetry: retry });
+    const settled = result.catch(() => undefined);
+    try {
+      await vi.advanceTimersByTimeAsync(65_000);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(retry).not.toHaveBeenCalled();
+      expect(await result).toBe('{"answer":"game"}');
+    } finally {
+      controller.abort();
+      await settled;
+    }
+  });
+
+  it.each(['analysis', 'game'] as const)('preserves %s cancellation without throwIfAborted', async (operation) => {
+    useCustomSettings();
+    const controller = new AbortController();
+    Object.defineProperty(controller.signal, 'throwIfAborted', { value: undefined });
+    const fetch = vi.fn(async () => {
+      controller.abort();
+      return operation === 'game' ? json({ choices: [{ message: { content: '{"answer":"late"}' } }] })
+        : json({ text: 'late speech' });
+    });
+    vi.stubGlobal('fetch', fetch);
+    const opts = { prompt: 'Return JSON', schema, signal: controller.signal };
+    const result = operation === 'game' ? callGame(opts) : callLensStream({ ...opts, wav: new Uint8Array(4) });
+    await expect(result).rejects.toMatchObject({ name: 'AbortError' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it.each([503, 429])('retries custom chat HTTP %s without repeating transcription', async (status) => {
     useCustomSettings();
     vi.useFakeTimers();

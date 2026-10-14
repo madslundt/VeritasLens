@@ -107,6 +107,7 @@ import {
   showHistoryListPage,
   getHistoryListEntries,
   showGamesPickerPage,
+  showGameLoadingPage,
   showSpecializedPickerPage,
   specializedPickerEntryAtIndex,
   showMenuPage,
@@ -348,6 +349,8 @@ async function reloadHistoryFromStorage(): Promise<void> {
 export async function startHudRuntime(): Promise<void> {
   const configured = isProviderConfigured();
   if (running) {
+    gameLocationController?.abort();
+    gameLocationController = null;
     if (configured) await showPickerPage();
     else await showUnconfiguredPage();
     return;
@@ -373,6 +376,8 @@ export async function startHudRuntime(): Promise<void> {
 
 export async function refreshHudPage(): Promise<void> {
   if (!running) return;
+  gameLocationController?.abort();
+  gameLocationController = null;
   const configured = isProviderConfigured();
   if (configured) await showPickerPage();
   else await showUnconfiguredPage();
@@ -381,6 +386,8 @@ export async function refreshHudPage(): Promise<void> {
 export async function stopHudRuntime(): Promise<void> {
   if (!running) return;
   running = false;
+  gameLocationController?.abort();
+  gameLocationController = null;
   stopSettingsWatcher();
   await stopSpinner();
   // Abort the auto-summary tick BEFORE clearing the timer, so a tick already
@@ -545,6 +552,12 @@ function handleEvent(event: EvenHubEvent): void {
   // review so users always have a way out, even before an API key is set.
   // Everywhere else it starts analysis, or cancels an in-flight one.
   if (gesture.type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+    if (gameLocationController) {
+      gameLocationController.abort();
+      gameLocationController = null;
+      cancelGame().catch((err) => logDispatchError('cancel-game-fail', err));
+      return;
+    }
     if (page === 'picker' || page === 'unconfigured') {
       requestHostExitConfirm().catch((err) => logDispatchError('host-exit-fail', err));
       return;
@@ -675,6 +688,7 @@ async function handleSpecializedPickerEvent(g: Gesture): Promise<void> {
 }
 
 let lastGamesPickerIndex = 0;
+let gameLocationController: AbortController | null = null;
 
 /** Total wall-clock budget for the "Near me" tap to land a fresh location fix
  *  before it gives up and shows the retry hint. Long enough for a cold GPS to
@@ -708,43 +722,48 @@ async function handleGamesPickerEvent(g: Gesture): Promise<void> {
         });
         return;
       }
-      // Probe at tap time, not before. The picker hint becomes the loading
-      // surface — `showGameLoadingPage` doesn't render until a fix lands (so
-      // there's no flash of a wrong-topic loading frame). A cold GPS often
-      // misses on the first read but warms the sensor, so we retry within a
-      // single tap for up to ~8 s instead of stranding the wearer on
-      // "Locating…" until they tap again. A warm OS cache resolves the very
-      // first attempt in < 100 ms.
-      await showGamesPickerPage(gamePresets(), { errorMessage: 'Locating…' });
-      const beforeResolvedAt = s.cachedLocation?.resolvedAt ?? 0;
-      const setLs = (k: string, v: string) => getBridge().setLocalStorage(k, v);
-      // probeAndCacheLocation returns the existing cache on failure, so we
-      // detect "got a fresh fix this attempt" by comparing resolvedAt rather
-      // than the null-vs-cached identity — a stale cache from earlier in the
-      // session is truthy but we want this game to reflect where the wearer
-      // is *now*.
-      const deadline = Date.now() + LOCATE_BUDGET_MS;
-      let fresh: CachedLocation | null = null;
-      for (;;) {
-        const loc = await probeAndCacheLocation(setLs);
-        if (loc && loc.resolvedAt > beforeResolvedAt) {
-          fresh = loc;
-          break;
+      // Location is the first stage of loading a nearby game, with the same
+      // cancel gesture as generation. Never leave the picker interactive
+      // while a probe is in flight, or repeated taps start competing games.
+      gameLocationController?.abort();
+      const controller = new AbortController();
+      gameLocationController = controller;
+      const ownsLocation = () => !controller.signal.aborted && gameLocationController === controller;
+      try {
+        await showGameLoadingPage(null, '');
+        if (!ownsLocation()) return;
+        const beforeResolvedAt = s.cachedLocation?.resolvedAt ?? 0;
+        const setLs = (k: string, v: string) => getBridge().setLocalStorage(k, v);
+        // probeAndCacheLocation returns the existing cache on failure, so we
+        // detect "got a fresh fix this attempt" by comparing resolvedAt rather
+        // than the null-vs-cached identity — a stale cache from earlier in the
+        // session is truthy but we want this game to reflect where the wearer
+        // is *now*.
+        const deadline = Date.now() + LOCATE_BUDGET_MS;
+        let fresh: CachedLocation | null = null;
+        for (;;) {
+          const loc = await probeAndCacheLocation(setLs);
+          if (!ownsLocation() || currentHudPage() !== 'game-loading') return;
+          if (loc && loc.resolvedAt > beforeResolvedAt) {
+            fresh = loc;
+            break;
+          }
+          if (Date.now() >= deadline) break;
+          await delay(LOCATE_RETRY_DELAY_MS);
+          if (!ownsLocation() || currentHudPage() !== 'game-loading') return;
+          if (Date.now() >= deadline) break;
         }
-        if (Date.now() >= deadline) break;
-        await delay(LOCATE_RETRY_DELAY_MS);
-        if (Date.now() >= deadline) break;
-        // Re-assert the hint in case a parallel page push raced in; cheap and
-        // keeps "Locating…" steady across retries.
-        await showGamesPickerPage(gamePresets(), { errorMessage: 'Locating…' });
+        if (!fresh) {
+          await showGamesPickerPage(gamePresets(), {
+            errorMessage: 'Could not get your location — try again',
+          });
+          return;
+        }
+        gameLocationController = null;
+        await startGame(materializeRandomLocationPreset(fresh));
+      } finally {
+        if (gameLocationController === controller) gameLocationController = null;
       }
-      if (!fresh) {
-        await showGamesPickerPage(gamePresets(), {
-          errorMessage: 'Could not get your location — try again',
-        });
-        return;
-      }
-      await startGame(materializeRandomLocationPreset(fresh));
       return;
     }
     await startGame(entry.preset);

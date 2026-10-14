@@ -75,7 +75,7 @@ import {
 } from '../src/runtime/game';
 import { GAME_LENGTH, RANDOM_GAME_PRESET_ID } from '@veritaslens/core';
 import type { GamePreset, CallGameOptions } from '@veritaslens/core';
-import { sessionHistory, setSessionHistory } from '../src/state/store';
+import { errorMessage, setErrorMessage, sessionHistory, setSessionHistory } from '../src/state/store';
 
 const quizPreset: GamePreset = {
   id: 'p1',
@@ -104,6 +104,7 @@ beforeEach(async () => {
   await cancelGame().catch(() => undefined);
   hudCalls.picker.mockClear();
   setSessionHistory([]);
+  setErrorMessage(null);
 });
 
 describe('materializeRandomPreset', () => {
@@ -118,6 +119,30 @@ describe('materializeRandomPreset', () => {
 });
 
 describe('startGame', () => {
+  it('exposes the provider failure on the phone', async () => {
+    callGameMock.mockRejectedValueOnce(new Error('Custom HTTP 400: model unavailable'));
+    await startGame(quizPreset);
+    expect(errorMessage()).toBe('Custom HTTP 400: model unavailable');
+    expect(hudCalls.picker).toHaveBeenCalledWith(expect.anything(), {
+      errorMessage: 'Generation failed — see phone for details',
+    });
+    callGameMock.mockResolvedValueOnce(makeQuizPayload());
+    await startGame(quizPreset);
+    expect(errorMessage()).toBeNull();
+  });
+
+  it('does not publish an error from a cancelled generation that fails late', async () => {
+    let fail!: (error: Error) => void;
+    callGameMock.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => { fail = reject; }));
+    const pending = startGame(quizPreset);
+    await vi.waitFor(() => expect(callGameMock).toHaveBeenCalled());
+    await cancelGame();
+    fail(new Error('Late network failure'));
+    await pending;
+    expect(errorMessage()).toBeNull();
+    expect(hudCalls.picker).toHaveBeenCalledOnce();
+  });
+
   it('forwards the game format/topic and retains search sources in game history', async () => {
     const citations = [{ domain: 'example.org', url: 'https://example.org/evidence' }];
     callGameMock.mockImplementationOnce(async (opts) => {

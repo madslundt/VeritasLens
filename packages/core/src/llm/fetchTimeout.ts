@@ -19,6 +19,13 @@ export interface FetchTimeoutHandle {
   timedOut: () => boolean;
 }
 
+/** AbortSignal.throwIfAborted is unavailable in some Even App WebViews. */
+export function throwIfAborted(signal: AbortSignal | null | undefined): void {
+  if (signal?.aborted) {
+    throw signal.reason ?? Object.assign(new Error('Aborted'), { name: 'AbortError' });
+  }
+}
+
 export function withFetchTimeout(
   outer: AbortSignal | undefined,
   timeoutMs: number,

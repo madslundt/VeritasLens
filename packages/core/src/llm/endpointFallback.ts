@@ -1,5 +1,5 @@
 import { normalizeOpenAiBaseUrl } from '@/types';
-import { UploadTimeoutError } from '@/llm/fetchTimeout';
+import { UploadTimeoutError, throwIfAborted } from '@/llm/fetchTimeout';
 
 /** Deadline for reaching response headers before trying another address. */
 export const ENDPOINT_HEADER_TIMEOUT_MS = 10_000;
@@ -11,10 +11,6 @@ export interface EndpointFallbackOptions {
   apiKey: string;
   path: string;
   init: RequestInit;
-}
-
-function throwIfAborted(signal: AbortSignal | null | undefined): void {
-  if (signal?.aborted) throw signal.reason ?? Object.assign(new Error('Aborted'), { name: 'AbortError' });
 }
 
 function headerDeadline(outer: AbortSignal | null | undefined) {

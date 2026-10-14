@@ -25,11 +25,14 @@ import {
 import { MAX_RETRIES, parseGoogleRetryDelayMs, parseRetryAfterMs } from './gemini';
 import { toStrictSchema } from './openai';
 import { fetchWithEndpointFallback } from '@/llm/endpointFallback';
-import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
+import { withFetchTimeout, UploadTimeoutError, throwIfAborted } from '@/llm/fetchTimeout';
 import { settings } from '@/state/store';
 import { prepareGameSearch, type GameSearchOptions } from '@/llm/gameSearch';
 
-const CHAT_TIMEOUT_MS = 60_000;
+// A batch includes ten questions and explanations; custom servers can take
+// longer than a short lens answer. Keep cancellation immediate while giving
+// the full batch time to finish before restarting the same generation.
+const CHAT_TIMEOUT_MS = 180_000;
 const MAX_RETRY_DELAY_MS = 8_000;
 const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
 const LENS_TOOL_NAME = 'emit_game_questions';
@@ -62,7 +65,7 @@ export async function callGame(opts: CallGameOptions): Promise<string> {
   }
   // Search once outside provider retries; games have no native search wiring.
   const evidence = await prepareGameSearch(opts, s);
-  opts.signal?.throwIfAborted();
+  throwIfAborted(opts.signal);
   opts = { ...opts, prompt: evidence.prompt };
   if (evidence.citations.length) {
     try { opts.onCitations?.(evidence.citations); } catch { /* subscriber errors */ }
@@ -158,9 +161,12 @@ async function callGameOpenAi(
     response_format: isCustomOpenAiBaseUrl(baseUrl)
       ? { type: 'json_object' }
       : { type: 'json_schema', json_schema: { name: 'game_questions', strict: true, schema: strict } },
-    messages: [{ role: 'system', content: isCustomOpenAiBaseUrl(baseUrl)
-      ? `${opts.prompt}\nReturn JSON matching this schema: ${JSON.stringify(strict)}`
-      : opts.prompt }],
+    messages: [
+      { role: 'system', content: isCustomOpenAiBaseUrl(baseUrl)
+        ? `${opts.prompt}\nReturn JSON matching this schema: ${JSON.stringify(strict)}`
+        : opts.prompt },
+      { role: 'user', content: 'Generate the game questions according to the instructions above.' },
+    ],
   });
 
   return runWithRetry(opts.signal, opts.onRetry, async (signal) => {
@@ -281,7 +287,7 @@ async function runWithRetry(
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    outerSignal?.throwIfAborted();
+    throwIfAborted(outerSignal);
     if (attempt > 0) {
       await onRetry?.(attempt);
       await retryDelay(nextDelayMs, outerSignal);
@@ -289,7 +295,7 @@ async function runWithRetry(
     const attemptCtl = withFetchTimeout(outerSignal, CHAT_TIMEOUT_MS);
     try {
       const result = await attemptOnce(attemptCtl.signal);
-      outerSignal?.throwIfAborted();
+      throwIfAborted(outerSignal);
       attemptCtl.cleanup();
       return result;
     } catch (err) {

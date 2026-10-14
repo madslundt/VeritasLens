@@ -7,10 +7,28 @@
 // abort from a user / runtime abort.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { withFetchTimeout, isUploadTimeout, UploadTimeoutError } from '../src/llm/fetchTimeout';
+import { withFetchTimeout, isUploadTimeout, UploadTimeoutError, throwIfAborted } from '../src/llm/fetchTimeout';
 
 beforeEach(() => { vi.useFakeTimers(); });
 afterEach(() => { vi.useRealTimers(); });
+
+describe('throwIfAborted', () => {
+  it('preserves the original cancellation reason', () => {
+    const controller = new AbortController();
+    const reason = new Error('Cancelled');
+    controller.abort(reason);
+    expect(() => throwIfAborted(controller.signal)).toThrow(reason);
+  });
+
+  it('provides AbortError when an older WebView has no reason property or abort helper', () => {
+    const controller = new AbortController();
+    Object.defineProperty(controller.signal, 'reason', { value: undefined });
+    Object.defineProperty(controller.signal, 'throwIfAborted', { value: undefined });
+    expect(() => throwIfAborted(controller.signal)).not.toThrow();
+    controller.abort();
+    expect(() => throwIfAborted(controller.signal)).toThrow(expect.objectContaining({ name: 'AbortError' }));
+  });
+});
 
 describe('withFetchTimeout', () => {
   it('aborts the returned signal when the timer fires and marks timedOut()=true', () => {

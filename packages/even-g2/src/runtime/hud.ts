@@ -256,13 +256,13 @@ let autoModeIndicator = false;
 
 /** Compute the text that should currently be in the corner status slot for
  *  the active layout. Combines the canonical status frame with the recording
- *  dot fallback used on the listening-state layouts. Discreet idle deliberately
- *  shows nothing in the slot — the LVGL label caret already marks the corner —
- *  so the discreet wearer sees only the blinking caret until the spinner kicks
- *  in during analysis. Answers suppress the corner entirely. */
+ *  dot fallback used on the listening-state layouts. Both baseline and discreet
+ *  idle draw an explicit dot; firmware carets are not a reliable recording
+ *  indicator. Answers suppress the corner entirely. */
 function statusDisplayText(): string {
   if (!recordingDotEligible) return '';
   if (pendingStatusFrame !== '') return pendingStatusFrame;
+  if (activeLayout === 'discreet-minimal') return '•';
   if (activeLayout !== 'baseline') return '';
   // Auto-mode replaces the dot with a short label so the wearer can tell
   // at a glance that no tap is required. Confined to baseline because the
@@ -2181,17 +2181,20 @@ function buildSpecializedPickerPage(specialized: Persona[]): RebuildPageContaine
   });
 }
 
-export async function showGameLoadingPage(preset: GamePreset, retryLabel: string): Promise<void> {
+/** A null preset is the location stage, before a nearby topic is known. */
+export async function showGameLoadingPage(preset: GamePreset | null, retryLabel: string): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameLoadingPage().');
   const ok = await getBridge().rebuildPageContainer(buildGameLoadingPage(preset, retryLabel));
   if (!ok) throw new Error('rebuildPageContainer (game-loading) failed.');
   currentPage = 'game-loading';
 }
 
-function buildGameLoadingPage(preset: GamePreset, retryLabel: string): RebuildPageContainer {
-  const headline = retryLabel ? `Loading ${retryLabel}…` : 'Loading…';
-  const topic = preset.topic ? preset.topic : '…picking a topic';
-  const sub = clip(`${gameFormatLabel(preset.format)} · ${topic} · ${gameDifficultyLabel(preset.difficulty)}`, 200);
+function buildGameLoadingPage(preset: GamePreset | null, retryLabel: string): RebuildPageContainer {
+  const headline = !preset ? 'Locating…' : retryLabel ? `Loading ${retryLabel}…` : 'Loading…';
+  const topic = preset?.topic || '…picking a topic';
+  const sub = preset
+    ? clip(`${gameFormatLabel(preset.format)} · ${topic} · ${gameDifficultyLabel(preset.difficulty)}`, 200)
+    : 'Finding your location for a local game';
   const title = new TextContainerProperty({
     containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
     xPosition: 16, yPosition: 72, width: SCREEN_W - 32, height: 36,

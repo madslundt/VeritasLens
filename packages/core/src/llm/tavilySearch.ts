@@ -1,6 +1,6 @@
 import type { WebCitation } from '@/types';
 import { buildCitation, dedupeCitations } from '@/llm/citations';
-import { withFetchTimeout, UploadTimeoutError } from '@/llm/fetchTimeout';
+import { withFetchTimeout, UploadTimeoutError, throwIfAborted } from '@/llm/fetchTimeout';
 
 export async function tavilySearch(opts: { apiKey: string; query: string; signal?: AbortSignal }): Promise<WebCitation[]> {
   if (!opts.apiKey.trim()) throw new Error('Add a Tavily API key.');
@@ -15,7 +15,7 @@ export async function tavilySearch(opts: { apiKey: string; query: string; signal
     attempt.signal.addEventListener('abort', onAbort, { once: true });
   });
   try {
-    attempt.signal.throwIfAborted();
+    throwIfAborted(attempt.signal);
     const request = async (): Promise<WebCitation[]> => {
       const response = await fetch('https://api.tavily.com/search', {
         method: 'POST',
@@ -25,7 +25,7 @@ export async function tavilySearch(opts: { apiKey: string; query: string; signal
       });
       if (!response.ok) throw new Error(`Tavily search HTTP ${response.status}.`);
       const payload: unknown = await response.json();
-      attempt.signal.throwIfAborted();
+      throwIfAborted(attempt.signal);
       const results = payload && typeof payload === 'object' && 'results' in payload ? payload.results : undefined;
       if (!Array.isArray(results)) throw new Error('Tavily returned an invalid search response.');
       const citations: WebCitation[] = [];

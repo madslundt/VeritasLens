@@ -1,4 +1,5 @@
 import type { GameFormat, Settings, WebCitation } from '@/types';
+import { throwIfAborted } from '@/llm/fetchTimeout';
 
 export interface GameSearchOptions {
   format: GameFormat;
@@ -36,14 +37,14 @@ export async function prepareGameSearch(
   opts: { prompt: string; search?: GameSearchOptions; signal?: AbortSignal },
   settings: Pick<Settings, 'tavilyEnabled' | 'tavilyApiKey'>,
 ): Promise<{ prompt: string; citations: WebCitation[] }> {
-  opts.signal?.throwIfAborted();
+  throwIfAborted(opts.signal);
   const ungrounded = { prompt: opts.prompt, citations: [] };
   if (!opts.search || opts.search.format === 'riddle' || !settings.tavilyEnabled || !settings.tavilyApiKey?.trim()) return ungrounded;
   try {
     const topic = searchTopic(opts.search);
     const { tavilySearch } = await import('@/llm/tavilySearch');
     const citations = await tavilySearch({ apiKey: settings.tavilyApiKey, query: `Facts and history about ${topic}`, signal: opts.signal });
-    opts.signal?.throwIfAborted();
+    throwIfAborted(opts.signal);
     if (!citations.length) return ungrounded;
     const randomTopic = !opts.search.topic.trim()
       ? `\nThe topic for this Random batch is ${JSON.stringify(topic)}. Use it instead of choosing another topic and return it as chosenTopic.\n`

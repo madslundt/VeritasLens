@@ -39,6 +39,7 @@ import {
   pushHistoryEntry,
   saveGamePresets,
   sessionHistory,
+  setErrorMessage,
   settings,
 } from '@/state/store';
 import { getBridge } from './bridge';
@@ -152,6 +153,7 @@ export async function startGame(preset: GamePreset): Promise<void> {
   inflight?.abort();
   const controller = new AbortController();
   inflight = controller;
+  setErrorMessage(null);
   retryLabel = '';
   lastGameOptionIndex = 0;
 
@@ -241,17 +243,20 @@ export async function startGame(preset: GamePreset): Promise<void> {
     setSession(nextSession);
     await showGameQuestionPage(nextSession);
   } catch (err) {
+    if (controller.signal.aborted || inflight !== controller) return;
     if ((err as Error)?.name === 'AbortError') {
       // Cancelled by the user via double-tap. cancelGame already cleared the
       // session signal and navigated away — nothing more to do here.
       return;
     }
+    const message = err instanceof Error ? err.message : String(err);
+    setErrorMessage(message);
     pushDebugEvent({
       label: 'game-load-fail',
-      detail: err instanceof Error ? err.message : String(err),
+      detail: message,
     });
     setSession(null);
-    await showGamesPickerPage(gamePresets(), { errorMessage: 'Generation failed — try again' });
+    await showGamesPickerPage(gamePresets(), { errorMessage: 'Generation failed — see phone for details' });
   } finally {
     if (inflight === controller) inflight = null;
   }

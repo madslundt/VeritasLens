@@ -475,7 +475,7 @@ describe('discreet mode', () => {
     expect(findText(payload, 'vl-clock')).toBeUndefined();
   });
 
-  it('discreet-minimal layout has a single empty top-right slot + event sink (no rec dot; the LVGL caret is the indicator)', async () => {
+  it('discreet-minimal layout shows a recording dot in the top-right slot plus an event sink', async () => {
     await saveDiscreet(fakeSetLs, true);
     setActiveLayout('discreet-minimal');
     await bootstrapHud('picker');
@@ -487,7 +487,7 @@ describe('discreet mode', () => {
     // container alongside the status slot, and the listObject is empty.
     expect(payload.textObject).toHaveLength(2);
     expect(payload.listObject).toHaveLength(0);
-    expect(findText(payload, 'vl-status')?.content).toBe('');
+    expect(findText(payload, 'vl-status')?.content).toBe('•');
     expect(findText(payload, 'vl-clock')).toBeUndefined();
     expect(findText(payload, 'vl-rec')).toBeUndefined();
     expect(findText(payload, 'vl-act-hint')).toBeUndefined();
@@ -588,7 +588,7 @@ describe('discreet mode', () => {
     await setLensResult(null);
     expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
     const payload = lastRebuildPayload();
-    expect(findText(payload, 'vl-status')?.content).toBe('');
+    expect(findText(payload, 'vl-status')?.content).toBe('•');
     expect(findText(payload, 'vl-claim')).toBeUndefined();
     // Demotion path skips the text upgrades — the discreet idle layout has no
     // claim/verdict/reason containers to write into.
