@@ -449,11 +449,8 @@ export type ClaudeModel = (typeof CLAUDE_MODELS)[number];
 export const DEFAULT_CLAUDE_MODEL: ClaudeModel = 'claude-sonnet-4-6';
 
 /**
- * OpenAI-compatible base URLs that ship in the packaged whitelist. Free-text
- * custom URLs are intentionally NOT supported — the Even Hub `permissions.
- * network.whitelist` is fixed at pack time, so a URL the user types into the
- * settings would be blocked by the WebView's permission policy anyway. Each
- * entry in this list must have its host added to `app.json` too.
+ * Built-in OpenAI-compatible base URLs. Custom URLs are also supported;
+ * their origins must be added to the Even G2 manifest before packaging.
  *
  * Two flavors live in this list:
  *   - **Transcribe-then-chat hosts** (OpenAI, Groq): expose `/audio/transcriptions`
@@ -471,8 +468,27 @@ export const OPENAI_BASE_URLS = [
   'https://api.deepseek.com/v1',
   'https://api.perplexity.ai',
 ] as const;
-export type OpenAiBaseUrl = (typeof OPENAI_BASE_URLS)[number];
+export type OpenAiBaseUrl = string;
 export const DEFAULT_OPENAI_BASE_URL: OpenAiBaseUrl = 'https://api.openai.com/v1';
+
+/** Validate an API base URL without silently changing its API path. */
+export function normalizeOpenAiBaseUrl(raw: string): OpenAiBaseUrl {
+  let url: URL;
+  try { url = new URL(raw.trim()); } catch { throw new Error('Enter a valid HTTP or HTTPS API base URL.'); }
+  if (!['https:', 'http:'].includes(url.protocol) || !url.hostname || url.username || url.password || url.href.includes('?') || url.href.includes('#')) {
+    throw new Error('Use an HTTP or HTTPS base URL without credentials, query parameters, or fragments.');
+  }
+  return url.href.replace(/\/+$/, '');
+}
+
+export function isCustomOpenAiBaseUrl(baseUrl: OpenAiBaseUrl): boolean {
+  return !(OPENAI_BASE_URLS as readonly string[]).includes(baseUrl);
+}
+
+/** Custom endpoints provide chat; use the selected Whisper host for speech. */
+export function isOpenAiChatOnlyHost(baseUrl: OpenAiBaseUrl): boolean {
+  return OPENAI_CHAT_ONLY_HOSTS.has(baseUrl) || isCustomOpenAiBaseUrl(baseUrl);
+}
 
 /**
  * Fallback model used by OpenAI-compatible providers when the model picker
@@ -527,7 +543,33 @@ export const STT_HOSTS = [
   'https://api.openai.com/v1',
   'https://api.groq.com/openai/v1',
 ] as const;
-export type SttHost = (typeof STT_HOSTS)[number];
+export type SttHost = string;
+
+export function isCustomSttHost(host: SttHost): boolean {
+  return !(STT_HOSTS as readonly string[]).includes(host);
+}
+
+/** Custom Whisper servers require an explicit model ID. */
+export function defaultSttModel(host: SttHost): string {
+  return STT_MODELS_BY_HOST[host]?.[0] ?? '';
+}
+
+/** Ordered alternate addresses for the same server, sharing its key/model. */
+export function normalizeEndpointFallbackUrls(urls: readonly string[]): string[] {
+  return [...new Set(urls.map(normalizeOpenAiBaseUrl))];
+}
+
+/** Ignore malformed persisted configuration without preventing app startup. */
+export function coerceEndpointFallbacks(raw: unknown): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
+  for (const [primary, entries] of Object.entries(raw)) {
+    if (!Array.isArray(entries) || entries.some((url) => typeof url !== 'string')) continue;
+    try { result[normalizeOpenAiBaseUrl(primary)] = normalizeEndpointFallbackUrls(entries); }
+    catch { /* ignore invalid saved endpoint lists */ }
+  }
+  return result;
+}
 /** Groq Whisper is the recommended default — free tier, faster than OpenAI Whisper. */
 export const DEFAULT_STT_HOST: SttHost = 'https://api.groq.com/openai/v1';
 /**
@@ -551,6 +593,9 @@ export function openaiHostLabel(baseUrl: OpenAiBaseUrl): string {
     case 'https://openrouter.ai/api/v1': return 'OpenRouter';
     case 'https://api.deepseek.com/v1': return 'DeepSeek';
     case 'https://api.perplexity.ai': return 'Perplexity';
+    default: {
+      try { return new URL(baseUrl).host; } catch { return 'Custom endpoint'; }
+    }
   }
 }
 
@@ -625,13 +670,15 @@ export interface Settings {
   geminiAutoModel: GeminiModel | null;
 
   /**
-   * API keys for the OpenAI-compatible providers, keyed by host base URL.
+   * API keys for OpenAI-compatible chat and Whisper servers, keyed by base URL.
    * Each host (OpenAI, Groq, …) needs its own key, so switching between them
    * via the Provider dropdown does not lose previously-entered credentials.
    */
   openaiApiKeys: Record<OpenAiBaseUrl, string>;
-  /** Base URL of the OpenAI-compatible host. Must be one of OPENAI_BASE_URLS. */
+  /** Built-in or validated custom OpenAI-compatible API base URL. */
   openaiBaseUrl: OpenAiBaseUrl;
+  /** Ordered alternate addresses per chat server; share its API key/model. */
+  openaiFallbackUrls?: Record<OpenAiBaseUrl, string[]>;
   /** Chat-completions model. Populated via fetchAvailableModels after key entry. */
   openaiModel: string;
   /**
@@ -643,13 +690,15 @@ export interface Settings {
    */
   openaiTranscribeModels: Record<OpenAiBaseUrl, string>;
   /**
-   * STT host borrowed when the active chat host can't transcribe (DeepSeek,
-   * Perplexity). The runtime hits this host's `/audio/transcriptions`
+   * Built-in or custom Whisper host used when chat cannot transcribe, or for
+   * the optional inline-audio transcript sidecar. Posts to `/audio/transcriptions`
    * endpoint, then sends the transcript to the chat host's `/chat/completions`.
-   * The STT API key is read from `openaiApiKeys[sttHost]` — no separate key
-   * field, since these hosts are already whitelisted as chat providers too.
+   * The STT API key is read from `openaiApiKeys[sttHost]`; custom hosts may
+   * omit authentication. All addresses need manifest permission on Even G2.
    */
   sttHost: SttHost;
+  /** Ordered alternate addresses per Whisper server; share its API key/model. */
+  sttFallbackUrls?: Record<SttHost, string[]>;
   /**
    * Transcription model id on `sttHost`. Empty means "use the first entry of
    * `STT_MODELS_BY_HOST[sttHost]`". Persisted separately from the per-host

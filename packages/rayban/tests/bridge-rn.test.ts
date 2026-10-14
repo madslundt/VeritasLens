@@ -11,6 +11,7 @@ vi.mock('@react-native-async-storage/async-storage', () => ({
   default: {
     getItem: vi.fn(),
     setItem: vi.fn(),
+    removeItem: vi.fn(),
   },
 }));
 
@@ -22,6 +23,7 @@ describe('isSecureKey', () => {
     expect(isSecureKey('veritaslens.geminiApiKey')).toBe(true);
     expect(isSecureKey('veritaslens.claudeApiKey')).toBe(true);
     expect(isSecureKey('veritaslens.openaiApiKeys')).toBe(true);
+    expect(isSecureKey('veritaslens.openaiKey.http://localhost:1234/v1')).toBe(true);
   });
 
   it('classifies non-credential keys as plain', () => {
@@ -54,6 +56,25 @@ describe('bridge-rn storage routing', () => {
     const ok = await setLocalStorage('veritaslens.claudeApiKey', 'sk-...');
     expect(SecureStore.setItemAsync).toHaveBeenCalled();
     expect(ok).toBe(true);
+  });
+
+  it('uses valid collision-free SecureStore names for endpoint keys', async () => {
+    await setLocalStorage('veritaslens.openaiKey.https://api.example/v1', 'first');
+    await setLocalStorage('veritaslens.openaiKey.https://api_example/v1', 'second');
+    const names = vi.mocked(SecureStore.setItemAsync).mock.calls.map(([key]) => key);
+    expect(names).toHaveLength(2);
+    expect(names.every((name) => /^[A-Za-z0-9._-]+$/.test(name))).toBe(true);
+    expect(names[0]).not.toBe(names[1]);
+    expect(AsyncStorage.setItem).not.toHaveBeenCalled();
+  });
+
+  it('migrates existing per-host keys to SecureStore without losing them', async () => {
+    vi.mocked(SecureStore.getItemAsync).mockResolvedValue(null);
+    vi.mocked(AsyncStorage.getItem).mockResolvedValue('legacy-key');
+    const key = 'veritaslens.openaiKey.https://api.example/v1';
+    expect(await getLocalStorage(key)).toBe('legacy-key');
+    expect(SecureStore.setItemAsync).toHaveBeenCalledWith(expect.any(String), 'legacy-key');
+    expect(AsyncStorage.removeItem).toHaveBeenCalledWith(key);
   });
 
   it('routes non-key set to AsyncStorage', async () => {

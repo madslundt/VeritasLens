@@ -1,48 +1,28 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import type { LensResult } from '@veritaslens/core';
+import { resultSections } from './resultPresentation';
 
 interface Props {
   result: LensResult | null;
 }
 
-/** Extract a human-readable headline from any LensResult variant. */
-function headlineFromResult(result: LensResult): string | null {
-  const r = result as Record<string, unknown>;
-  // Common string fields emitted by persona parse() functions.
-  if (typeof r['question'] === 'string' && r['question']) return r['question'] as string;
-  if (typeof r['translatedText'] === 'string' && r['translatedText']) return r['translatedText'] as string;
-  if (typeof r['answer'] === 'string' && r['answer']) return r['answer'] as string;
-  if (typeof r['topic'] === 'string' && r['topic']) return r['topic'] as string;
-  return null;
-}
-
-/** Extract a supporting quote / summary from any LensResult variant. */
-function bodyFromResult(result: LensResult): string | null {
-  const r = result as Record<string, unknown>;
-  if (typeof r['quote'] === 'string' && r['quote']) return r['quote'] as string;
-  if (typeof r['summary'] === 'string' && r['summary']) return r['summary'] as string;
-  if (typeof r['explanation'] === 'string' && r['explanation']) return r['explanation'] as string;
-  return null;
-}
-
 export function ResultCard({ result }: Props) {
   if (!result) return null;
-
-  const headline = headlineFromResult(result);
-  const body = bodyFromResult(result);
-  const r = result as Record<string, unknown>;
-  const badge = typeof r['badge'] === 'string' ? r['badge'] as string : null;
-  const lensType = result.type ?? '';
-
+  const sections = resultSections(result);
   return (
     <View style={styles.card}>
-      <View style={styles.header}>
-        <Text style={styles.lensName}>{lensType}</Text>
-        {badge ? <Text style={styles.badge}>{badge}</Text> : null}
-      </View>
-      {headline ? <Text style={styles.question}>{headline}</Text> : null}
-      {body ? <Text style={styles.quote}>{body}</Text> : null}
+      <Text style={styles.lensName}>{result.type.replace(/-/g, ' ')}</Text>
+      {sections.map((section, index) => (
+        <View key={index} style={[styles.section, index > 0 && styles.followingSection]}>
+          {section.badge ? <Text style={[styles.badge,
+            (section.badge === 'FALSE' || section.badge === 'BIASED') && styles.badgeBad,
+            section.badge === 'UNVERIFIED' && styles.badgeUnknown]}>{section.badge}</Text> : null}
+          {section.title ? <Text style={styles.question}>{section.title}</Text> : null}
+          {section.body ? <Text style={styles.body}>{section.body}</Text> : null}
+          {section.quote ? <Text style={styles.quote}>“{section.quote}”</Text> : null}
+        </View>
+      ))}
     </View>
   );
 }
@@ -55,6 +35,11 @@ const styles = StyleSheet.create({
     marginVertical: 6,
     marginHorizontal: 16,
   },
+  section: { marginTop: 8 },
+  followingSection: { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: '#444', paddingTop: 12 },
+  body: { color: '#ddd', fontSize: 14, lineHeight: 21, marginBottom: 8 },
+  badgeBad: { color: '#f44336' },
+  badgeUnknown: { color: '#ff9800' },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',

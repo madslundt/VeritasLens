@@ -96,10 +96,7 @@ export class PcmRingBuffer {
    */
   linearPcmSince(byteOffset: number): Uint8Array {
     const wanted = Math.max(0, this.produced - byteOffset);
-    if (wanted === 0) return new Uint8Array(0);
-    const linear = this.toLinearPcm();
-    if (wanted >= linear.length) return linear;
-    return linear.subarray(linear.length - wanted);
+    return this.copyTail(Math.min(wanted, this.size));
   }
 
   /**
@@ -156,15 +153,19 @@ export class PcmRingBuffer {
    * Returned buffer is a fresh allocation; the ring is unaffected.
    */
   toLinearPcm(): Uint8Array {
-    const out = new Uint8Array(this.size);
-    if (this.size === 0) return out;
+    return this.copyTail(this.size);
+  }
 
-    // Oldest byte sits at `head - size`, modulo capacity.
-    const start = (this.head - this.size + this.capacity) % this.capacity;
-    const tail = Math.min(this.size, this.capacity - start);
+  /** Copy only the requested retained tail, so small windows stay small. */
+  private copyTail(length: number): Uint8Array {
+    const out = new Uint8Array(length);
+    if (length === 0) return out;
+
+    const start = (this.head - length + this.capacity) % this.capacity;
+    const tail = Math.min(length, this.capacity - start);
     out.set(this.storage.subarray(start, start + tail), 0);
-    if (tail < this.size) {
-      out.set(this.storage.subarray(0, this.size - tail), tail);
+    if (tail < length) {
+      out.set(this.storage.subarray(0, length - tail), tail);
     }
     return out;
   }
@@ -267,7 +268,7 @@ export function analyzeBufferForVoiceFFT(
   const VOICE_BAND_RATIO_THRESHOLD = 0.55;
 
   const frameSamples = Math.min(FRAME_SAMPLES, totalSamples);
-  const frameCount = Math.max(1, Math.floor(totalSamples / frameSamples));
+  const frameCount = Math.ceil(totalSamples / frameSamples);
 
   const dv = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 
@@ -286,12 +287,13 @@ export function analyzeBufferForVoiceFFT(
 
   for (let f = 0; f < frameCount; f++) {
     const sampleStart = f * frameSamples;
+    const samplesInFrame = Math.min(frameSamples, totalSamples - sampleStart);
     let sumSq = 0;
-    for (let i = 0; i < frameSamples; i++) {
+    for (let i = 0; i < samplesInFrame; i++) {
       const s = dv.getInt16((sampleStart + i) * 2, true);
       sumSq += s * s;
     }
-    const rms = Math.sqrt(sumSq / frameSamples);
+    const rms = Math.sqrt(sumSq / samplesInFrame);
     totalFrames++;
     if (rms < SILENCE_RMS_FLOOR) {
       silenceFrames++;
@@ -299,10 +301,10 @@ export function analyzeBufferForVoiceFFT(
     }
 
     // FFT path: window + transform the first FFT_SIZE samples of the frame.
-    const fftSamples = Math.min(FFT_SIZE, frameSamples);
+    const fftSamples = Math.min(FFT_SIZE, samplesInFrame);
     for (let i = 0; i < fftSamples; i++) {
       const s = dv.getInt16((sampleStart + i) * 2, true);
-      const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (fftSamples - 1));
+      const w = fftSamples === 1 ? 1 : 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (fftSamples - 1));
       real[i] = s * w;
       imag[i] = 0;
     }

@@ -12,11 +12,12 @@ The user just provided a short audio clip of recent conversation. Listen careful
    - "TRUE"  : Widely supported by reliable knowledge.
    - "FALSE" : Contradicted by reliable knowledge.
    - "UNVERIFIED" : Cannot confidently classify (opinion, future event, niche fact, ambiguous wording).
+   Preserve the speaker's exact numbers, units, dates, negation, and qualifiers. Do not complete a clipped sentence or guess an unclear name or number. For time-sensitive claims, require current evidence matching the date, place, metric, and comparison period; otherwise use UNVERIFIED. A source about a similar claim is not evidence for this exact claim.
 3. For each claim, include a short verbatim quote (≤140 chars) from the audio that the verdict is responding to. The quote must come straight from the audio in its original spoken language.
 4. For each claim, produce a one-sentence claim summary (≤140 chars), and a 2-3 sentence justification (≤180 chars).
 5. For each claim, also produce a "correction" field (≤80 chars) — the single most useful line the wearer can REPEAT BACK to the speaker:
    - When verdict is FALSE: state the correct value/fact concisely (e.g. "Actually ~9.1%, peaked mid-2022").
-   - When verdict is UNVERIFIED: state the best-supported current candidate, or "Sources disagree" if there is no clear leader.
+   - When verdict is UNVERIFIED: give a candidate only if reliable evidence supports it; otherwise say "Insufficient evidence" or "Sources disagree". Do not guess a replacement number.
    - When verdict is TRUE: leave empty (the wearer doesn't need a correction).
 
 Output strict JSON matching the provided schema. Do not add prose outside JSON.
@@ -59,17 +60,17 @@ Output:
   ]
 }
 
-EXAMPLE — a numerical claim contradicted by known data; correction surfaces the real number:
-Audio: "Inflation in the US hit 12% last year."
+EXAMPLE — a numerical claim with a stable, verifiable correction:
+Audio: "A kilometre is 100 metres."
 Output:
 {
   "claims": [
     {
-      "quote": "Inflation in the US hit 12% last year",
+      "quote": "A kilometre is 100 metres",
       "verdict": "FALSE",
-      "claim": "US inflation reached 12% in the prior year.",
-      "correction": "Actually ~9.1%, peaked mid-2022.",
-      "reason": "US CPI inflation peaked near 9.1% in mid-2022 and has been below that since per BLS. 12% does not appear in recent annualized figures."
+      "claim": "A kilometre equals 100 metres.",
+      "correction": "A kilometre is 1,000 metres.",
+      "reason": "The SI prefix kilo means one thousand. A kilometre is exactly 1,000 metres."
     }
   ]
 }`;
@@ -119,11 +120,11 @@ export function parseFactCheckerResponse(text: string): LensResult {
     const correction = trimTo(typeof c['correction'] === 'string' ? c['correction'] : '', 80);
     const claim: FactClaim = {
       quote: coerceQuote(c['quote']),
-      verdict: normalizeFactVerdict(c['verdict']),
+      verdict: confidence === 'LOW' ? 'UNVERIFIED' : normalizeFactVerdict(c['verdict']),
       claim: trimTo(typeof c['claim'] === 'string' ? c['claim'] : '', 140),
       reason: trimTo(typeof c['reason'] === 'string' ? c['reason'] : '', 180),
     };
-    if (correction) claim.correction = correction;
+    if (correction && confidence !== 'LOW') claim.correction = correction;
     if (confidence) claim.confidence = confidence;
     return claim;
   });

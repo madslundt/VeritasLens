@@ -69,6 +69,7 @@ export function SettingsScreen() {
             ]}
             onPress={() => {
               updateSettings({ bufferDurationSec: sec });
+              patchFullSettings({});
               void setLocalStorage('veritaslens.bufferDurationSec', String(sec));
             }}
           >

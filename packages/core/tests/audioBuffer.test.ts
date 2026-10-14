@@ -126,6 +126,18 @@ describe('PcmRingBuffer', () => {
     expect(since[since.length - 1]).toBe(0xbb);
   });
 
+  it('allocates only the requested recent window, including across the ring seam', () => {
+    const buf = new PcmRingBuffer({ durationSec: 1, sampleRate: 8000 });
+    buf.append(new Uint8Array(15_998).fill(0xaa));
+    const mark = buf.bytesProduced;
+    buf.append(new Uint8Array([1, 2, 3, 4]));
+    const since = buf.linearPcmSince(mark);
+    expect(Array.from(since)).toEqual([1, 2, 3, 4]);
+    expect(since.buffer.byteLength).toBe(4);
+    buf.append(new Uint8Array(16_000).fill(0xff));
+    expect(Array.from(since)).toEqual([1, 2, 3, 4]);
+  });
+
   it('linearPcmSince(offset) returns empty when no new audio has arrived', () => {
     const buf = new PcmRingBuffer({ durationSec: 1, sampleRate: 8000 });
     buf.append(new Uint8Array(4000));
@@ -207,6 +219,17 @@ describe('uint8ToBase64', () => {
 });
 
 describe('analyzeBufferForVoiceFFT (fallback path)', () => {
+  it('detects speech in a final partial frame after silence', () => {
+    const silence = new Uint8Array(4000 * 2);
+    const voice = buildSignal(0.1, (t) => 5000 * Math.sin(2 * Math.PI * 440 * t));
+    const combined = new Uint8Array(silence.length + voice.length);
+    combined.set(voice, silence.length);
+    const result = analyzeBufferForVoiceFFT(combined, 16_000);
+    expect(result.silenceFrames).toBe(1);
+    expect(result.voiceFrames).toBe(1);
+    expect(result.totalFrames).toBe(2);
+  });
+
   it('returns zero frames for an empty buffer', () => {
     const a = analyzeBufferForVoiceFFT(new Uint8Array(0), 16_000);
     expect(a.totalFrames).toBe(0);

@@ -14,10 +14,12 @@
 // false` and that every property appear in `required`. `toStrictSchema`
 // recurses the schema and injects both.
 import { encodePcmToWav } from '@/runtime/audioBuffer';
-import { OPENAI_INLINE_AUDIO_HOSTS, OPENAI_TRANSCRIBE_MODELS, openaiHostLabel, type OpenAiBaseUrl, type WebCitation } from '@/types';
+import { normalizeOpenAiBaseUrl, isCustomOpenAiBaseUrl, isCustomSttHost, OPENAI_INLINE_AUDIO_HOSTS, OPENAI_TRANSCRIBE_MODELS, openaiHostLabel, type OpenAiBaseUrl, type WebCitation } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
+import { fetchWithEndpointFallback } from '@/llm/endpointFallback';
 import { StreamingJsonParser } from './streamingJsonParser';
+import { NoSpeechError } from '@/personas/_utils';
 import { buildCitation, dedupeCitations } from './citations';
 
 // Per-attempt deadlines for the OpenAI-compatible path. STT gets a longer
@@ -31,6 +33,8 @@ const CHAT_TIMEOUT_MS = 60_000;
 export interface CallOpenAiLensOptions {
   apiKey: string;
   baseUrl: OpenAiBaseUrl;
+  fallbackUrls?: readonly string[];
+  transcribeFallbackUrls?: readonly string[];
   /** Chat-completions model. */
   model: string;
   /**
@@ -52,6 +56,8 @@ export interface CallOpenAiLensOptions {
   transcribeApiKey?: string;
   /** WAV-encoded audio bytes. Transcribed before chat completions. */
   wav: Uint8Array;
+  /** One snapshot's shared STT result (Auto classifier and answer reuse it). */
+  transcript?: Promise<string>;
   /** Fully-built, language-aware system prompt. */
   prompt: string;
   /** Gemini-style responseSchema. Translated to OpenAI strict JSON Schema. */
@@ -128,6 +134,29 @@ export function toStrictSchema(schema: unknown): unknown {
   return out;
 }
 
+/** Resolve STT once per audio snapshot, including its empty-speech verdict. */
+export async function resolveLensTranscript(opts: Pick<CallOpenAiLensOptions,
+  'apiKey' | 'baseUrl' | 'transcribeBaseUrl' | 'transcribeApiKey' | 'transcribeModel' | 'wav' | 'signal' | 'transcript' | 'transcribeFallbackUrls' | 'fallbackUrls'
+>): Promise<string> {
+  const sttBaseUrl = opts.transcribeBaseUrl ?? opts.baseUrl;
+  const sttApiKey = opts.transcribeBaseUrl && opts.transcribeBaseUrl !== opts.baseUrl
+    ? (opts.transcribeApiKey ?? '') : opts.apiKey;
+  if (!opts.transcript && !sttApiKey && !isCustomSttHost(sttBaseUrl)) {
+    throw new Error(`Missing ${openaiHostLabel(sttBaseUrl)} API key for transcription.`);
+  }
+  const transcript = await (opts.transcript ?? transcribeAudio({
+    apiKey: sttApiKey,
+    baseUrl: sttBaseUrl,
+    fallbackUrls: opts.transcribeFallbackUrls ?? (sttBaseUrl === opts.baseUrl ? opts.fallbackUrls : undefined),
+    model: requireTranscribeModel(opts, sttBaseUrl),
+    wav: opts.wav,
+    signal: opts.signal,
+  }));
+  opts.signal?.throwIfAborted();
+  if (!transcript.trim()) throw new NoSpeechError();
+  return transcript;
+}
+
 interface ChatCompletionsResponse {
   choices?: Array<{ message?: { content?: string } }>;
   error?: { message?: string };
@@ -147,7 +176,8 @@ interface TranscriptionResponse {
  * Gemini provider.
  */
 export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<string> {
-  if (!opts.apiKey) throw new Error(`Missing ${openaiHostLabel(opts.baseUrl)} API key.`);
+  opts = { ...opts, baseUrl: normalizeOpenAiBaseUrl(opts.baseUrl) };
+  if (!opts.apiKey && !isCustomOpenAiBaseUrl(opts.baseUrl)) throw new Error(`Missing ${openaiHostLabel(opts.baseUrl)} API key.`);
 
   const baseSchema = opts.schema as Record<string, unknown>;
   const augmentedSchema = {
@@ -177,20 +207,7 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
       { type: 'text', text: 'Analyze the audio above according to the system prompt.' },
     ];
   } else {
-    const sttBaseUrl = opts.transcribeBaseUrl ?? opts.baseUrl;
-    const sttApiKey = opts.transcribeBaseUrl && opts.transcribeBaseUrl !== opts.baseUrl
-      ? (opts.transcribeApiKey ?? '')
-      : opts.apiKey;
-    if (!sttApiKey) {
-      throw new Error(`Missing ${openaiHostLabel(sttBaseUrl)} API key for transcription.`);
-    }
-    const transcript = await transcribeAudio({
-      apiKey: sttApiKey,
-      baseUrl: sttBaseUrl,
-      model: requireTranscribeModel(opts, sttBaseUrl),
-      wav: opts.wav,
-      signal: opts.signal,
-    });
+    const transcript = await resolveLensTranscript(opts);
     if (opts.imageData) {
       userContent = [
         { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${opts.imageData}` } },
@@ -209,8 +226,7 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
   // strict json_schema (Groq with non-`llama-3.x` / non-`gpt-oss` models being
   // the common case), every subsequent attempt skips straight to json_object
   // mode — we don't waste a second 400 trying strict again on the same call.
-  let useStrictSchema = true;
-  const endpoint = `${opts.baseUrl}/chat/completions`;
+  let useStrictSchema = !isCustomOpenAiBaseUrl(opts.baseUrl);
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
 
@@ -240,14 +256,19 @@ export async function callOpenAiLens(opts: CallOpenAiLensOptions): Promise<strin
       });
       const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
       try {
-        response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            authorization: `Bearer ${opts.apiKey}`,
+        response = await fetchWithEndpointFallback({
+          baseUrl: opts.baseUrl,
+          fallbackUrls: opts.fallbackUrls,
+          apiKey: opts.apiKey,
+          path: '/chat/completions',
+          init: {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+            },
+            body: bodyJson,
+            signal: attemptCtl.signal,
           },
-          body: bodyJson,
-          signal: attemptCtl.signal,
         });
       } catch (err) {
         attemptCtl.cleanup();
@@ -488,7 +509,8 @@ function extractOpenAiCitations(payload: ChatCompletionsChunk): WebCitation[] {
  * the stream opens we never retry — partial UI already on screen would jitter.
  */
 export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): Promise<string> {
-  if (!opts.apiKey) throw new Error(`Missing ${openaiHostLabel(opts.baseUrl)} API key.`);
+  opts = { ...opts, baseUrl: normalizeOpenAiBaseUrl(opts.baseUrl) };
+  if (!opts.apiKey && !isCustomOpenAiBaseUrl(opts.baseUrl)) throw new Error(`Missing ${openaiHostLabel(opts.baseUrl)} API key.`);
 
   const baseSchema = opts.schema as Record<string, unknown>;
   const augmentedSchema = {
@@ -511,20 +533,7 @@ export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): P
       { type: 'text', text: 'Analyze the audio above according to the system prompt.' },
     ];
   } else {
-    const sttBaseUrl = opts.transcribeBaseUrl ?? opts.baseUrl;
-    const sttApiKey = opts.transcribeBaseUrl && opts.transcribeBaseUrl !== opts.baseUrl
-      ? (opts.transcribeApiKey ?? '')
-      : opts.apiKey;
-    if (!sttApiKey) {
-      throw new Error(`Missing ${openaiHostLabel(sttBaseUrl)} API key for transcription.`);
-    }
-    const transcript = await transcribeAudio({
-      apiKey: sttApiKey,
-      baseUrl: sttBaseUrl,
-      model: requireTranscribeModel(opts, sttBaseUrl),
-      wav: opts.wav,
-      signal: opts.signal,
-    });
+    const transcript = await resolveLensTranscript(opts);
     if (opts.imageData) {
       userContent = [
         { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${opts.imageData}` } },
@@ -581,8 +590,7 @@ export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): P
   // Schema-mode state survives the outer retry loop, same as `callOpenAiLens`.
   // The fallback handshake runs before the stream opens, so a schema rejection
   // never lands partial UI on screen.
-  let useStrictSchema = true;
-  const endpoint = `${opts.baseUrl}/chat/completions`;
+  let useStrictSchema = !isCustomOpenAiBaseUrl(opts.baseUrl);
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
 
@@ -606,15 +614,20 @@ export async function callOpenAiLensStream(opts: CallOpenAiLensStreamOptions): P
       });
       const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
       try {
-        response = await fetch(endpoint, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            accept: 'text/event-stream',
-            authorization: `Bearer ${opts.apiKey}`,
+        response = await fetchWithEndpointFallback({
+          baseUrl: opts.baseUrl,
+          fallbackUrls: opts.fallbackUrls,
+          apiKey: opts.apiKey,
+          path: '/chat/completions',
+          init: {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              accept: 'text/event-stream',
+            },
+            body: bodyJson,
+            signal: attemptCtl.signal,
           },
-          body: bodyJson,
-          signal: attemptCtl.signal,
         });
       } catch (err) {
         attemptCtl.cleanup();
@@ -787,7 +800,7 @@ function safeJsonParseChunk(s: string): ChatCompletionsChunk | null {
  * The label uses the STT host (which may differ from the chat host for the
  * cross-host STT path used by DeepSeek/Perplexity).
  */
-function requireTranscribeModel(opts: CallOpenAiLensOptions, sttBaseUrl: OpenAiBaseUrl): string {
+function requireTranscribeModel(opts: { transcribeModel?: string }, sttBaseUrl: OpenAiBaseUrl): string {
   if (!opts.transcribeModel) {
     throw new Error(
       `Missing transcribeModel for ${openaiHostLabel(sttBaseUrl)}.`,
@@ -820,12 +833,15 @@ function transcriptUserMessage(transcript: string): string {
 export interface TranscribeOptions {
   apiKey: string;
   baseUrl: OpenAiBaseUrl;
+  fallbackUrls?: readonly string[];
   model: string;
   wav: Uint8Array;
   signal?: AbortSignal;
 }
 
 export async function transcribeAudio(opts: TranscribeOptions): Promise<string> {
+  opts = { ...opts, baseUrl: normalizeOpenAiBaseUrl(opts.baseUrl) };
+  if (!opts.model.trim()) throw new Error('Enter a transcription model ID.');
   const form = new FormData();
   form.append('file', new Blob([opts.wav as BlobPart], { type: 'audio/wav' }), 'audio.wav');
   form.append('model', opts.model);
@@ -834,18 +850,26 @@ export async function transcribeAudio(opts: TranscribeOptions): Promise<string> 
   // stalled connection on a 5-minute WAV (≈ 9.6 MB) sits forever — the bug
   // that prompted item-A in the v0.12.0 plan.
   const attemptCtl = withFetchTimeout(opts.signal, STT_TIMEOUT_MS);
-  let response: Response;
   try {
-    response = await fetch(`${opts.baseUrl}/audio/transcriptions`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${opts.apiKey}`,
-      },
-      body: form,
-      signal: attemptCtl.signal,
+    const response = await fetchWithEndpointFallback({
+      baseUrl: opts.baseUrl,
+      fallbackUrls: opts.fallbackUrls,
+      apiKey: opts.apiKey,
+      path: '/audio/transcriptions',
+      init: { method: 'POST', body: form, signal: attemptCtl.signal },
     });
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error(
+        `${openaiHostLabel(opts.baseUrl)} transcription HTTP ${response.status} (model "${opts.model}"): ${truncate(errText, 2000)}`,
+      );
+    }
+    const payload = (await response.json()) as TranscriptionResponse;
+    if (payload.error?.message) {
+      throw new Error(`${openaiHostLabel(opts.baseUrl)} transcription error: ${payload.error.message}`);
+    }
+    return payload.text ?? '';
   } catch (err) {
-    attemptCtl.cleanup();
     if (opts.signal?.aborted) throw err;
     if (attemptCtl.timedOut()) {
       throw new UploadTimeoutError(
@@ -853,19 +877,9 @@ export async function transcribeAudio(opts: TranscribeOptions): Promise<string> 
       );
     }
     throw err;
+  } finally {
+    attemptCtl.cleanup();
   }
-  attemptCtl.cleanup();
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(
-      `${openaiHostLabel(opts.baseUrl)} transcription HTTP ${response.status} (model "${opts.model}"): ${truncate(errText, 2000)}`,
-    );
-  }
-  const payload = (await response.json()) as TranscriptionResponse;
-  if (payload.error?.message) {
-    throw new Error(`${openaiHostLabel(opts.baseUrl)} transcription error: ${payload.error.message}`);
-  }
-  return payload.text ?? '';
 }
 
 interface ModelsListResponse {
@@ -925,7 +939,12 @@ export async function runSelfTest(
    *  inline-audio branch (the lookup returns undefined). */
   transcribeModel?: string,
   /** Cross-host STT overrides for chat-only hosts (DeepSeek, Perplexity). */
-  cross?: { transcribeBaseUrl?: OpenAiBaseUrl; transcribeApiKey?: string },
+  cross?: {
+    transcribeBaseUrl?: OpenAiBaseUrl;
+    transcribeApiKey?: string;
+    fallbackUrls?: readonly string[];
+    transcribeFallbackUrls?: readonly string[];
+  },
 ): Promise<{ latencyMs: number }> {
   const silentPcm = new Uint8Array(16_000 * 2);
   const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
@@ -936,13 +955,30 @@ export async function runSelfTest(
     required: ['ok'],
   };
   const t0 = performance.now();
+  // Silence is a successful STT reachability probe, even when Whisper returns
+  // an empty transcript. Real analyses retain the no-speech short circuit.
+  let transcript: Promise<string> | undefined;
+  if (!OPENAI_INLINE_AUDIO_HOSTS.has(baseUrl)) {
+    const sttBaseUrl = cross?.transcribeBaseUrl ?? baseUrl;
+    const text = await transcribeAudio({
+      baseUrl: sttBaseUrl,
+      apiKey: cross?.transcribeApiKey ?? apiKey,
+      model: transcribeModel || OPENAI_TRANSCRIBE_MODELS[sttBaseUrl] || '',
+      fallbackUrls: cross?.transcribeFallbackUrls,
+      wav,
+    });
+    transcript = Promise.resolve(text || '[Self-test silence]');
+  }
   await callOpenAiLens({
     apiKey,
     baseUrl,
+    fallbackUrls: cross?.fallbackUrls,
+    transcribeFallbackUrls: cross?.transcribeFallbackUrls,
     model,
     transcribeModel: transcribeModel || OPENAI_TRANSCRIBE_MODELS[cross?.transcribeBaseUrl ?? baseUrl],
     transcribeBaseUrl: cross?.transcribeBaseUrl,
     transcribeApiKey: cross?.transcribeApiKey,
+    transcript,
     wav,
     prompt,
     schema,
@@ -961,10 +997,11 @@ export async function fetchOpenAiModels(
   apiKey: string,
   baseUrl: OpenAiBaseUrl,
   signal?: AbortSignal,
+  fallbackUrls?: readonly string[],
 ): Promise<string[]> {
-  const response = await fetch(`${baseUrl}/models`, {
-    headers: { authorization: `Bearer ${apiKey}` },
-    signal,
+  baseUrl = normalizeOpenAiBaseUrl(baseUrl);
+  const response = await fetchWithEndpointFallback({ baseUrl, fallbackUrls, apiKey, path: '/models',
+    init: { headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}, signal },
   });
   if (!response.ok) return [];
   const data = (await response.json()) as ModelsListResponse;
@@ -981,7 +1018,7 @@ export async function fetchOpenAiModels(
         return Array.isArray(m.architecture?.input_modalities)
           && m.architecture!.input_modalities!.includes('audio');
       }
-      return isSupportedChatModel(id);
+      return isCustomOpenAiBaseUrl(baseUrl) || isSupportedChatModel(id);
     })
     .map((m) => m.id ?? '')
     .sort();

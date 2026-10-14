@@ -37,9 +37,6 @@
         "android.permission.FOREGROUND_SERVICE_MICROPHONE",
         "android.permission.FOREGROUND_SERVICE_CAMERA"
       ]
-    },
-    "plugins": [
-      "expo-modules-core"
-    ]
+    }
   }
 }

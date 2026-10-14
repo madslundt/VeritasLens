@@ -14,8 +14,62 @@
 // success.
 
 import { describe, it, expect } from 'vitest';
-import { resolveAnalysisCursor } from '../src/runtime/lifecycle';
+import { providerConfigurationError, resolveAnalysisCursor } from '../src/runtime/lifecycle';
 import { PcmRingBuffer } from '@veritaslens/core';
+import type { Settings } from '@veritaslens/core';
+import { settings } from '../src/state/store';
+
+describe('provider configuration for audio analyses', () => {
+  const configured = (overrides: Partial<Settings>): Settings => ({
+    ...settings(),
+    geminiApiKey: '',
+    claudeApiKey: '',
+    openaiApiKeys: { 'https://api.groq.com/openai/v1': 'speech-key-123' },
+    sttHost: 'https://api.groq.com/openai/v1',
+    openaiModel: 'local-model',
+    ...overrides,
+  });
+
+  it.each(['', 'short'])('accepts a custom endpoint with an optional or short key: %s', (key) => {
+    expect(providerConfigurationError(configured({
+      provider: 'openai-compatible',
+      openaiBaseUrl: 'http://localhost:1234/v1',
+      openaiApiKeys: {
+        'http://localhost:1234/v1': key,
+        'https://api.groq.com/openai/v1': 'speech-key-123',
+      },
+    }))).toBeNull();
+  });
+
+  it('requires a model and speech-to-text key for a custom endpoint', () => {
+    const custom = configured({ provider: 'openai-compatible', openaiBaseUrl: 'http://localhost:1234/v1' });
+    expect(providerConfigurationError({ ...custom, openaiModel: ' ' })).toContain('model');
+    expect(providerConfigurationError({ ...custom, openaiApiKeys: {} })).toContain('speech-to-text');
+    expect(providerConfigurationError({ ...custom, openaiBaseUrl: 'invalid' })).toContain('base URL');
+  });
+
+  it('uses the Claude key and requires its speech-to-text sidecar', () => {
+    const claude = configured({ provider: 'claude', claudeApiKey: 'claude-key-123' });
+    expect(providerConfigurationError(claude)).toBeNull();
+    expect(providerConfigurationError({ ...claude, claudeApiKey: '' })).toContain('Claude');
+    expect(providerConfigurationError({ ...claude, openaiApiKeys: {} })).toContain('speech-to-text');
+  });
+
+  it('allows unauthenticated custom Whisper while requiring its URL and model', () => {
+    const custom = configured({ provider: 'claude', claudeApiKey: 'claude-key-123', sttHost: 'http://localhost:8000/v1', sttModel: 'local-whisper', openaiApiKeys: {} });
+    expect(providerConfigurationError(custom)).toBeNull();
+    expect(providerConfigurationError({ ...custom, sttModel: '' })).toContain('speech-to-text model');
+    expect(providerConfigurationError({ ...custom, sttHost: 'invalid' })).toContain('speech-to-text API base URL');
+  });
+
+  it('keeps built-in API key validation for Gemini and OpenAI', () => {
+    expect(providerConfigurationError(configured({ provider: 'gemini', geminiApiKey: 'short' }))).toContain('Gemini');
+    expect(providerConfigurationError(configured({
+      provider: 'openai-compatible', openaiBaseUrl: 'https://api.openai.com/v1',
+      openaiApiKeys: { 'https://api.openai.com/v1': 'short' },
+    }))).toContain('OpenAI');
+  });
+});
 
 describe('resolveAnalysisCursor', () => {
   const SNAPSHOT = 100;

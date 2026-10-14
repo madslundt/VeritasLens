@@ -12,7 +12,7 @@ import { measureTextWrap } from '@evenrealities/pretext';
 import { getBridge } from './bridge';
 import { getPersona, getPickerPersonas, getSpecializedPersonas, gameDifficultyLabel, gameFormatLabel } from '@veritaslens/core';
 import type { Persona, GamePreset, GameSession, HistoryEntry, LensResult, WebCitation } from '@veritaslens/core';
-import { activePersona, settings } from '@/state/store';
+import { activePersona, pushDebugEvent, settings } from '@/state/store';
 
 /**
  * HUD layout for VeritasLens.
@@ -20,18 +20,15 @@ import { activePersona, settings } from '@/state/store';
  * Display: 576 × 288 px per eye, 4-bit greyscale (single channel, green).
  * Coordinates: origin top-left, x rightwards, y downwards.
  *
- * IMPORTANT: in practice (verified against the simulator) text containers
- * with `isEventCapture=1` only emit SCROLL_TOP_EVENT / SCROLL_BOTTOM_EVENT,
- * not CLICK_EVENT or DOUBLE_CLICK_EVENT. To capture taps we MUST use a
- * `ListContainerProperty` as the event capturer. So every page in this app
- * pairs a list container (events) with text containers (display).
+ * Active and answer pages use one full-screen text event capturer: swipes
+ * arrive as textEvent, taps as sysEvent. Pickers use native list selection.
  *
  * Pages:
  *   - "unconfigured"    : single visible message asking the user to configure on phone
  *   - "picker"          : list of registered personas; scroll moves SDK selection,
  *                         tap starts the highlighted one
- *   - "active"          : status / verdict / reason text + a small list at the
- *                         bottom that captures taps (single = menu, double = check)
+ *   - "active"          : dim corner indicator while listening; full-screen
+ *                         answers (single = menu, double = check, swipe = browse)
  *   - "menu"            : four options (Check / History / Cancel / Exit)
  *   - "history-list"    : list of past questions with verdict badge
  *   - "history-detail"  : full result for a selected history entry
@@ -170,22 +167,13 @@ export const EXIT_LABEL_WITHOUT_SUMMARY = 'Exit - no summary';
 // row is shown (no summary is possible to generate either way).
 let exitGeneratesSummary = false;
 
-// Line-aware pagination constants. The body container is the only scrollable
-// region. Inner width = container width 544 minus 2*padding (4) = 536px.
-// Line height is sourced from pretext (a single-line measurement) so a font
-// bump in @evenrealities/pretext doesn't silently break pagination.
+// All answer views use the full canvas with a small inset for legibility.
+// Derive pagination from the actual inner dimensions and firmware font.
 const LINE_PX = measureTextWrap('X', 1000).height;
-const BODY_INNER_W = SCREEN_W - 32 - 2 * 4; // 536
-// Per-mode line budget for one body page. Each layout has a single unified
-// text container that spans from y=4 to the bottom limit allowed by the
-// chrome row (REC/hint at y=256 on baseline, hint at y=260 on history detail,
-// nothing on discreet). Body container height = lines × LINE_PX + 2×padding.
-//   discreet result: y=4, h=280 → 10 × 27 + 8 = 278 px ≤ 280; bottom y=284
-//   baseline:        y=4, h=252 → 9 × 27 + 8  = 251 px ≤ 252; bottom y=256
-//   history detail:  y=4, h=256 → 9 × 27 + 8  = 251 px ≤ 256; bottom y=260
-const DISCREET_PAGE_LINES = 10;
-const BASELINE_PAGE_LINES = 9;
-const HISTORY_DETAIL_PAGE_LINES = 9;
+const BODY_PADDING = 4;
+const BODY_INNER_W = SCREEN_W - 2 * BODY_PADDING;
+const ANSWER_PAGE_LINES = Math.floor((SCREEN_H - 2 * BODY_PADDING) / LINE_PX);
+const PAGE_CONTENT_CAP = 1000; // safe for both rebuilds and upgrades
 
 /**
  * One screen-worth of result content. Multi-claim results and long body text
@@ -250,14 +238,8 @@ let activeTranslationStarter: TranslationStarter | null = null;
 // buildMenuPage so the spinner is visible immediately when the user opens the
 // menu mid-analysis (rather than waiting up to one ticker interval).
 let pendingMenuSpinnerFrame = '';
-// Last status frame written by setStatus. Used to seed the vl-status container
-// of any active-page layout that gets rebuilt during analysis (e.g. when the
-// wearer scrolls to a previous answer mid-check), so the spinner stays visible
-// instead of vanishing until the next ticker tick. Stored as the *canonical*
-// content (empty when idle / displaying, '...' while thinking, spinner frame
-// while a request is in flight) — the layout-local "show a recording dot when
-// status is empty" rule is applied by `statusDisplayText()` so that '•' is
-// never baked into the canonical frame.
+// Keep the canonical status even while an answer hides it. Dismissing the
+// answer restores the current recording / processing indicator in the corner.
 let pendingStatusFrame = '';
 
 // True while the corner status slot may double as a recording indicator —
@@ -277,10 +259,10 @@ let autoModeIndicator = false;
  *  dot fallback used on the listening-state layouts. Discreet idle deliberately
  *  shows nothing in the slot — the LVGL label caret already marks the corner —
  *  so the discreet wearer sees only the blinking caret until the spinner kicks
- *  in during analysis. */
+ *  in during analysis. Answers suppress the corner entirely. */
 function statusDisplayText(): string {
-  if (pendingStatusFrame !== '') return pendingStatusFrame;
   if (!recordingDotEligible) return '';
+  if (pendingStatusFrame !== '') return pendingStatusFrame;
   if (activeLayout !== 'baseline') return '';
   // Auto-mode replaces the dot with a short label so the wearer can tell
   // at a glance that no tap is required. Confined to baseline because the
@@ -288,13 +270,21 @@ function statusDisplayText(): string {
   return autoModeIndicator ? 'AUTO' : '•';
 }
 
+function statusBrightness(): number {
+  return recordingDotEligible ? (pendingStatusFrame ? 3 : 1) : 0;
+}
+
+async function upgradeStatus(): Promise<void> {
+  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText(), statusBrightness());
+}
+
 /** Toggle the resting "AUTO" indicator in the corner status slot. Called by
  *  the lifecycle when the VAD watcher starts/stops. Idempotent. */
 export async function setAutoModeIndicator(on: boolean): Promise<void> {
   if (autoModeIndicator === on) return;
   autoModeIndicator = on;
-  if (currentPage !== 'active') return;
-  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+  if (currentPage !== 'active' || !recordingDotEligible) return;
+  await upgradeStatus();
 }
 
 let bootstrapped = false;
@@ -303,7 +293,7 @@ let menuPersona: Persona | null = null;
 let cachedHistoryEntries: HistoryEntry[] = [];
 /**
  * Sub-mode for the active page. Driven by the lifecycle, read by buildActivePage.
- *   - 'baseline'         : full-screen unified body container + REC/hint chrome
+ *   - 'baseline'         : full-screen body + dim corner while listening
  *   - 'discreet-minimal' : single recording dot only (no body container)
  *   - 'discreet-result'  : full-screen unified body container, no bottom chrome
  *
@@ -439,8 +429,8 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     cachedHistoryEntries = [entry];
     historyDetailIndex = 0;
   }
-  // history-detail uses its own per-page line budget (9 lines, capped by the
-  // bottom hint row at y=260). Session-relative X/Y reflects the cached
+  // History detail uses the same full-screen budget as live answers.
+  // Session-relative X/Y reflects the cached
   // history list (which the user can walk via edge swipes); bullets show
   // within-entry page position when this entry spans multiple pages. The
   // X/Y tag is shown even when there's only one cached entry ("1/1") so the
@@ -449,7 +439,7 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
   const sessionTag = cachedTotal > 0 && historyDetailIndex >= 0
     ? `${historyDetailIndex + 1}/${cachedTotal}`
     : '';
-  detailPages = computePagesForResult(entry.result, HISTORY_DETAIL_PAGE_LINES, {
+  detailPages = computePagesForResult(entry.result, ANSWER_PAGE_LINES, {
     autoSelected: entry.result.autoSelected === true,
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
@@ -481,7 +471,7 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
   const sessionTag = cachedTotal > 0
     ? `${historyDetailIndex + 1}/${cachedTotal}`
     : '';
-  detailPages = computePagesForResult(entry.result, HISTORY_DETAIL_PAGE_LINES, {
+  detailPages = computePagesForResult(entry.result, ANSWER_PAGE_LINES, {
     autoSelected: entry.result.autoSelected === true,
     autoLensLabel: entry.result.autoSelected === true ? entry.lensName : undefined,
     sessionTag,
@@ -512,8 +502,8 @@ export async function setStatus(label: keyof typeof STATUS_LABEL | string): Prom
   // subsequent layout switch (e.g. discreet-minimal → discreet-result) would
   // otherwise carry the dot into the answer view.
   pendingStatusFrame = content;
-  if (currentPage !== 'active') return;
-  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+  if (currentPage !== 'active' || !recordingDotEligible) return;
+  await upgradeStatus();
 }
 
 // ---------- Streaming heading ----------
@@ -532,6 +522,9 @@ let streamingPending: string | null = null;
 let streamingLast = '';
 let streamingTimer: ReturnType<typeof setTimeout> | null = null;
 let streamingActive = false;
+let streamingPreviewVisible = false;
+let streamingGeneration = 0;
+let streamingWrite: Promise<void> = Promise.resolve();
 
 /**
  * Push a streaming partial onto the active page's reason container. Cleared
@@ -542,6 +535,7 @@ let streamingActive = false;
  */
 export function setLensStreamingHeading(text: string): void {
   if (currentPage !== 'active') return;
+  if (!streamingActive) streamingGeneration++;
   streamingActive = true;
   streamingPending = text;
   if (streamingTimer) return;
@@ -565,13 +559,35 @@ export function setLensStreamingHeading(text: string): void {
 }
 
 /** Internal: drain the pending streaming partial to the reason container. */
-async function flushStreamingHeading(): Promise<void> {
-  if (streamingPending === null) return;
+function flushStreamingHeading(): Promise<void> {
+  if (streamingPending === null) return streamingWrite;
   const next = streamingPending;
   streamingLast = next;
   streamingPending = null;
-  if (currentPage !== 'active') return;
-  await upgradeText(CONTAINER.reason, NAME.reason, next);
+  const generation = streamingGeneration;
+  // A BLE rebuild can outlast the throttle interval. Queue partials and let
+  // the final result drain this queue so it cannot write into a missing body.
+  streamingWrite = streamingWrite.then(async () => {
+    if (generation !== streamingGeneration || currentPage !== 'active') return;
+    const wasDotEligible = recordingDotEligible;
+    streamingPreviewVisible = true;
+    recordingDotEligible = false;
+    await setActiveHint('');
+    if (generation !== streamingGeneration || currentPage !== 'active') return;
+    if (activeLayout === 'discreet-minimal') {
+      activeLayout = 'discreet-result';
+      const ok = await getBridge().rebuildPageContainer(buildActivePage());
+      if (!ok) throw new Error('rebuildPageContainer (streaming answer) failed.');
+    } else if (wasDotEligible) {
+      await upgradeStatus();
+    }
+    if (generation !== streamingGeneration || currentPage !== 'active') return;
+    const preview = paginateText(next, BODY_INNER_W, ANSWER_PAGE_LINES, ANSWER_PAGE_LINES)[0]!;
+    await upgradeText(CONTAINER.reason, NAME.reason, preview, 4);
+  }).catch((error: unknown) => {
+    pushDebugEvent({ label: 'hud-stream-fail', detail: error instanceof Error ? error.message : String(error) });
+  });
+  return streamingWrite;
 }
 
 /**
@@ -580,6 +596,7 @@ async function flushStreamingHeading(): Promise<void> {
  * land *after* `setLensResult`'s rebuild and undo it.
  */
 export function clearLensStreamingHeading(): void {
+  streamingGeneration++;
   if (streamingTimer) {
     clearTimeout(streamingTimer);
     streamingTimer = null;
@@ -587,6 +604,22 @@ export function clearLensStreamingHeading(): void {
   streamingPending = null;
   streamingLast = '';
   streamingActive = false;
+}
+
+/** Remove an unfinished answer while preserving completed session pages for recall. */
+export async function discardLensStreamingHeading(isCurrent: () => boolean = () => true): Promise<void> {
+  clearLensStreamingHeading();
+  const generation = streamingGeneration;
+  await streamingWrite;
+  if (generation !== streamingGeneration || !isCurrent() || !streamingPreviewVisible) return;
+  streamingPreviewVisible = false;
+  activeHidden = true;
+  recordingDotEligible = true;
+  if (currentPage === 'active') {
+    await hideActiveResultInPlace();
+  } else if (isDiscreetLayout(activeLayout)) {
+    setActiveLayout('discreet-minimal');
+  }
 }
 
 /** Test helper — observable state of the streaming heading throttle. */
@@ -688,6 +721,7 @@ function splitForSynthesis(result: LensResult): LensResult[] {
 }
 
 export async function setLensResult(result: LensResult | null, context?: SetLensResultContext): Promise<void> {
+  await streamingWrite;
   // Cache the latest Translate result regardless of which page we're on so
   // the menu's "Reply…" item can resolve a picker even when the result
   // landed while the wearer was off the active page. NOT cleared on null —
@@ -720,7 +754,7 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
     if (currentPage !== 'active') return;
     if (activeLayout === 'discreet-minimal') {
       if (wasSuppressed) {
-        await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+        await upgradeStatus();
       }
       return;
     }
@@ -730,9 +764,9 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
       if (!ok) throw new Error('rebuildPageContainer (discreet-minimal) failed.');
       return;
     }
-    await upgradeText(CONTAINER.reason, NAME.reason, '');
+    await upgradeText(CONTAINER.reason, NAME.reason, '', 0);
     if (wasSuppressed) {
-      await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+      await upgradeStatus();
     }
     return;
   }
@@ -851,6 +885,7 @@ export async function blankActiveForThinking(): Promise<void> {
  * can reveal the last session page again. Shared by swipe-down dismiss and
  * tap-back from the menu. */
 async function hideActiveResultInPlace(): Promise<void> {
+  streamingPreviewVisible = false;
   activeHidden = true;
   // Re-enable the recording dot — the wearer is back to a listening view.
   recordingDotEligible = true;
@@ -864,8 +899,8 @@ async function hideActiveResultInPlace(): Promise<void> {
   // Already on the idle layout (e.g., single-page baseline). Wipe the unified
   // body so the wearer sees a blank screen between answers and restore the
   // corner recording dot suppressed while the answer was visible.
-  await upgradeText(CONTAINER.reason, NAME.reason, '');
-  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+  await upgradeText(CONTAINER.reason, NAME.reason, '', 0);
+  await upgradeStatus();
 }
 
 /** Mark the active result as hidden without clearing it. Used by the menu's
@@ -877,11 +912,15 @@ export function markActiveHidden(): void {
 /** True iff the active result is preserved in memory but currently hidden. */
 export function isActiveHidden(): boolean { return activeHidden; }
 
-export async function setActiveHint(content: string): Promise<void> {
-  if (currentPage !== 'active') return;
-  // Discreet layouts have no hint row.
-  if (activeLayout !== 'baseline') return;
-  await upgradeText(CONTAINER.activeHint, NAME.activeHint, content);
+/** Routine gesture / analysis instructions stay off the recording HUD.
+ * Keep this lifecycle hook to clear any transient feedback before continuing. */
+export async function setActiveHint(_content: string): Promise<void> {
+  if (!activeHintFlashTimer) return;
+  clearTimeout(activeHintFlashTimer);
+  activeHintFlashTimer = null;
+  if (currentPage === 'active' && activeLayout === 'baseline') {
+    await upgradeText(CONTAINER.activeHint, NAME.activeHint, '');
+  }
 }
 
 /**
@@ -949,21 +988,20 @@ export async function flashPickerHint(message: string, ms = 2500): Promise<void>
 let activeHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * Briefly replace the active page's hint with a message, then restore
- * `ACTIVE_HINT_DEFAULT`. Used when an analysis is short-circuited (e.g. the
- * no-voice gate fires) so the wearer gets feedback without leaving the
- * listening state. No-op outside the active baseline layout.
+ * Brief feedback for a rejected check, then return to an empty HUD footer.
+ * Never place a message over a visible answer.
  */
 export async function flashActiveHint(message: string, ms = 2500): Promise<void> {
   if (currentPage !== 'active') return;
   if (activeLayout !== 'baseline') return;
+  if (!recordingDotEligible) return;
   if (activeHintFlashTimer) clearTimeout(activeHintFlashTimer);
   await upgradeText(CONTAINER.activeHint, NAME.activeHint, message);
   activeHintFlashTimer = setTimeout(() => {
     activeHintFlashTimer = null;
     if (currentPage !== 'active') return;
     if (activeLayout !== 'baseline') return;
-    void upgradeText(CONTAINER.activeHint, NAME.activeHint, ACTIVE_HINT_DEFAULT);
+    void upgradeText(CONTAINER.activeHint, NAME.activeHint, '');
   }, ms);
 }
 
@@ -1034,13 +1072,14 @@ export async function setSummaryBadgeState(state: SummaryBadgeState): Promise<vo
 }
 
 
-async function upgradeText(containerID: number, containerName: string, content: string): Promise<void> {
+async function upgradeText(containerID: number, containerName: string, content: string, textColor?: number): Promise<void> {
   const upgrade = new TextContainerUpgrade({
     containerID,
     containerName,
     contentOffset: 0,
     contentLength: 0, // 0 = full replacement (SDK semantics)
     content,
+    textColor,
   });
   await getBridge().textContainerUpgrade(upgrade);
 }
@@ -1113,14 +1152,14 @@ export function formatLensResultBase(
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       const verdictLine = c.verdict === 'TRUE' ? '+ TRUE' : c.verdict === 'FALSE' ? '- FALSE' : '? UNVERIFIED';
       return {
-        top: clip(c.claim, 140),
+        top: c.claim,
         middle: `${verdictLine}${groundlessMark}`,
         bottom: c.reason,
       };
     }
     case 'trivia': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: clip(c.question, 140), middle: clip(c.answer, 60), bottom: c.description };
+      return { top: c.question, middle: c.answer, bottom: c.description };
     }
     case 'logical-fallacy': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
@@ -1130,7 +1169,7 @@ export function formatLensResultBase(
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       const verdictLine = c.verdict === 'NEUTRAL' ? '+ NEUTRAL' : '- BIASED';
       return {
-        top: c.direction ? clip(c.direction, 140) : '',
+        top: c.direction || '',
         middle: `${verdictLine}${groundlessMark}`,
         bottom: c.reason,
       };
@@ -1157,32 +1196,32 @@ export function formatLensResultBase(
           // wearer reads answer → detail → "From: …" top-to-bottom without the
           // source line interrupting the answer→detail flow.
           return {
-            top: clip(c.text, 140),
+            top: c.text,
             middle: c.detail,
             bottom: c.source ? `From: ${c.source}` : '',
           };
         case 'evidence':
           return {
-            top: clip(`"${c.text}"`, 140),
+            top: `"${c.text}"`,
             middle: c.source ? `From: ${c.source}` : '',
             bottom: '',
           };
         case 'followup':
-          return { top: clip(`→ ${c.text}`, 140), middle: '', bottom: '' };
+          return { top: `→ ${c.text}`, middle: '', bottom: '' };
       }
     }
     case 'devils-advocate': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: clip(c.counterpoint, 140), middle: '', bottom: c.rationale };
+      return { top: c.counterpoint, middle: '', bottom: c.rationale };
     }
     case 'key-questions': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
-      return { top: clip(c.question, 140), middle: '', bottom: c.context };
+      return { top: c.question, middle: '', bottom: c.context };
     }
     case 'companion': {
       const c = result.claims[claimIdx] ?? result.claims[0]!;
       return {
-        top: clip(c.headline, 140),
+        top: c.headline,
         middle: c.kind.toUpperCase(),
         bottom: c.detail,
       };
@@ -1203,7 +1242,7 @@ export function formatLensResultBase(
         `${formatLabel} · ${gameDifficultyLabel(result.preset.difficulty)}`,
         unanswerLine,
       ].filter(Boolean).join(' · ');
-      return { top: clip(topic, 140), middle, bottom: summary };
+      return { top: topic, middle, bottom: summary };
     }
     case 'translation': {
       // The HUD shows the spoken transcript on top, the translation in the
@@ -1221,8 +1260,8 @@ export function formatLensResultBase(
       // show that IN PLACE OF the native script (one line, not both). Empty
       // otherwise (Latin script or feature off) → native text is shown.
       const sourceLine = withRomanized(result.sourceText, result.sourceTextRomanized);
-      const top = sourceLine ? clip(`${srcLang}  ${sourceLine}`, 220) : '';
-      const middle = clip(result.translatedText, 220);
+      const top = sourceLine ? `${srcLang}  ${sourceLine}` : '';
+      const middle = result.translatedText;
       const starters = result.replyStarters
         .map((s, i) => `${i + 1}. ${s.translated}\n   ${withRomanized(s.source, s.sourceRomanized)}`)
         .join('\n');
@@ -1316,19 +1355,20 @@ function cachedLineCount(cache: WrapCache, text: string, innerW: number): number
 }
 
 /**
- * Split arbitrary text into screen-sized chunks. The first page uses the
- * tighter `firstLines` budget (it sits inside a smaller slot); subsequent
- * pages use the larger `scrollLines` budget (compact header above). Word
- * boundaries are preferred; unbreakable runs fall back to character splits.
+ * Split text against the visible line and SDK character budgets, measuring
+ * the inline prefix too. Prefer word boundaries; split long runs by codepoint.
  */
-function paginateText(text: string, innerW: number, firstLines: number, scrollLines: number): string[] {
+function paginateText(
+  text: string, innerW: number, firstLines: number, scrollLines: number,
+  prefix = '', maxCharacters = PAGE_CONTENT_CAP,
+): string[] {
   const pages: string[] = [];
   let remaining = text;
   let isFirst = true;
   const cache: WrapCache = new Map();
   while (remaining.length > 0) {
     const maxLines = isFirst ? firstLines : scrollLines;
-    const { chunk, rest } = takeLines(remaining, innerW, maxLines, cache);
+    const { chunk, rest } = takeLines(remaining, innerW, maxLines, cache, prefix, maxCharacters);
     pages.push(chunk);
     if (rest.length === remaining.length) break; // safety: no forward progress
     remaining = rest;
@@ -1337,8 +1377,13 @@ function paginateText(text: string, innerW: number, firstLines: number, scrollLi
   return pages.length > 0 ? pages : [''];
 }
 
-function takeLines(text: string, innerW: number, maxLines: number, cache: WrapCache): { chunk: string; rest: string } {
-  if (cachedLineCount(cache, text, innerW) <= maxLines) return { chunk: text, rest: '' };
+function takeLines(
+  text: string, innerW: number, maxLines: number, cache: WrapCache,
+  prefix: string, maxCharacters: number,
+): { chunk: string; rest: string } {
+  const fits = (chunk: string) => prefix.length + chunk.length <= maxCharacters
+    && cachedLineCount(cache, prefix + chunk, innerW) <= maxLines;
+  if (fits(text)) return { chunk: text, rest: '' };
 
   // Binary search over word boundaries for the largest prefix that fits.
   // `split(/(\s+)/)` preserves separators, so we can rejoin losslessly.
@@ -1354,7 +1399,7 @@ function takeLines(text: string, innerW: number, maxLines: number, cache: WrapCa
       lo = mid + 1;
       continue;
     }
-    if (cachedLineCount(cache, candidate, innerW) <= maxLines) {
+    if (fits(candidate)) {
       best = mid;
       lo = mid + 1;
     } else {
@@ -1364,48 +1409,31 @@ function takeLines(text: string, innerW: number, maxLines: number, cache: WrapCa
   if (best === 0) {
     // No word boundary works — the first token alone exceeds the line budget.
     // Fall back to splitting on the codepoint that fits.
-    return charSplitFallback(text, innerW, maxLines, cache);
+    return charSplitFallback(text, fits);
   }
   const chunk = words.slice(0, best).join('').replace(/\s+$/, '');
   const rest = words.slice(best).join('').replace(/^\s+/, '');
   return { chunk, rest };
 }
 
-function charSplitFallback(text: string, innerW: number, maxLines: number, cache: WrapCache): { chunk: string; rest: string } {
+function charSplitFallback(text: string, fits: (chunk: string) => boolean): { chunk: string; rest: string } {
+  // Split by codepoint so a page boundary cannot separate a surrogate pair.
+  const chars = Array.from(text);
   let lo = 1;
-  let hi = text.length;
+  let hi = chars.length;
   let best = 1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    if (cachedLineCount(cache, text.slice(0, mid), innerW) <= maxLines) {
+    if (fits(chars.slice(0, mid).join(''))) {
       best = mid;
       lo = mid + 1;
     } else {
       hi = mid - 1;
     }
   }
-  return { chunk: text.slice(0, best), rest: text.slice(best) };
+  return { chunk: chars.slice(0, best).join(''), rest: chars.slice(best).join('') };
 }
 
-/**
- * Build a flat page list spanning every claim and every continuation chunk.
- * One unified body string is composed per claim (heading + verdict + reason
- * joined with blank lines) and then paginated against a single per-page line
- * budget. Page 0 of each claim carries the heading + position tag; subsequent
- * pageWithinClaim values are pure body continuations (same claim, more text).
- *
- * When the entry expands to more than one page total AND no session-relative
- * posTag is already present on the heading (i.e., this entry is the only one
- * in its session, like a single Meeting Prep question with multiple claims),
- * each page gets an inline "X/Y · " prefix on its first line so the wearer
- * knows where they are. Pagination is rerun with the budget reduced by one
- * line in that case so the prefix can't push the visible body past the
- * container's clip if it forces the first line to wrap.
- *
- * For multi-entry sessions, `formatUnifiedBody` already prepends the
- * session-relative posTag — we skip the within-entry prefix there to avoid
- * stacking two indicators on one line.
- */
 /**
  * Compose the unified body for an entire entry by flattening every claim's
  * unified body into one string with a single blank-line separator between
@@ -1439,6 +1467,8 @@ function formatEntryBody(
  * unambiguously left-aligned). Only called when total > 1.
  */
 function bulletRow(currentIdx: number, total: number): string {
+  // A long answer must not turn the position indicator into several rows.
+  if (total > 12) return `${currentIdx + 1}/${total}`;
   const dots: string[] = [];
   for (let i = 0; i < total; i++) dots.push(i === currentIdx ? '●' : '○');
   return dots.join(' ');
@@ -1466,10 +1496,8 @@ function buildSourcesPageText(citations: ReadonlyArray<WebCitation>): string {
  *   - Bottom bullet row showing within-entry page position, only when the
  *     entry expands to more than one page.
  *
- * Pagination is two-pass: first to detect multi-page, then with the budget
- * reduced by the appropriate number of lines to make room for the prefix's
- * potential wrap (1 line) + bullet row (2 lines = blank separator + the row
- * itself).
+ * Measure the prefix together with each chunk, so a short position tag costs
+ * only its actual width. Multi-page answers reserve the two footer lines.
  */
 function computePagesForResult(
   result: LensResult,
@@ -1498,14 +1526,9 @@ function computePagesForResult(
   // Auto prefix and session tag share the first line, joined by ' · ' so the
   // shape is `Fact Check · 1/3 · <body>`. Either or both may be empty.
   const head = [autoPrefix, sessionTag].filter(Boolean).join(' · ');
-  const applyPrefix = (chunk: string) => (head ? `${head} · ${chunk}` : chunk);
-
-  // First pass with budget reduced by one line whenever any head prefix is
-  // present (covers both the session tag and the auto prefix — they share the
-  // same line, so they share the same one-line wrap reserve).
-  const prefixOverhead = head ? 1 : 0;
-  const firstBudget = Math.max(1, pageLines - prefixOverhead);
-  const firstPass = paginateText(body, BODY_INNER_W, firstBudget, firstBudget);
+  const prefix = head ? `${head} · ` : '';
+  const applyPrefix = (chunk: string) => prefix + chunk;
+  const firstPass = paginateText(body, BODY_INNER_W, pageLines, pageLines, prefix);
 
   if (firstPass.length <= 1 && !hasSourcesPage) {
     const text = applyPrefix(firstPass[0] ?? '');
@@ -1515,23 +1538,18 @@ function computePagesForResult(
   // Multi-page: also reserve 2 lines for the bottom bullet row + blank-line
   // separator, then re-paginate. The sources sub-page counts toward the bullet
   // total so the wearer sees "● ○ ○" with the last dot reserved for sources.
-  const finalBudget = Math.max(1, pageLines - prefixOverhead - 2);
-  const final = paginateText(body, BODY_INNER_W, finalBudget, finalBudget);
-  const totalPages = final.length + (hasSourcesPage ? 1 : 0);
-  const pages: PageRef[] = final.map((chunk, p) => ({
+  const finalBudget = Math.max(1, pageLines - 2);
+  const final = paginateText(body, BODY_INNER_W, finalBudget, finalBudget, prefix, PAGE_CONTENT_CAP - 64);
+  const sources = hasSourcesPage
+    ? paginateText(sourcesText, BODY_INNER_W, finalBudget, finalBudget, prefix, PAGE_CONTENT_CAP - 64)
+    : [];
+  const chunks = [...final, ...sources];
+  const totalPages = chunks.length;
+  return chunks.map((chunk, p) => ({
     claimIdx: 0,
     pageWithinClaim: p,
     text: `${applyPrefix(chunk)}\n\n${bulletRow(p, totalPages)}`,
   }));
-  if (hasSourcesPage) {
-    const sourcesIdx = totalPages - 1;
-    pages.push({
-      claimIdx: 0,
-      pageWithinClaim: sourcesIdx,
-      text: `${applyPrefix(sourcesText)}\n\n${bulletRow(sourcesIdx, totalPages)}`,
-    });
-  }
-  return pages;
 }
 
 function isDiscreetLayout(layout: ActiveLayout): boolean {
@@ -1539,7 +1557,7 @@ function isDiscreetLayout(layout: ActiveLayout): boolean {
 }
 
 function pageLinesForActiveLayout(): number {
-  return isDiscreetLayout(activeLayout) ? DISCREET_PAGE_LINES : BASELINE_PAGE_LINES;
+  return ANSWER_PAGE_LINES;
 }
 
 function targetLayoutForActivePage(): ActiveLayout {
@@ -1626,12 +1644,14 @@ async function renderActivePage(): Promise<void> {
   const page = sessionPages[sessionPageIndex];
   const entry = currentActiveEntry();
   if (!page || !entry) return;
+  streamingPreviewVisible = false;
   const target = targetLayoutForActivePage();
   // Suppress the recording dot the moment an answer is about to land — the
   // dot is the "listening, nothing on screen" indicator. Set this BEFORE any
   // page rebuild so the rebuild seeds the corner with '' instead of '•'.
   const wasDotEligible = recordingDotEligible;
   recordingDotEligible = false;
+  await setActiveHint('');
   const layoutChanged = target !== activeLayout;
   if (layoutChanged) {
     setActiveLayout(target);
@@ -1643,9 +1663,9 @@ async function renderActivePage(): Promise<void> {
     // the dot gives way to a clean answer view. Subsequent scrolls within
     // the same answer already have wasDotEligible=false and skip this write.
     // Discreet-result has no '•' fallback so no clear write is needed.
-    await upgradeText(CONTAINER.status, NAME.status, statusDisplayText());
+    await upgradeStatus();
   }
-  await upgradeText(CONTAINER.reason, NAME.reason, page.text);
+  await upgradeText(CONTAINER.reason, NAME.reason, page.text, 4);
 }
 
 /** Render `detailPages[detailPageIndex]` on the history-detail page. With the
@@ -1842,44 +1862,20 @@ function buildActivePage(): RebuildPageContainer {
 }
 
 /**
- * Baseline unified layout — a single full-screen body container (heading +
- * verdict + reason composed with blank-line separators) plus the existing
- * top status slot and bottom REC/hint chrome row. Body abuts the chrome at
- * y=256 without overlapping.
- *
- * The body itself is the event capturer (isEventCapture=1). It covers nearly
- * the whole screen, so an underlying full-screen sink would be blocked by
- * it on this hardware. Matches the history-detail page, which also lets the
- * body be the capturer.
+ * Normal listening is a dim corner indicator. The empty feedback overlay
+ * consumes no answer space; it only lights briefly after a rejected check.
+ * Keep the body as event capturer so swipe recall works while it is blank.
  */
 function buildBaselineActivePage(): RebuildPageContainer {
-  const status = new TextContainerProperty({
-    // Position + dimensions match `makeDiscreetStatus` exactly so the icon
-    // sits in the same screen coordinates across layouts — the wearer's
-    // mental model of "what does that glyph mean" stays anchored to one
-    // visual location. 55-px width comfortably fits the longest content
-    // the slot ever shows (spinner with `R1/3` retry prefix = 5 chars).
-    // Doubles as the recording dot when listening — statusDisplayText() falls
-    // back to '•' when the canonical status is empty and an answer isn't on
-    // screen, so baseline and discreet share one visual recording indicator.
-    containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
-    borderWidth: 0, paddingLength: 4, content: statusDisplayText(), isEventCapture: 0,
-  });
-  // Body: y=4, h=252 → bottom 256, abuts the hint chrome row. Fits 9 lines
-  // (9 × 27 + 8 = 251 ≤ 252). One container holds the entire heading +
-  // verdict + reason, paginated upstream into per-page chunks.
-  const body = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: BASELINE_PAGE_LINES * LINE_PX + 8,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 1,
-  });
+  const status = makeCornerStatus();
+  const body = makeAnswerBody('', recordingDotEligible ? 0 : 4);
   const hint = new TextContainerProperty({
     containerID: CONTAINER.activeHint, containerName: NAME.activeHint,
-    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
-    borderWidth: 0, paddingLength: 4, content: ACTIVE_HINT_DEFAULT, isEventCapture: 0,
+    xPosition: BODY_PADDING, yPosition: SCREEN_H - LINE_PX,
+    width: BODY_INNER_W, height: LINE_PX,
+    borderWidth: 0, paddingLength: 0, content: '', textColor: 2, isEventCapture: 0,
   });
-  const textObject = [status, body, hint];
+  const textObject = [body, status, hint];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
@@ -1899,7 +1895,7 @@ function buildDiscreetMinimalPage(): RebuildPageContainer {
   // indicator (spinner / "..." / "R1/2"). One container = one LVGL label-
   // cursor caret position; merging the two avoids the second caret in the
   // opposite corner.
-  const status = makeDiscreetStatus();
+  const status = makeCornerStatus();
   const textObject = [sink, status];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
@@ -1907,25 +1903,13 @@ function buildDiscreetMinimalPage(): RebuildPageContainer {
 }
 
 /**
- * Discreet result layout — full-screen unified body container with the small
- * top-right status corner overlay. Body starts at y=4 and extends nearly to
- * the screen bottom (h=278 → bottom y=282), holding 10 lines of paginated
- * heading + verdict + reason. The status corner sits at top-right (y=4, x=517+);
- * during result display the status slot is empty (STATUS_LABEL.displaying = ''),
- * so the body's top-right corner is unobstructed.
- *
- * The body itself is the event capturer (isEventCapture=1). It nearly covers
- * the screen, so a separate underlying sink would be blocked by it on this
- * hardware. Matches history-detail, which uses the same pattern.
+ * Discreet answers get the same full-canvas body as normal answers.
+ * The status overlay remains empty until the answer is dismissed.
  */
 function buildDiscreetResultPage(): RebuildPageContainer {
   const status = makeCornerStatus();
-  const body = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: DISCREET_PAGE_LINES * LINE_PX + 8,
-    borderWidth: 0, paddingLength: 4, content: '', isEventCapture: 1,
-  });
-  const textObject = [status, body];
+  const body = makeAnswerBody();
+  const textObject = [body, status];
   return new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   });
@@ -1938,33 +1922,28 @@ function makeFullScreenEventSink(): TextContainerProperty {
     containerID: CONTAINER.activeList, containerName: NAME.activeList,
     xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
     borderWidth: 0, paddingLength: 0, content: ' ', isEventCapture: 1,
+    textColor: 0,
   });
 }
 
-/** Top-right combined recording / status slot for discreet-minimal.
- * Shows '•' as the resting recording indicator; setStatus overwrites it with
- * the spinner / "..." / "R1/2" during analysis and restores the dot when
- * status clears. Keeping a single container also keeps the LVGL label-cursor
- * caret confined to one corner. */
-function makeDiscreetStatus(): TextContainerProperty {
+function makeAnswerBody(content = '', textColor = 4): TextContainerProperty {
   return new TextContainerProperty({
-    containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
-    borderWidth: 0, paddingLength: 4,
-    content: statusDisplayText(),
-    isEventCapture: 0,
+    containerID: CONTAINER.reason, containerName: NAME.reason,
+    xPosition: 0, yPosition: 0, width: SCREEN_W, height: SCREEN_H,
+    borderWidth: 0, paddingLength: BODY_PADDING, content, textColor, isEventCapture: 1,
   });
 }
 
-/** Small status slot for layouts that otherwise have no chrome (discreet-result,
- *  scroll layouts). Empty when no analysis is running, spinner content during
- *  one — lets the wearer see "still working" while reviewing previous answers. */
+/** Dim recording indicator, brighter brief processing / error feedback.
+ * No status glyph is drawn over an answer. */
 function makeCornerStatus(): TextContainerProperty {
   return new TextContainerProperty({
     containerID: CONTAINER.status, containerName: NAME.status,
-    xPosition: SCREEN_W - 59, yPosition: 4, width: 55, height: 32,
+    xPosition: SCREEN_W - 59, yPosition: 4, width: 55,
+    height: LINE_PX + 2 * BODY_PADDING,
     borderWidth: 0, paddingLength: 4,
     content: statusDisplayText(),
+    textColor: statusBrightness(),
     isEventCapture: 0,
   });
 }
@@ -2009,17 +1988,7 @@ function buildMidSummaryContentBody(result: MidSummaryResult, loading: boolean):
 }
 
 function buildMidSummaryPage(pageText: string): RebuildPageContainer {
-  const body = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: HISTORY_DETAIL_PAGE_LINES * LINE_PX + 8,
-    borderWidth: 0, paddingLength: 4, content: pageText, isEventCapture: 1,
-  });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList,
-    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
-    borderWidth: 0, paddingLength: 4, content: 'Tap: menu · Double-tap: analyze', isEventCapture: 0,
-  });
-  const textObject = [body, hint];
+  const textObject = [makeAnswerBody(pageText)];
   return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
@@ -2061,23 +2030,10 @@ export async function showMidSummaryPage(
 }
 
 /**
- * History-detail unified layout — a single body container with the bottom
- * hint row at y=260. Body holds 9 lines of paginated heading + verdict +
- * reason. The body is the event sink (isEventCapture=1) so swipes (scroll
- * pages) and taps (back to history list) fire reliably on this hardware.
+ * History answers use the full canvas and the same event sink as live answers.
  */
 function buildHistoryDetailPage(_entry: HistoryEntry, page: PageRef): RebuildPageContainer {
-  const body = new TextContainerProperty({
-    containerID: CONTAINER.reason, containerName: NAME.reason,
-    xPosition: 16, yPosition: 4, width: SCREEN_W - 32, height: HISTORY_DETAIL_PAGE_LINES * LINE_PX + 8,
-    borderWidth: 0, paddingLength: 4, content: page.text, isEventCapture: 1,
-  });
-  const hint = new TextContainerProperty({
-    containerID: CONTAINER.activeList, containerName: NAME.activeList,
-    xPosition: 16, yPosition: 260, width: SCREEN_W - 32, height: 28,
-    borderWidth: 0, paddingLength: 4, content: 'Tap: back · Swipe: scroll', isEventCapture: 0,
-  });
-  const textObject = [body, hint];
+  const textObject = [makeAnswerBody(page.text)];
   return new RebuildPageContainer({ containerTotalNum: totalContainers([], textObject), listObject: [], textObject });
 }
 
@@ -2505,6 +2461,8 @@ function buildGameEndPage(session: GameSession): RebuildPageContainer {
 
 /** Clear per-session HUD state so a fresh session doesn't inherit stale buffers. */
 export function resetHudSessionState(): void {
+  clearLensStreamingHeading();
+  streamingPreviewVisible = false;
   menuPersona = null;
   cachedHistoryEntries = [];
   detailPages = [];
@@ -2524,6 +2482,7 @@ export function resetHudSessionState(): void {
   pendingMenuSpinnerFrame = '';
   pendingStatusFrame = '';
   recordingDotEligible = true;
+  autoModeIndicator = false;
   // Cancel any pending hint / badge flashes so their 2.5s callbacks can't
   // fire after the session has been torn down and attempt to upgradeText on
   // a stale page. The flash callbacks short-circuit on `currentPage` /

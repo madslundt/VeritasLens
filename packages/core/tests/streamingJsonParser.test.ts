@@ -68,6 +68,27 @@ describe('StreamingJsonParser', () => {
     expect((claims[0] as { type: 'claim'; claim: Record<string, unknown> }).claim['quote']).toBe('see {this} bracket');
   });
 
+  it.each(['Open { here', 'Close } here', 'Open [ here', 'Close ] here'])(
+    'ignores punctuation inside nested strings: %s', (quote) => {
+      const claim = { quote, detail: { text: 'A "quoted" text' } };
+      const text = JSON.stringify({ claims: [claim, { quote: 'next' }], summary: 'complete' });
+      const events = collect([...text]);
+      expect(events.filter((e) => e.type === 'claim')).toEqual([
+        { type: 'claim', key: 'claims', claim },
+        { type: 'claim', key: 'claims', claim: { quote: 'next' } },
+      ]);
+      expect(events).toContainEqual({ type: 'field', name: 'summary', value: 'complete' });
+    },
+  );
+
+  it('ignores punctuation in a top-level nested object before streaming claims', () => {
+    const text = JSON.stringify({ metadata: { text: '} ] " {' }, claims: [{ quote: 'claim' }] });
+    const events = collect([...text]);
+    expect(events.filter((e) => e.type === 'claim')).toEqual([
+      { type: 'claim', key: 'claims', claim: { quote: 'claim' } },
+    ]);
+  });
+
   it('accumulates full text in the .text property for the final parse', () => {
     const parser = new StreamingJsonParser();
     parser.feed('{"claims":[', () => {});

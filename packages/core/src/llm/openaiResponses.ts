@@ -27,14 +27,19 @@ import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
 import { StreamingJsonParser } from './streamingJsonParser';
 import { buildCitation, dedupeCitations } from './citations';
-import { toStrictSchema, transcribeAudio } from './openai';
+import { toStrictSchema, resolveLensTranscript } from './openai';
+import { fetchWithEndpointFallback } from '@/llm/endpointFallback';
 
 const CHAT_TIMEOUT_MS = 60_000;
 const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
 
 export interface CallOpenAiResponsesLensOptions {
+  /** Shared STT result for this audio snapshot. */
+  transcript?: Promise<string>;
   apiKey: string;
   baseUrl: OpenAiBaseUrl;
+  fallbackUrls?: readonly string[];
+  transcribeFallbackUrls?: readonly string[];
   /** Responses-API-capable model id (gpt-5*, gpt-4.1*, gpt-4o* — the grounding
    *  resolver gates this). */
   model: string;
@@ -175,23 +180,11 @@ export async function callOpenAiResponsesLensStream(
 
   // STT first — Responses on text input only.
   const sttBaseUrl = opts.transcribeBaseUrl ?? opts.baseUrl;
-  const sttApiKey = opts.transcribeBaseUrl && opts.transcribeBaseUrl !== opts.baseUrl
-    ? (opts.transcribeApiKey ?? '')
-    : opts.apiKey;
-  if (!sttApiKey) {
-    throw new Error(`Missing ${openaiHostLabel(sttBaseUrl)} API key for transcription.`);
-  }
   const transcribeModel = opts.transcribeModel || OPENAI_TRANSCRIBE_MODELS[sttBaseUrl];
-  if (!transcribeModel) {
+  if (!opts.transcript && !transcribeModel) {
     throw new Error(`Missing transcribeModel for ${openaiHostLabel(sttBaseUrl)}.`);
   }
-  const transcript = await transcribeAudio({
-    apiKey: sttApiKey,
-    baseUrl: sttBaseUrl,
-    model: transcribeModel,
-    wav: opts.wav,
-    signal: opts.signal,
-  });
+  const transcript = await resolveLensTranscript({ ...opts, transcribeModel });
   try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
 
   const schema = toStrictSchema(augmentSchema(opts.schema));
@@ -203,7 +196,6 @@ export async function callOpenAiResponsesLensStream(
     schema,
     stream: true,
   });
-  const endpoint = `${opts.baseUrl}/responses`;
 
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
@@ -216,15 +208,17 @@ export async function callOpenAiResponsesLensStream(
     const attemptCtl = withFetchTimeout(opts.signal, CHAT_TIMEOUT_MS);
     let response: Response;
     try {
-      response = await fetch(endpoint, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          accept: 'text/event-stream',
-          authorization: `Bearer ${opts.apiKey}`,
+      response = await fetchWithEndpointFallback({
+        baseUrl: opts.baseUrl,
+        fallbackUrls: opts.fallbackUrls,
+        apiKey: opts.apiKey,
+        path: '/responses',
+        init: {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+          body: bodyJson,
+          signal: attemptCtl.signal,
         },
-        body: bodyJson,
-        signal: attemptCtl.signal,
       });
     } catch (err) {
       attemptCtl.cleanup();

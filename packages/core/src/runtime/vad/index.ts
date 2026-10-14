@@ -1,13 +1,13 @@
 // src/runtime/vad/index.ts
 //
-// Public VAD entrypoint. Tries Silero first (ONNX model via onnxruntime-web),
+// Public VAD entrypoint. Tries Silero v6 first (local WASM cascade),
 // falls back to the FFT heuristic in `../audioBuffer` if the model cannot
 // load (test environment without `window`, missing assets, etc.). Callers
 // import only from here.
 
 import { analyzeBufferForVoiceFFT, type VoiceBufferAnalysis } from '@/runtime/audioBuffer';
 import { pushDebugEvent } from '@/state/store';
-import { getSileroVAD } from './silero';
+import { getSileroVAD } from '@/runtime/vad/silero';
 
 export type { VoiceBufferAnalysis } from '@/runtime/audioBuffer';
 
@@ -17,6 +17,7 @@ export type { VoiceBufferAnalysis } from '@/runtime/audioBuffer';
  * don't re-attempt module imports on every user tap.
  */
 let sileroAvailable: boolean | null = null;
+let availabilityGeneration = 0;
 
 /**
  * Fire-and-forget Silero init, used from `startHudRuntime()` so the model is
@@ -27,14 +28,17 @@ let sileroAvailable: boolean | null = null;
  * lenient FFT fallback.
  */
 export async function warmupVAD(): Promise<void> {
+  const generation = availabilityGeneration;
   try {
     pushDebugEvent({ label: 'vad-warmup', detail: 'Silero init starting…' });
     if (import.meta.env.DEV) console.log('[vad] Silero init starting');
     await getSileroVAD().init();
+    if (generation !== availabilityGeneration) return;
     sileroAvailable = true;
-    pushDebugEvent({ label: 'vad-warmup', detail: 'Silero ready' });
-    if (import.meta.env.DEV) console.log('[vad] Silero ready');
+    pushDebugEvent({ label: 'vad-warmup', detail: 'Silero v6 + Earshot ready' });
+    if (import.meta.env.DEV) console.log('[vad] Silero v6 + Earshot ready');
   } catch (err) {
+    if (generation !== availabilityGeneration) return;
     sileroAvailable = false;
     const msg = describeError(err);
     pushDebugEvent({ label: 'vad-warmup', detail: `Silero failed, FFT fallback active — ${msg}` });
@@ -78,13 +82,14 @@ export async function analyzeBufferForVoice(
     logVad('fft', r, pcm.length);
     return r;
   }
+  const generation = availabilityGeneration;
   try {
     const result = await getSileroVAD().predict(pcm, sampleRate, rmsFloor);
-    sileroAvailable = true;
-    logVad('silero', result, pcm.length);
+    if (generation === availabilityGeneration) sileroAvailable = true;
+    logVad('silero-v6', result, pcm.length);
     return result;
   } catch (err) {
-    sileroAvailable = false;
+    if (generation === availabilityGeneration) sileroAvailable = false;
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     pushDebugEvent({ label: 'vad-error', detail: `Silero predict failed, FFT fallback — ${msg}` });
     const r = analyzeBufferForVoiceFFT(pcm, sampleRate, rmsFloor);
@@ -93,7 +98,7 @@ export async function analyzeBufferForVoice(
   }
 }
 
-function logVad(path: 'silero' | 'fft', r: VoiceBufferAnalysis, byteLength: number): void {
+function logVad(path: 'silero-v6' | 'fft', r: VoiceBufferAnalysis, byteLength: number): void {
   const seconds = (byteLength >> 1) / 16_000;
   const detail = `${path} | ${seconds.toFixed(1)}s | voice=${r.voiceFrames} silence=${r.silenceFrames} noise=${r.noiseFrames}`;
   pushDebugEvent({ label: 'vad-decision', detail });
@@ -114,12 +119,13 @@ export async function extractSpeechSegments(
   rmsFloor: number = 200,
 ): Promise<Array<{ start: number; end: number }> | null> {
   if (sileroAvailable === false) return null;
+  const generation = availabilityGeneration;
   try {
     const segments = await getSileroVAD().extractSpeechSegments(pcm, sampleRate, rmsFloor);
-    sileroAvailable = true;
+    if (generation === availabilityGeneration) sileroAvailable = true;
     return segments;
   } catch (err) {
-    sileroAvailable = false;
+    if (generation === availabilityGeneration) sileroAvailable = false;
     const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     pushDebugEvent({ label: 'vad-error', detail: `Silero segment extract failed — ${msg}` });
     return null;
@@ -133,6 +139,7 @@ export async function extractSpeechSegments(
  * from the previous session) and by the test suite (each case starts fresh).
  */
 export function resetVADAvailability(): void {
+  availabilityGeneration++;
   sileroAvailable = null;
 }
 

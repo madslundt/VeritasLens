@@ -25,6 +25,8 @@
 import {
   configureSettings,
   OPENAI_BASE_URLS,
+  normalizeOpenAiBaseUrl,
+  defaultSttModel,
   DEFAULT_LLM_PROVIDER,
   DEFAULT_GEMINI_MODEL,
   DEFAULT_GEMINI_AUTO_MODEL,
@@ -45,12 +47,12 @@ import type {
   OpenAiBaseUrl,
   LlmProvider,
   SttHost,
-  TranscriptMode,
 } from '@veritaslens/core';
 import { useStore } from '../state/store';
 import type { RaybanSettings } from '../state/store';
 import { getLocalStorage } from './bridge-rn';
 import { startLifecycle } from './lifecycle';
+import { restoreFallbackUrls } from './endpointSettings';
 
 // ---------------------------------------------------------------------------
 // Storage key constants (mirrored from even-g2 so history can be shared)
@@ -64,6 +66,9 @@ const KEY_CLAUDE_MODEL = 'veritaslens.claudeModel';
 const KEY_OPENAI_KEY_PREFIX = 'veritaslens.openaiKey.';
 const KEY_OPENAI_BASE_URL = 'veritaslens.openaiBaseUrl';
 const KEY_OPENAI_MODEL = 'veritaslens.openaiModel';
+const KEY_OPENAI_CUSTOM_URLS = 'veritaslens.openaiCustomUrls';
+const KEY_OPENAI_FALLBACK_URLS = 'veritaslens.openaiFallbackUrls';
+const KEY_STT_FALLBACK_URLS = 'veritaslens.sttFallbackUrls';
 const KEY_STT_HOST = 'veritaslens.sttHost';
 const KEY_STT_MODEL = 'veritaslens.sttModel';
 const KEY_ACTIVE_LENS = 'veritaslens.activeLensId';
@@ -116,6 +121,10 @@ let cachedFullSettings: Settings = {
   autoModeIntervalMs: DEFAULT_AUTO_MODE_INTERVAL_MS,
   translationSourceLanguages: 'auto',
   translationMode: 'converse',
+  micSource: 'glasses',
+  romanizeForeignScript: false,
+  locationEnabled: false,
+  cachedLocation: null,
 };
 
 /**
@@ -124,7 +133,21 @@ let cachedFullSettings: Settings = {
  * the change without a full restart.
  */
 export function patchFullSettings(partial: Partial<Settings>): void {
-  cachedFullSettings = { ...cachedFullSettings, ...partial };
+  const s = useStore.getState().settings;
+  cachedFullSettings = {
+    ...cachedFullSettings,
+    provider: s.provider,
+    geminiModel: s.geminiModel as Settings['geminiModel'],
+    claudeModel: s.claudeModel as Settings['claudeModel'],
+    openaiBaseUrl: s.openaiBaseUrl,
+    openaiModel: s.openaiModel,
+    openaiFallbackUrls: s.openaiFallbackUrls,
+    sttHost: s.sttHost,
+    sttModel: s.sttModel,
+    sttFallbackUrls: s.sttFallbackUrls,
+    bufferDuration: s.bufferDurationSec,
+    ...partial,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +182,9 @@ export async function bootstrap(): Promise<void> {
     ttsEnabledRaw,
     ttsRateRaw,
     bufferDurationRaw,
+    customUrlsRaw,
+    openaiFallbackUrlsRaw,
+    sttFallbackUrlsRaw,
     ...openaiKeyValues
   ] = await Promise.all([
     getLocalStorage(KEY_PROVIDER),
@@ -175,6 +201,9 @@ export async function bootstrap(): Promise<void> {
     getLocalStorage(KEY_TTS_ENABLED),
     getLocalStorage(KEY_TTS_RATE),
     getLocalStorage(KEY_BUFFER_DURATION),
+    getLocalStorage(KEY_OPENAI_CUSTOM_URLS),
+    getLocalStorage(KEY_OPENAI_FALLBACK_URLS),
+    getLocalStorage(KEY_STT_FALLBACK_URLS),
     // Per-host OpenAI API keys — one read per host
     ...OPENAI_BASE_URLS.map((url) => getLocalStorage(`${KEY_OPENAI_KEY_PREFIX}${url}`)),
   ]);
@@ -187,22 +216,37 @@ export async function bootstrap(): Promise<void> {
     if (v) openaiApiKeys[url] = v;
   });
 
+  // Load keys for saved custom endpoints, including an active URL from older saves.
+  let effectiveOpenaiBaseUrl: OpenAiBaseUrl = DEFAULT_OPENAI_BASE_URL;
+  try {
+    if (openaiBaseUrl) effectiveOpenaiBaseUrl = normalizeOpenAiBaseUrl(openaiBaseUrl);
+  } catch { /* corrupted persisted URL falls back to OpenAI */ }
+  const urls = new Set<string>([effectiveOpenaiBaseUrl]);
+  let effectiveSttHost: SttHost = DEFAULT_STT_HOST;
+  try {
+    if (sttHost) effectiveSttHost = normalizeOpenAiBaseUrl(sttHost);
+  } catch { /* corrupted persisted URL falls back to Groq */ }
+  urls.add(effectiveSttHost);
+  try {
+    const parsed: unknown = JSON.parse(customUrlsRaw ?? '[]');
+    if (Array.isArray(parsed)) {
+      for (const value of parsed) {
+        if (typeof value !== 'string') continue;
+        try { urls.add(normalizeOpenAiBaseUrl(value)); } catch { /* skip invalid URLs */ }
+      }
+    }
+  } catch { /* corrupted list must not prevent boot */ }
+  const extraKeys = await Promise.all([...urls]
+    .filter((url) => !(OPENAI_BASE_URLS as readonly string[]).includes(url))
+    .map(async (url) => [url, await getLocalStorage(`${KEY_OPENAI_KEY_PREFIX}${url}`)] as const));
+  for (const [url, key] of extraKeys) openaiApiKeys[url] = key ?? '';
+
   // --- Coerce and apply the effective values ------------------------------------
 
   const effectiveProvider: LlmProvider =
     provider === 'gemini' || provider === 'openai-compatible' || provider === 'claude'
       ? (provider as LlmProvider)
       : DEFAULT_LLM_PROVIDER;
-
-  const effectiveSttHost: SttHost =
-    sttHost === 'https://api.openai.com/v1' || sttHost === 'https://api.groq.com/openai/v1'
-      ? (sttHost as SttHost)
-      : DEFAULT_STT_HOST;
-
-  const effectiveOpenaiBaseUrl: OpenAiBaseUrl =
-    openaiBaseUrl && (OPENAI_BASE_URLS as readonly string[]).includes(openaiBaseUrl)
-      ? (openaiBaseUrl as OpenAiBaseUrl)
-      : DEFAULT_OPENAI_BASE_URL;
 
   const bufferDurationParsed = Number(bufferDurationRaw ?? '');
   const effectiveBufferDuration: RaybanSettings['bufferDurationSec'] =
@@ -218,8 +262,10 @@ export async function bootstrap(): Promise<void> {
     claudeModel: claudeModel ?? DEFAULT_CLAUDE_MODEL,
     openaiBaseUrl: effectiveOpenaiBaseUrl,
     openaiModel: openaiModel ?? DEFAULT_OPENAI_MODEL,
+    openaiFallbackUrls: restoreFallbackUrls(openaiFallbackUrlsRaw),
     sttHost: effectiveSttHost,
-    sttModel: sttModel ?? DEFAULT_STT_MODEL,
+    sttModel: sttModel?.trim() || defaultSttModel(effectiveSttHost),
+    sttFallbackUrls: restoreFallbackUrls(sttFallbackUrlsRaw),
     activeLensId: activeLensId ?? 'fact-checker',
     cameraEnabled: cameraEnabledRaw !== 'false',
     ttsEnabled: ttsEnabledRaw !== 'false',
@@ -241,8 +287,10 @@ export async function bootstrap(): Promise<void> {
     openaiApiKeys,
     openaiBaseUrl: storeSettings.openaiBaseUrl as Settings['openaiBaseUrl'],
     openaiModel: storeSettings.openaiModel,
+    openaiFallbackUrls: storeSettings.openaiFallbackUrls,
     sttHost: storeSettings.sttHost,
     sttModel: storeSettings.sttModel,
+    sttFallbackUrls: storeSettings.sttFallbackUrls,
   };
 
   // --- Wire core's settings accessor to the closure ----------------------------

@@ -12,6 +12,7 @@
 // during the transition; new code should import from '@/llm'.
 
 import { settings } from '@/state/store';
+import { encodePcmToWav } from '@/runtime/audioBuffer';
 import {
   callLens as callGeminiLens,
   callLensStream as callGeminiLensStream,
@@ -29,6 +30,7 @@ import {
   callOpenAiLensStream,
   fetchOpenAiModels,
   runSelfTest as runOpenAiSelfTest,
+  resolveLensTranscript,
   transcribeAudio,
 } from './openai';
 import {
@@ -38,9 +40,11 @@ import {
   runSelfTest as runClaudeSelfTest,
 } from './claude';
 import {
-  OPENAI_CHAT_ONLY_HOSTS,
+  isOpenAiChatOnlyHost,
+  OPENAI_INLINE_AUDIO_HOSTS,
   OPENAI_TRANSCRIBE_MODELS,
-  STT_MODELS_BY_HOST,
+  defaultSttModel,
+  isCustomSttHost,
   openaiHostLabel,
   type ClaudeModel,
   type GeminiModel,
@@ -63,6 +67,8 @@ export type { CallGameOptions } from './gameClient';
  * is transcribed to text before chat completions).
  */
 export interface CallLensOptions extends Omit<GeminiCallLensOptions, 'apiKey' | 'model'> {
+  /** Shared STT promise for this exact audio snapshot; never reuse across taps. */
+  transcript?: Promise<string>;
   /** When omitted, the facade reads the active provider's credentials from `settings()`. */
   apiKey?: string;
   /** Provider-specific model id. When omitted, the active provider's stored model is used. */
@@ -158,12 +164,12 @@ function resolveStt(chatHost: OpenAiBaseUrl): {
   isCrossHost: boolean;
 } {
   const s = settings();
-  if (OPENAI_CHAT_ONLY_HOSTS.has(chatHost)) {
+  if (isOpenAiChatOnlyHost(chatHost)) {
     const sttHost: SttHost = s.sttHost;
     return {
       transcribeBaseUrl: sttHost,
       transcribeApiKey: s.openaiApiKeys[sttHost] ?? '',
-      transcribeModel: s.sttModel || STT_MODELS_BY_HOST[sttHost][0],
+      transcribeModel: s.sttModel || defaultSttModel(sttHost),
       isCrossHost: true,
     };
   }
@@ -173,6 +179,30 @@ function resolveStt(chatHost: OpenAiBaseUrl): {
     transcribeModel: s.openaiTranscribeModels[chatHost] || OPENAI_TRANSCRIBE_MODELS[chatHost],
     isCrossHost: false,
   };
+}
+
+/**
+ * Start one transcription for an Auto attempt. Classifier, speculative lens,
+ * and fallback answer share this promise. It is tied to the attempt's outer
+ * signal so cancelling a speculative miss cannot cancel the selected lens's
+ * STT. Inline-audio providers keep their native path.
+ */
+export function prepareLensTranscript(wav: Uint8Array, signal: AbortSignal): Promise<string> | undefined {
+  const s = settings();
+  if (s.provider === 'gemini' ||
+      (s.provider === 'openai-compatible' && OPENAI_INLINE_AUDIO_HOSTS.has(s.openaiBaseUrl))) {
+    return undefined;
+  }
+  const stt = s.provider === 'claude'
+    ? { transcribeBaseUrl: s.sttHost, transcribeApiKey: s.openaiApiKeys[s.sttHost] ?? '',
+        transcribeModel: s.sttModel || defaultSttModel(s.sttHost) }
+    : resolveStt(s.openaiBaseUrl);
+  return resolveLensTranscript({
+    apiKey: stt.transcribeApiKey, baseUrl: stt.transcribeBaseUrl,
+    transcribeModel: stt.transcribeModel, wav, signal,
+    transcribeFallbackUrls: s.provider === 'claude' || isOpenAiChatOnlyHost(s.openaiBaseUrl)
+      ? s.sttFallbackUrls?.[stt.transcribeBaseUrl] : s.openaiFallbackUrls?.[s.openaiBaseUrl],
+  });
 }
 
 /**
@@ -192,18 +222,20 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     // STT key is missing — surfaces in Settings rather than at /v1/messages.
     const sttHost: SttHost = s.sttHost;
     const sttApiKey = s.openaiApiKeys[sttHost] ?? '';
-    if (!sttApiKey) {
+    if (!sttApiKey && !isCustomSttHost(sttHost)) {
       throw new Error(
         `Add a ${openaiHostLabel(sttHost)} API key for transcription before using Anthropic.`,
       );
     }
-    const sttModel = s.sttModel || STT_MODELS_BY_HOST[sttHost][0];
-    const transcript = await transcribeAudio({
+    const sttModel = s.sttModel || defaultSttModel(sttHost);
+    const transcript = await resolveLensTranscript({
       apiKey: sttApiKey,
       baseUrl: sttHost,
-      model: sttModel,
+      transcribeFallbackUrls: s.sttFallbackUrls?.[sttHost],
+      transcribeModel: sttModel,
       wav: opts.wav,
       signal: opts.signal,
+      transcript: opts.transcript,
     });
     // Surface the captured transcript before the Anthropic call so the
     // rolling transcript widget updates as soon as STT finishes — no need to
@@ -223,7 +255,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
   if (s.provider === 'openai-compatible') {
     const chatHost = s.openaiBaseUrl;
     const stt = resolveStt(chatHost);
-    if (stt.isCrossHost && !stt.transcribeApiKey) {
+    if (stt.isCrossHost && !stt.transcribeApiKey && !isCustomSttHost(stt.transcribeBaseUrl)) {
       throw new Error(
         `Add a ${openaiHostLabel(stt.transcribeBaseUrl)} API key for transcription before using ${openaiHostLabel(chatHost)}.`,
       );
@@ -231,11 +263,14 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     return callOpenAiLens({
       apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
       baseUrl: chatHost,
+      fallbackUrls: s.openaiFallbackUrls?.[chatHost],
+      transcribeFallbackUrls: stt.isCrossHost ? s.sttFallbackUrls?.[stt.transcribeBaseUrl] : s.openaiFallbackUrls?.[chatHost],
       model: opts.model ?? s.openaiModel,
       transcribeModel: stt.transcribeModel,
       transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
       transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
       wav: opts.wav,
+      transcript: opts.transcript,
       prompt: opts.prompt,
       schema: opts.schema,
       signal: opts.signal,
@@ -275,18 +310,20 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
   if (s.provider === 'claude') {
     const sttHost: SttHost = s.sttHost;
     const sttApiKey = s.openaiApiKeys[sttHost] ?? '';
-    if (!sttApiKey) {
+    if (!sttApiKey && !isCustomSttHost(sttHost)) {
       throw new Error(
         `Add a ${openaiHostLabel(sttHost)} API key for transcription before using Anthropic.`,
       );
     }
-    const sttModel = s.sttModel || STT_MODELS_BY_HOST[sttHost][0];
-    const transcript = await transcribeAudio({
+    const sttModel = s.sttModel || defaultSttModel(sttHost);
+    const transcript = await resolveLensTranscript({
       apiKey: sttApiKey,
       baseUrl: sttHost,
-      model: sttModel,
+      transcribeFallbackUrls: s.sttFallbackUrls?.[sttHost],
+      transcribeModel: sttModel,
       wav: opts.wav,
       signal: opts.signal,
+      transcript: opts.transcript,
     });
     try { opts.onTranscript?.(transcript); } catch { /* subscriber errors must not break the lens call */ }
     const claudeModel = (opts.model as ClaudeModel | undefined) ?? s.claudeModel;
@@ -313,7 +350,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
   if (s.provider === 'openai-compatible') {
     const chatHost = s.openaiBaseUrl;
     const stt = resolveStt(chatHost);
-    if (stt.isCrossHost && !stt.transcribeApiKey) {
+    if (stt.isCrossHost && !stt.transcribeApiKey && !isCustomSttHost(stt.transcribeBaseUrl)) {
       throw new Error(
         `Add a ${openaiHostLabel(stt.transcribeBaseUrl)} API key for transcription before using ${openaiHostLabel(chatHost)}.`,
       );
@@ -345,11 +382,14 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       return callOpenAiResponsesLensStream({
         apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
         baseUrl: chatHost,
+        fallbackUrls: s.openaiFallbackUrls?.[chatHost],
+        transcribeFallbackUrls: stt.isCrossHost ? s.sttFallbackUrls?.[stt.transcribeBaseUrl] : s.openaiFallbackUrls?.[chatHost],
         model: applyModelGrounding(baseModel, grounding),
         transcribeModel: stt.transcribeModel,
         transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
         transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
         wav: opts.wav,
+        transcript: opts.transcript,
         prompt: opts.prompt,
         schema: opts.schema,
         signal: opts.signal,
@@ -367,12 +407,15 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
     return callOpenAiLensStream({
       apiKey: opts.apiKey ?? (s.openaiApiKeys[chatHost] ?? ''),
       baseUrl: chatHost,
+      fallbackUrls: s.openaiFallbackUrls?.[chatHost],
+      transcribeFallbackUrls: stt.isCrossHost ? s.sttFallbackUrls?.[stt.transcribeBaseUrl] : s.openaiFallbackUrls?.[chatHost],
       model: baseModel,
       effectiveModel: applyModelGrounding(baseModel, grounding),
       transcribeModel: stt.transcribeModel,
       transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
       transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
       wav: opts.wav,
+      transcript: opts.transcript,
       prompt: opts.prompt,
       schema: opts.schema,
       signal: opts.signal,
@@ -428,7 +471,7 @@ export async function fetchAvailableModels(
     return fetchClaudeModels(apiKey, signal);
   }
   if (s.provider === 'openai-compatible') {
-    return fetchOpenAiModels(apiKey, s.openaiBaseUrl, signal);
+    return fetchOpenAiModels(apiKey, s.openaiBaseUrl, signal, s.openaiFallbackUrls?.[s.openaiBaseUrl]);
   }
   return fetchGeminiModels(apiKey, signal);
 }
@@ -457,6 +500,8 @@ export async function runSelfTest(
   overrides?: {
     provider?: LlmProvider;
     baseUrl?: OpenAiBaseUrl;
+    fallbackUrls?: readonly string[];
+    sttFallbackUrls?: readonly string[];
     transcribeModel?: string;
     sttHost?: SttHost;
     sttModel?: string;
@@ -467,6 +512,18 @@ export async function runSelfTest(
   const s = settings();
   const provider = overrides?.provider ?? s.provider;
   const baseUrl = overrides?.baseUrl ?? s.openaiBaseUrl;
+  if ((provider === 'gemini' || provider === 'claude'
+    || (provider === 'openai-compatible' && OPENAI_INLINE_AUDIO_HOSTS.has(baseUrl))) && overrides?.sttHost !== undefined) {
+    const sttHost = overrides.sttHost;
+    const sttApiKey = overrides.sttApiKey ?? (s.openaiApiKeys[sttHost] ?? '');
+    if (!sttApiKey && !isCustomSttHost(sttHost)) throw new Error(`Add a ${openaiHostLabel(sttHost)} API key for transcription.`);
+    await transcribeAudio({
+      baseUrl: sttHost, apiKey: sttApiKey,
+      model: overrides.sttModel || s.sttModel || defaultSttModel(sttHost),
+      fallbackUrls: overrides.sttFallbackUrls ?? s.sttFallbackUrls?.[sttHost],
+      wav: encodePcmToWav(new Uint8Array(16_000 * 2), { sampleRate: 16_000, bitsPerSample: 16, channels: 1 }),
+    });
+  }
   if (provider === 'gemini') {
     return runGeminiSelfTest(apiKey, model as GeminiModel | undefined, {
       lightweight: overrides?.lightweight,
@@ -475,10 +532,10 @@ export async function runSelfTest(
   if (provider === 'claude') {
     return runClaudeSelfTest(apiKey, model as ClaudeModel | undefined);
   }
-  if (OPENAI_CHAT_ONLY_HOSTS.has(baseUrl)) {
+  if (isOpenAiChatOnlyHost(baseUrl)) {
     const sttHost: SttHost = overrides?.sttHost ?? s.sttHost;
     const sttApiKey = overrides?.sttApiKey ?? (s.openaiApiKeys[sttHost] ?? '');
-    if (!sttApiKey) {
+    if (!sttApiKey && !isCustomSttHost(sttHost)) {
       throw new Error(
         `Add a ${openaiHostLabel(sttHost)} API key for transcription before using ${openaiHostLabel(baseUrl)}.`,
       );
@@ -487,15 +544,20 @@ export async function runSelfTest(
       overrides?.sttModel
       || overrides?.transcribeModel
       || s.sttModel
-      || STT_MODELS_BY_HOST[sttHost][0];
+      || defaultSttModel(sttHost);
     return runOpenAiSelfTest(apiKey, baseUrl, model ?? s.openaiModel, sttModel, {
       transcribeBaseUrl: sttHost,
       transcribeApiKey: sttApiKey,
+      fallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
+      transcribeFallbackUrls: overrides?.sttFallbackUrls ?? s.sttFallbackUrls?.[sttHost],
     });
   }
   const transcribeModel =
     overrides?.transcribeModel
     || s.openaiTranscribeModels[baseUrl]
     || OPENAI_TRANSCRIBE_MODELS[baseUrl];
-  return runOpenAiSelfTest(apiKey, baseUrl, model ?? s.openaiModel, transcribeModel);
+  return runOpenAiSelfTest(apiKey, baseUrl, model ?? s.openaiModel, transcribeModel, {
+    fallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
+    transcribeFallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
+  });
 }

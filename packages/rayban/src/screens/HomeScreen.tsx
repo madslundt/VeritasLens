@@ -20,6 +20,7 @@ export function HomeScreen() {
   const streamingResult = useStore((s) => s.streamingResult);
 
   const isThinking = appPhase === 'thinking';
+  const visibleResult = (isThinking ? streamingResult : null) ?? lastResult?.result ?? null;
 
   function handleTap() {
     if (isThinking) {
@@ -39,6 +40,8 @@ export function HomeScreen() {
             style={[styles.tapButton, isThinking && styles.tapButtonActive]}
             onPress={handleTap}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={isThinking ? 'Cancel analysis' : 'Analyse audio'}
           >
             {isThinking ? (
               <ActivityIndicator color="#fff" size="large" />
@@ -51,13 +54,13 @@ export function HomeScreen() {
             {isThinking ? 'Tap to cancel' : 'Tap to analyse'}
           </Text>
 
-          {(isThinking && streamingResult) || lastResult ? (
+          {visibleResult ? (
             <View style={styles.resultSection}>
               <Text style={styles.sectionTitle}>
                 {isThinking && streamingResult ? 'Streaming…' : 'Last result'}
               </Text>
               <ResultCard
-                result={isThinking ? streamingResult : (lastResult?.result ?? null)}
+                result={visibleResult}
               />
             </View>
           ) : null}

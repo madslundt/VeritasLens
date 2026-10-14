@@ -16,8 +16,10 @@ export interface RaybanSettings {
   claudeModel: string;
   openaiBaseUrl: string;
   openaiModel: string;
+  openaiFallbackUrls?: Record<string, string[]>;
   sttHost: SttHost;
   sttModel: string;
+  sttFallbackUrls?: Record<string, string[]>;
 }
 
 export interface GlassesConnection {
@@ -56,8 +58,10 @@ const DEFAULT_SETTINGS: RaybanSettings = {
   claudeModel: 'claude-sonnet-4-6',
   openaiBaseUrl: 'https://api.openai.com/v1',
   openaiModel: 'gpt-4o-mini',
+  openaiFallbackUrls: {},
   sttHost: 'https://api.groq.com/openai/v1' as SttHost,
   sttModel: 'whisper-large-v3',
+  sttFallbackUrls: {},
 };
 
 export const useStore = create<RaybanStore>((set) => ({

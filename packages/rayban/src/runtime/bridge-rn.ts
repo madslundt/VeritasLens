@@ -1,30 +1,39 @@
 import * as SecureStore from 'expo-secure-store';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-// TODO: Per-host OpenAI keys (storage key format: 'veritaslens.openaiKey.<url>')
-// don't contain 'ApiKey' so they're currently routed to AsyncStorage unencrypted.
-// Add a secondary pattern match like 'openaiKey.' once those keys are wired up
-// in the LLM settings screen.
-
 /** Pattern of localStorage key fragments that hold secrets. */
-const SECURE_KEY_PATTERNS = ['ApiKey', 'apiKey'];
+const SECURE_KEY_PATTERNS = ['ApiKey', 'apiKey', 'openaiKey.'];
 
 export function isSecureKey(key: string): boolean {
   return SECURE_KEY_PATTERNS.some((p) => key.includes(p));
 }
 
 /**
- * SecureStore on iOS Keychain restricts key characters; replace dots with
- * underscores to keep the original `veritaslens.*` namespace intact in
- * AsyncStorage while staying within Keychain's allowed character set.
+ * SecureStore restricts key characters. Keep legacy credential names stable
+ * and encode endpoint credential names as code points so URL punctuation is
+ * valid and distinct endpoint URLs never share a credential slot.
  */
 function secureStoreKey(localStorageKey: string): string {
-  return localStorageKey.replace(/\./g, '_');
+  // Preserve existing Gemini/Claude key names; encode endpoint URLs collision-free.
+  if (!localStorageKey.includes('openaiKey.')) return localStorageKey.replace(/\./g, '_');
+  return 'openai_' + Array.from(localStorageKey, (char) => char.codePointAt(0)!.toString(16)).join('_');
 }
 
 export async function getLocalStorage(key: string): Promise<string | null> {
   if (isSecureKey(key)) {
-    return (await SecureStore.getItemAsync(secureStoreKey(key))) ?? null;
+    const secure = await SecureStore.getItemAsync(secureStoreKey(key));
+    if (secure !== null && secure !== undefined) return secure;
+    // Older Rayban versions stored endpoint keys in AsyncStorage. Migrate only
+    // after Keychain succeeds, so a temporary native failure cannot lose a key.
+    if (key.includes('openaiKey.')) {
+      const legacy = await AsyncStorage.getItem(key);
+      if (legacy !== null && legacy !== undefined) {
+        await SecureStore.setItemAsync(secureStoreKey(key), legacy);
+        await AsyncStorage.removeItem(key);
+        return legacy;
+      }
+    }
+    return null;
   }
   return (await AsyncStorage.getItem(key)) ?? null;
 }

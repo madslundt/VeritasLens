@@ -1,16 +1,17 @@
 :root {
   color-scheme: dark;
+  -webkit-font-smoothing: antialiased;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif;
   font-size: 16px;
   line-height: 1.5;
 
-  --bg: #0b0d0f;
-  --surface: #14171b;
-  --border: #1f2429;
-  --text: #e8eaed;
-  --muted: #98a0a8;
-  --accent: #8bd0a0;
-  --accent-hover: #a4d9b5;
+  --bg: #101413;
+  --surface: #19201d;
+  --border: #303a34;
+  --text: #f0f3ef;
+  --muted: #a2aea5;
+  --accent: #b7e4c1;
+  --accent-hover: #cbedd2;
   --err: #e07a7a;
   --warn: #d3c07a;
 }
@@ -88,7 +89,6 @@ a {
   color: var(--err);
   padding: 0.6rem 1.25rem;
   font-size: 0.9rem;
-  cursor: pointer;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -104,6 +104,14 @@ a {
 }
 
 .error-dismiss {
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0.5rem;
+  margin: -0.5rem -0.5rem -0.5rem 0;
   flex-shrink: 0;
   opacity: 0.6;
   font-size: 0.8rem;
@@ -114,31 +122,19 @@ a {
 
 /* ---------- Settings layout ---------- */
 
+/* Mobile-first shell. Extra scroll space is added only while editing; the
+   fixed footer and the host keyboard otherwise leave no long empty tail. */
 .settings {
-  max-width: 520px;
+  max-width: 560px;
   margin: 0 auto;
-  /* Bottom padding clears (a) the fixed bottom nav (~64px), (b) the
-     conditionally-rendered dirty-changes bar above it (~32px), and (c) the
-     soft-keyboard reveal buffer the Even App's WebView needs because it
-     doesn't shrink the layout viewport when the keyboard opens. Empirically
-     350px clears the keyboard on test hardware; adding the nav+bar makes it
-     445 + safe-area. */
-  padding: 1.75rem 1.25rem calc(max(3rem, env(safe-area-inset-bottom)) + 445px);
+  padding: 28px 24px calc(148px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px));
   display: flex;
   flex-direction: column;
-  gap: 1.25rem;
+  gap: 24px;
 }
 
-.settings header h1 {
-  margin: 0 0 0.25rem;
-  font-size: 1.5rem;
-  letter-spacing: 0.01em;
-}
-
-.settings header .tagline {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
+.settings:has(input:focus, textarea:focus) {
+  padding-bottom: calc(400px + env(safe-area-inset-bottom, 0px) + var(--keyboard-inset, 0px));
 }
 
 /* ---------- Device badge ---------- */
@@ -173,7 +169,7 @@ a {
 
 .device-badge .dot.connected {
   background: var(--accent);
-  box-shadow: 0 0 0 3px rgba(139, 208, 160, 0.15);
+  box-shadow: 0 0 0 3px rgba(183, 228, 193, 0.15);
 }
 
 .device-badge .dot.connecting {
@@ -190,11 +186,10 @@ a {
 .config {
   display: flex;
   flex-direction: column;
-  gap: 1rem;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 0.75rem;
-  padding: 1.25rem;
+  gap: 16px;
+  background: transparent;
+  border: 0;
+  padding: 0;
 }
 
 .field {
@@ -204,13 +199,14 @@ a {
 }
 
 .field-label {
-  font-size: 0.85rem;
-  font-weight: 500;
+  font-size: 0.875rem;
+  font-weight: 550;
   color: var(--text);
 }
 
 .field-hint {
-  font-size: 0.78rem;
+  font-size: 0.8125rem;
+  line-height: 1.55;
   color: var(--muted);
   max-width: 100%;
   overflow-wrap: anywhere;
@@ -258,10 +254,13 @@ a {
 .config input,
 .config select,
 .history-search-input {
-  background: #0f1217;
+  background: #151b18;
   border: 1px solid var(--border);
-  border-radius: 0.4rem;
-  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  min-height: 48px;
+  width: 100%;
+  min-width: 0;
+  padding: 11px 14px;
   outline: none;
   transition: border-color 0.15s ease;
 }
@@ -288,19 +287,16 @@ a {
 .config-section-divider {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  color: var(--muted);
-  font-size: 0.72rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  margin-top: 0.4rem;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
 }
 
-.config-section-divider::after {
-  content: '';
-  flex: 1;
-  height: 1px;
-  background: var(--border);
+.config-section-divider:first-child {
+  padding-top: 0;
+  border: 0;
 }
 
 .model-test-row {
@@ -341,11 +337,13 @@ a {
 
 button.primary,
 button.secondary {
-  border-radius: 0.4rem;
-  padding: 0.55rem 1rem;
+  border-radius: 10px;
+  min-height: 44px;
+  padding: 10px 16px;
   border: 1px solid transparent;
   cursor: pointer;
-  font-weight: 500;
+  font-size: 0.875rem;
+  font-weight: 600;
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
@@ -354,7 +352,7 @@ button.secondary {
 
 button.primary {
   background: var(--accent);
-  color: #0b0d0f;
+  color: #101413;
 }
 
 button.primary:hover:not(:disabled) {
@@ -473,7 +471,7 @@ button:disabled {
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.6rem 0.8rem;
-  background: #0f1217;
+  background: #151b18;
   border: 1px solid var(--border);
   border-radius: 0.45rem;
   transition: background 0.2s ease, border-color 0.2s ease;
@@ -486,8 +484,8 @@ button:disabled {
 .lens-row--editing {
   flex-direction: column;
   align-items: stretch;
-  background: #11151a;
-  border-color: #2f3a4a;
+  background: #1d2620;
+  border-color: #3c4a40;
 }
 
 /* Top row (preset info + delete) stays a horizontal flex layout regardless
@@ -571,8 +569,8 @@ button.lens-info--clickable:focus-visible {
 }
 
 .lens-row--expandable.lens-row--open {
-  background: #11151a;
-  border-color: #262c33;
+  background: #1d2620;
+  border-color: #3c4a40;
 }
 
 /* Expandable row head — two stacked full-width rows so the title row's
@@ -613,8 +611,8 @@ button.lens-info--clickable:focus-visible {
 
 .lens-tag--ok {
   color: var(--accent);
-  background: rgba(139, 208, 160, 0.1);
-  border-color: rgba(139, 208, 160, 0.28);
+  background: rgba(183, 228, 193, 0.1);
+  border-color: rgba(183, 228, 193, 0.28);
 }
 
 /* iOS-style pill toggle with a rotating chevron. */
@@ -628,9 +626,9 @@ button.lens-info--clickable:focus-visible {
   min-width: 6.5rem;
   padding: 0.32rem 0.7rem;
   border-radius: 999px;
-  background: rgba(139, 208, 160, 0.1);
+  background: rgba(183, 228, 193, 0.1);
   color: var(--accent);
-  border: 1px solid rgba(139, 208, 160, 0.22);
+  border: 1px solid rgba(183, 228, 193, 0.22);
   cursor: pointer;
   font-size: 0.8rem;
   font-weight: 500;
@@ -640,17 +638,17 @@ button.lens-info--clickable:focus-visible {
 }
 
 .meeting-prep-trigger:hover {
-  background: rgba(139, 208, 160, 0.18);
-  border-color: rgba(139, 208, 160, 0.35);
+  background: rgba(183, 228, 193, 0.18);
+  border-color: rgba(183, 228, 193, 0.35);
 }
 
 .meeting-prep-trigger:active {
-  background: rgba(139, 208, 160, 0.26);
+  background: rgba(183, 228, 193, 0.26);
 }
 
 .meeting-prep-trigger.open {
-  background: rgba(139, 208, 160, 0.2);
-  border-color: rgba(139, 208, 160, 0.4);
+  background: rgba(183, 228, 193, 0.2);
+  border-color: rgba(183, 228, 193, 0.4);
 }
 
 .meeting-prep-chevron {
@@ -696,20 +694,20 @@ button.lens-info--clickable:focus-visible {
   flex-direction: column;
   gap: 0.55rem;
   padding: 0.75rem 0.8rem;
-  background: #0f1217;
+  background: #151b18;
   border: 1px solid var(--border);
   border-radius: 0.7rem;
   transition: border-color 0.15s ease;
 }
 
 .meeting-prep-row:focus-within {
-  border-color: rgba(139, 208, 160, 0.35);
+  border-color: rgba(183, 228, 193, 0.35);
 }
 
 /* General row gets a thin accent rail on the left so it reads as the "always
    on" base context, distinct from the optional attachments below it. */
 .meeting-prep-row--general {
-  border-left: 2px solid rgba(139, 208, 160, 0.45);
+  border-left: 2px solid rgba(183, 228, 193, 0.45);
   padding-left: 0.7rem;
 }
 
@@ -744,7 +742,7 @@ button.lens-info--clickable:focus-visible {
 .meeting-prep-label,
 .meeting-prep-body {
   width: 100%;
-  background: #0b0d0f;
+  background: #101413;
   border: 1px solid transparent;
   border-radius: 0.5rem;
   padding: 0.55rem 0.7rem;
@@ -761,7 +759,7 @@ button.lens-info--clickable:focus-visible {
 .meeting-prep-label:focus,
 .meeting-prep-body:focus {
   border-color: var(--accent);
-  background: #0d1014;
+  background: #151b18;
 }
 
 .meeting-prep-label {
@@ -824,8 +822,8 @@ button.lens-info--clickable:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
-  background: rgba(139, 208, 160, 0.08);
-  border: 1px dashed rgba(139, 208, 160, 0.3);
+  background: rgba(183, 228, 193, 0.08);
+  border: 1px dashed rgba(183, 228, 193, 0.3);
   color: var(--accent);
   border-radius: 0.55rem;
   padding: 0.5rem 0.85rem;
@@ -837,8 +835,8 @@ button.lens-info--clickable:focus-visible {
 }
 
 .meeting-prep-add:hover {
-  background: rgba(139, 208, 160, 0.16);
-  border-color: rgba(139, 208, 160, 0.5);
+  background: rgba(183, 228, 193, 0.16);
+  border-color: rgba(183, 228, 193, 0.5);
   border-style: solid;
 }
 
@@ -858,7 +856,7 @@ button.lens-info--clickable:focus-visible {
 .meeting-prep-meter-bar {
   position: relative;
   height: 4px;
-  background: #0f1217;
+  background: #151b18;
   border-radius: 999px;
   overflow: hidden;
 }
@@ -894,7 +892,7 @@ button.lens-info--clickable:focus-visible {
 .lens-form {
   margin-top: 0.5rem;
   padding: 0.75rem;
-  background: #0f1217;
+  background: #151b18;
   border: 1px dashed var(--border);
   border-radius: 0.45rem;
   display: flex;
@@ -903,7 +901,7 @@ button.lens-info--clickable:focus-visible {
 }
 
 .lens-form textarea {
-  background: #0b0d0f;
+  background: #101413;
   border: 1px solid var(--border);
   border-radius: 0.4rem;
   padding: 0.55rem 0.7rem;
@@ -932,7 +930,7 @@ button.lens-info--clickable:focus-visible {
   margin: 0;
   max-height: 260px;
   overflow-y: auto;
-  background: #0f1217;
+  background: #151b18;
   border: 1px solid var(--border);
   border-radius: 0.45rem;
   font-size: 0.78rem;
@@ -976,9 +974,11 @@ button.lens-info--clickable:focus-visible {
    under a separate floating element. */
 .bottom-stack {
   position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  bottom: var(--keyboard-inset, 0px);
+  left: 50%;
+  width: 100%;
+  max-width: 560px;
+  transform: translateX(-50%);
   background: var(--surface);
   /* Explicit `0px` fallback — older WebViews that don't recognise env() at
    * all silently drop the whole declaration; the fallback keeps a valid
@@ -992,7 +992,8 @@ button.lens-info--clickable:focus-visible {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   border-top: 1px solid var(--border);
-  padding: 0.25rem 0;
+  padding: 8px 12px;
+  gap: 8px;
 }
 
 .bottom-nav-btn {
@@ -1008,11 +1009,14 @@ button.lens-info--clickable:focus-visible {
   font-weight: 500;
   color: var(--muted);
   cursor: pointer;
-  transition: color 0.15s ease;
+  border-radius: 12px;
+  min-height: 56px;
+  transition: color 0.15s ease, background 0.15s ease;
 }
 
 .bottom-nav-btn.active {
-  color: var(--text);
+  color: var(--bg);
+  background: var(--accent);
 }
 
 .bottom-nav-icon {
@@ -1051,7 +1055,8 @@ button.lens-info--clickable:focus-visible {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  padding: 0.55rem 1rem;
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
   color: var(--text);
   font-size: 0.85rem;
 }
@@ -1436,3 +1441,204 @@ button.lens-info--clickable:focus-visible {
 .history-clear-all-no:hover {
   color: var(--text);
 }
+
+/* ---------- Phone design system ---------- */
+.app-header, .brand, .device-status {
+  display: flex;
+  align-items: center;
+}
+
+.app-header { justify-content: space-between; gap: 12px; }
+.brand { gap: 10px; font-size: 17px; font-weight: 650; letter-spacing: -0.025em; }
+.brand > svg { width: 32px; height: 32px; color: var(--accent); flex-shrink: 0; }
+.device-status { gap: 6px; font-size: 11px; color: var(--muted); flex-wrap: wrap; justify-content: flex-end; }
+.device-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.device-dot.connected { background: var(--accent); }
+.device-battery { border-left: 1px solid var(--border); padding-left: 6px; }
+
+.page-heading h1 {
+  margin: 0 0 7px;
+  font-size: 30px;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.035em;
+}
+.page-heading p { margin: 0; font-size: 14px; line-height: 1.55; color: var(--muted); max-width: 360px; }
+.tab-content { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.settings h2 { margin: 0; font-size: 16px; font-weight: 600; line-height: 1.4; letter-spacing: -0.015em; }
+
+.setup-prompt {
+  padding: 14px;
+  border: 1px solid #65886e;
+  border-radius: 14px;
+  background: #203127;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.setup-prompt-copy { display: flex; align-items: flex-start; gap: 14px; }
+.setup-prompt-copy > svg { width: 30px; height: 30px; color: var(--accent); flex-shrink: 0; margin-top: 2px; }
+.setup-prompt h2 { font-size: 18px; }
+.setup-prompt p { margin: 4px 0 0; font-size: 13px; color: #c7d8cd; line-height: 1.5; }
+.setup-prompt .primary { width: 100%; justify-content: center; }
+.setup-prompt .primary svg { width: 18px; height: 18px; }
+
+.lens-catalog { border: 0; padding: 0; border-radius: 0; background: transparent; gap: 12px; }
+.lens-catalog > .lens-list { gap: 0; }
+.lens-catalog > .lens-list > .lens-row {
+  border-radius: 0;
+  padding: 12px 14px;
+  background: var(--surface);
+  border-bottom: 0;
+}
+.lens-catalog > .lens-list > .lens-row:first-child,
+.lens-catalog > .lens-list > .lens-group-heading + .lens-row { border-radius: 12px 12px 0 0; }
+.lens-catalog > .lens-list > .lens-row:nth-child(3),
+.lens-catalog > .lens-list > .lens-row:last-child { border-radius: 0 0 12px 12px; border-bottom: 1px solid var(--border); }
+.lens-group-heading { padding: 24px 0 12px; }
+.lens-symbol { display: flex; align-items: center; justify-content: center; flex: 0 0 24px; color: #c4d4ca; }
+.lens-symbol svg { width: 24px; height: 24px; }
+.lens-row--catalog { justify-content: flex-start; gap: 12px; }
+.lens-catalog .lens-info { gap: 4px; }
+.lens-catalog .lens-info strong { font-size: 14px; font-weight: 600; }
+.lens-catalog .lens-desc { font-size: 12px; line-height: 1.5; }
+.lens-catalog .lens-row-head { display: grid; grid-template-columns: 24px minmax(0, 1fr); column-gap: 12px; row-gap: 5px; }
+.lens-catalog .lens-row-head > .lens-symbol { grid-column: 1; grid-row: 1 / 3; align-self: center; color: var(--accent); }
+.lens-catalog .lens-row-title, .lens-catalog .lens-row-sub { grid-column: 2; }
+.lens-catalog .lens-row-title > strong { font-size: 14px; font-weight: 600; }
+.lens-catalog .lens-tag { font-size: 10px; border: 0; padding: 0; background: transparent; color: var(--muted); white-space: nowrap; }
+.lens-catalog .lens-row-sub { gap: 10px; align-items: center; }
+.meeting-prep-trigger { border-radius: 8px; min-width: auto; min-height: 44px; padding: 8px 10px; font-size: 12px; color: var(--text); background: transparent; border-color: #627669; }
+.lens-catalog .meeting-prep-chevron { display: none; }
+.lens-catalog .meeting-prep-inline { margin-top: 16px; padding-top: 16px; border-color: var(--border); }
+.lenses-card:not(.lens-catalog) { padding: 18px; border-radius: 14px; gap: 14px; }
+.lenses-card > .field-hint { margin: 0; }
+
+.settings-disclosure { border-top: 1px solid var(--border); }
+.settings-disclosure > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 54px;
+  padding: 12px 0;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  list-style: none;
+}
+.settings-disclosure > summary::-webkit-details-marker { display: none; }
+.settings-disclosure > summary > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--muted);
+  transition: transform 160ms ease;
+}
+.settings-disclosure[open] > summary > svg { transform: rotate(180deg); }
+.settings-disclosure + .settings-disclosure { margin-top: -16px; }
+.settings-disclosure > .field, .disclosure-body { padding: 4px 0 20px; }
+.disclosure-body { display: flex; flex-direction: column; gap: 22px; }
+.provider-capabilities > .field-hint { display: block; padding-bottom: 18px; }
+.privacy-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+
+.toggle-row { min-height: 44px; }
+.toggle-row input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 42px;
+  min-width: 42px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0;
+  border: 1px solid #627268;
+  border-radius: 999px;
+  background: #47534c;
+  position: relative;
+  cursor: pointer;
+  margin: 0;
+  transition: background 160ms ease, border-color 160ms ease;
+}
+.toggle-row input[type='checkbox']::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: transform 160ms ease;
+}
+.toggle-row input[type='checkbox']:checked { background: var(--accent); border-color: var(--accent); }
+.toggle-row input[type='checkbox']:checked::after { background: #253c2c; transform: translateX(16px); }
+.toggle-row > input[type='checkbox'] { order: 2; margin-left: auto; }
+.toggle-row > span { order: 1; font-size: 14px; }
+.toggle-row--full { padding: 4px 0; }
+.preference-field { gap: 0; }
+.preference-field .toggle-row { justify-content: space-between; }
+.preference-field > .field-hint { max-width: calc(100% - 54px); }
+.config input[type='range'] { accent-color: var(--accent); background: transparent; border: 0; padding: 0; width: auto; min-height: 32px; }
+.config input[type='radio'] { accent-color: var(--accent); width: 20px; height: 20px; min-height: 20px; }
+.slider-row { flex-direction: column-reverse; align-items: stretch; gap: 4px; }
+.slider-row .slider-value { text-align: left; min-width: 0 !important; font-size: 13px; color: var(--muted); }
+.slider-row input[type='range'] { width: 100%; flex: none; }
+
+.history-search { position: relative; }
+.history-search > svg { position: absolute; left: 14px; top: 14px; width: 20px; height: 20px; color: var(--muted); pointer-events: none; }
+.history-search-input { margin: 0; padding-left: 44px; font-size: 14px; background: var(--surface); }
+.empty-state { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 100px 12px 56px; }
+.empty-state-symbol { display: flex; align-items: center; justify-content: center; width: 80px; height: 80px; border: 1px solid #506357; border-radius: 50%; color: #c4d4ca; margin-bottom: 24px; }
+.empty-state-symbol svg { width: 36px; height: 36px; }
+.empty-state h2 { font-size: 19px; letter-spacing: -0.025em; }
+.empty-state p { max-width: 300px; margin: 10px 0 24px; font-size: 14px; line-height: 1.65; color: var(--muted); }
+.empty-state .secondary { border-color: #627669; }
+.empty-state--search { padding-top: 72px; }
+
+button, summary, input, select, textarea { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.config input:focus, .config select:focus { border-color: var(--accent); }
+button.lens-info--clickable:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.meeting-prep-remove, .history-row-remove { min-width: 44px; min-height: 44px; }
+.link-button { min-height: 44px; }
+.bottom-nav-icon > svg { width: 22px; height: 22px; }
+.bottom-nav-btn.active .bottom-nav-dot { box-shadow: 0 0 0 2px var(--accent); background: #8b5b16; }
+.status.err { color: var(--err); }
+.error-banner { background: #342322; border-color: #6d423f; }
+
+@media (min-width: 600px) {
+  .settings { padding-top: 40px; }
+  .bottom-stack { border: 1px solid var(--border); border-bottom: 0; border-radius: 16px 16px 0 0; }
+  .brand { font-size: 18px; }
+}
+@media (max-width: 359px) {
+  .settings { padding-left: 18px; padding-right: 18px; }
+  .brand { font-size: 15px; gap: 7px; }
+  .brand > svg { width: 28px; height: 28px; }
+  .device-status { font-size: 10px; }
+  .lens-catalog > .lens-list > .lens-row { padding-left: 10px; padding-right: 10px; }
+  .lens-catalog .lens-row-head { column-gap: 8px; }
+  .lens-catalog .lens-row-sub { flex-wrap: wrap; }
+  .lens-catalog .lens-row-sub .lens-desc { flex-basis: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+.secret-input { position: relative; display: block; }
+.config .secret-input > input { padding-right: 50px; }
+.secret-toggle { position: absolute; right: 2px; top: 2px; width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; background: transparent; border: 0; border-radius: 8px; color: var(--muted); cursor: pointer; }
+.secret-toggle:hover { color: var(--accent); }
+.secret-toggle svg { width: 19px; height: 19px; }
+.model-test-row > .secondary { width: 100%; justify-content: center; border-color: #627669; }
+
+.action-bar-status { flex-direction: column; align-items: flex-start; gap: 0; font-size: 12px; }
+.save-setup-link { font-size: 11px; text-align: left; line-height: 1.35; min-height: 26px; padding: 2px 0; }
+
+.preference-field + .preference-field { margin-top: -8px; }
+
+.tab-content button, .tab-content input, .tab-content select,
+.tab-content textarea, .tab-content summary { scroll-margin-block: 140px; }

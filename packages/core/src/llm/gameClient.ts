@@ -14,7 +14,8 @@ import {
   DEFAULT_CLAUDE_MODEL,
   DEFAULT_GEMINI_MODEL,
   GEMINI_MODEL_PATTERN,
-  OPENAI_BASE_URLS,
+  normalizeOpenAiBaseUrl,
+  isCustomOpenAiBaseUrl,
   type ClaudeModel,
   type GeminiModel,
   type LlmProvider,
@@ -22,6 +23,7 @@ import {
 } from '@/types';
 import { MAX_RETRIES, parseGoogleRetryDelayMs, parseRetryAfterMs } from './gemini';
 import { toStrictSchema } from './openai';
+import { fetchWithEndpointFallback } from '@/llm/endpointFallback';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
 import { settings } from '@/state/store';
 
@@ -56,6 +58,7 @@ export async function callGame(opts: CallGameOptions): Promise<string> {
         s.openaiApiKeys[s.openaiBaseUrl] ?? '',
         s.openaiBaseUrl,
         s.openaiModel,
+        s.openaiFallbackUrls?.[s.openaiBaseUrl],
       );
     case 'gemini':
     default:
@@ -128,32 +131,31 @@ async function callGameOpenAi(
   apiKey: string,
   baseUrl: OpenAiBaseUrl,
   model: string,
+  fallbackUrls?: readonly string[],
 ): Promise<string> {
-  if (!apiKey) throw new Error('Missing OpenAI-compatible API key.');
+  baseUrl = normalizeOpenAiBaseUrl(baseUrl);
+  if (!apiKey && !isCustomOpenAiBaseUrl(baseUrl)) throw new Error('Missing OpenAI-compatible API key.');
   const strict = toStrictSchema(opts.schema);
   const bodyJson = JSON.stringify({
     model,
     temperature: 0.6,
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: 'game_questions', strict: true, schema: strict },
-    },
-    messages: [{ role: 'system', content: opts.prompt }],
+    response_format: isCustomOpenAiBaseUrl(baseUrl)
+      ? { type: 'json_object' }
+      : { type: 'json_schema', json_schema: { name: 'game_questions', strict: true, schema: strict } },
+    messages: [{ role: 'system', content: isCustomOpenAiBaseUrl(baseUrl)
+      ? `${opts.prompt}\nReturn JSON matching this schema: ${JSON.stringify(strict)}`
+      : opts.prompt }],
   });
 
-  if (!(OPENAI_BASE_URLS as readonly string[]).includes(baseUrl)) {
-    throw new Error(`Unsupported OpenAI base URL: ${baseUrl}`);
-  }
-
   return runWithRetry(opts.signal, opts.onRetry, async (signal) => {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
+    const response = await fetchWithEndpointFallback({
+      baseUrl, fallbackUrls, apiKey, path: '/chat/completions',
+      init: {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: bodyJson,
+        signal,
       },
-      body: bodyJson,
-      signal,
     });
     if (!response.ok) {
       const errText = await response.text();

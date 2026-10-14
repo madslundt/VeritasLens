@@ -2,6 +2,15 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.17.0] — 2026-10-14
+
+- **Custom chat and Whisper servers.** Configure an OpenAI-compatible base URL, model ID, optional key, and ordered fallback addresses in G2 and Ray-Ban settings. Model loading, connection tests, games, transcription, and analysis use the configured addresses. G2 custom origins must be added to the network whitelist before repacking.
+- **Smaller local VAD runtime.** Earshot proposes speech regions and Silero v6 confirms them using local WASM. Model state is serialized and reset between snapshots; short trailing frames and non-16 kHz inputs are handled. Native bundles use a platform-specific FFT adapter so browser WASM is excluded from Hermes builds.
+- **More reliable analysis.** Freeze audio at the tap, retain audio arriving during VAD for the next tap, and prevent canceled or superseded work from updating the HUD or consuming the analysis cursor. Auto reuses one transcription across classification and speculative answers, preserving grounding and citations.
+- **Clearer results and settings.** G2 answers use the full display with a dim recording indicator between answers. Phone settings have clearer controls and keyboard spacing. Ray-Ban results show complete lens-specific content. Stored history preserves citations, and prompts emphasize the current audio's names, numbers, negation, and qualifiers.
+- **Review fixes.** Remove unfinished streamed headings on cancellation, errors, or no-speech verdicts while retaining completed answers for swipe recall. Align optional Whisper sidecar validation between Test and Save. Remove an invalid Expo config plugin that prevented native exports.
+- **Release compatibility.** G2 requires Even App 2.2.10 and SDK 0.0.16. Packing explicitly targets SDK 0.0.16; package and manifest versions are 0.17.0.
+
 ## [0.16.4] — 2026-06-14
 
 ### Fixed

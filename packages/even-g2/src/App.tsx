@@ -10,9 +10,9 @@ export const App: Component = () => {
     >
       <Show when={errorMessage()}>
         {(msg) => (
-          <div class="error-banner" role="alert" onClick={() => setErrorMessage(null)}>
+          <div class="error-banner" role="alert">
             {msg()}
-            <span class="error-dismiss">✕</span>
+            <button type="button" class="error-dismiss" aria-label="Dismiss error" onClick={() => setErrorMessage(null)}>✕</button>
           </div>
         )}
       </Show>

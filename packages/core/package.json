@@ -10,11 +10,12 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@ricky0123/vad-web": "^0.0.30",
-    "onnxruntime-web": "^1.26.0"
+    "@fluidinference/fluidvad": "0.2.0"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.11",
+    "@ricky0123/vad-web": "^0.0.31",
+    "onnxruntime-web": "^1.26.0"
   }
 }

@@ -56,8 +56,14 @@ import {
   bootstrapHud,
   CONTAINER,
   clearLensStreamingHeading,
+  discardLensStreamingHeading,
   getLensStreamingState,
   setLensStreamingHeading,
+  setActiveLayout,
+  setLensResult,
+  setStatus,
+  scrollActiveReason,
+  getActiveLayout,
   showActivePage,
 } from '../src/runtime/hud';
 import { getPersona } from '@veritaslens/core';
@@ -103,9 +109,9 @@ describe('setLensStreamingHeading throttle', () => {
 
   it('writes the first partial immediately to the reason container', async () => {
     setLensStreamingHeading('Pa');
-    // First write is a fire-and-forget upgradeText — drain microtasks.
-    await Promise.resolve();
-    await Promise.resolve();
+    // Drain the indicator-clear and answer writes without advancing the
+    // throttle window.
+    await vi.advanceTimersByTimeAsync(0);
     const calls = reasonContentCalls();
     expect(calls).toEqual(['Pa']);
     expect(getLensStreamingState().active).toBe(true);
@@ -117,8 +123,7 @@ describe('setLensStreamingHeading throttle', () => {
     setLensStreamingHeading('Par');
     setLensStreamingHeading('Pari');
     setLensStreamingHeading('Paris');
-    await Promise.resolve();
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     let calls = reasonContentCalls();
     // First call fires immediately with whatever was queued at that moment.
     expect(calls).toHaveLength(1);
@@ -145,11 +150,62 @@ describe('setLensStreamingHeading throttle', () => {
   it('clearLensStreamingHeading cancels a pending trailing flush', async () => {
     setLensStreamingHeading('Pa');
     setLensStreamingHeading('Paris');
-    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(0);
     clearLensStreamingHeading();
     await vi.advanceTimersByTimeAsync(500);
     const calls = reasonContentCalls();
     expect(calls).toEqual(['Pa']);
     expect(getLensStreamingState().active).toBe(false);
+  });
+
+  it('creates the full-screen answer body before streaming in discreet mode', async () => {
+    setActiveLayout('discreet-minimal');
+    await showActivePage(getPersona('translation')!);
+    bridge.rebuildPageContainer.mockClear();
+    setLensStreamingHeading('Hello from the translated answer');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledOnce();
+    const call = bridge.rebuildPageContainer.mock.calls[0] as unknown as [{ payload: { textObject: Array<{ payload: Record<string, unknown> }> } }];
+    const body = call[0].payload.textObject.find((t) => t.payload.containerName === 'vl-reason')!.payload;
+    expect(body).toMatchObject({ xPosition: 0, yPosition: 0, width: 576, height: 288, isEventCapture: 1 });
+    expect(reasonContentCalls()).toEqual(['Hello from the translated answer']);
+  });
+
+  it('waits for a slow layout rebuild before committing the final answer and drops the stale partial', async () => {
+    setActiveLayout('discreet-minimal');
+    await showActivePage(getPersona('eli5')!);
+    let finishRebuild!: (ok: boolean) => void;
+    bridge.rebuildPageContainer.mockImplementationOnce(() => new Promise<boolean>((resolve) => { finishRebuild = resolve; }));
+    setLensStreamingHeading('Old partial');
+    await vi.advanceTimersByTimeAsync(0);
+    clearLensStreamingHeading();
+    const finalWrite = setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'Final answer' }] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reasonContentCalls()).toEqual([]);
+    finishRebuild(true);
+    await finalWrite;
+    expect(reasonContentCalls()).toEqual(['1/1 · Final answer']);
+  });
+
+  it.each(['baseline', 'discreet-minimal'] as const)('discards an unfinished %s heading and preserves completed answers for swipe recall', async (layout) => {
+    setActiveLayout(layout);
+    await showActivePage(getPersona('trivia')!);
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'Completed answer' }] });
+    const { blankActiveForThinking } = await import('../src/runtime/hud');
+    await blankActiveForThinking();
+    setLensStreamingHeading('Unfinished answer');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reasonContentCalls().at(-1)).toBe('Unfinished answer');
+
+    // Completion cancels queued writes before parsing. A parse error must
+    // still be able to remove the preview after that synchronous clear.
+    clearLensStreamingHeading();
+    await discardLensStreamingHeading();
+    expect(getActiveLayout()).toBe(layout);
+    await setStatus('error');
+    const writes = bridge.textContainerUpgrade.mock.calls as unknown as UpgradeRequest[][];
+    expect(writes.filter(([r]) => r.payload.containerName === 'vl-status').at(-1)?.[0].payload.content).toBe('ERR');
+    expect(await scrollActiveReason(-1)).toBe('revealed');
+    expect(reasonContentCalls().at(-1)).toBe('1/1 · Completed answer');
   });
 });

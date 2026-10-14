@@ -89,7 +89,7 @@ The **Test** button in Settings runs `runSelfTest()` against the active draft, s
 - **Streaming HUD.** Every lens emits structured JSON as it's generated. Headings (Trivia answer, Translate text, Companion headline, Simplify one-liner, Fact correction) fill in character-by-character via `streamHeading` watchers; multi-claim lenses pop each claim onto the HUD as it closes.
 - **Multi-claim per tap.** Fact, Framing, Fallacy, Trivia, Simplify, Companion, Devil's Advocate, and Key Questions can return up to 5 distinct items per request. Single-tap walks forward through them.
 - **Per-claim verbatim quote.** ≤140-char source quote attached to every claim, most recent first.
-- **Skip silence and noise.** Local Silero VAD (`@ricky0123/vad-web`) gates every tap; silent or too-noisy taps short-circuit before any API call. HUD flashes `○` (no voice) or `~` (too noisy).
+- **Skip silence and noise.** Local Silero v6 VAD (with an Earshot candidate filter) gates every tap; silent or too-noisy taps short-circuit before any API call. HUD flashes `○` (no voice) or `~` (too noisy).
 - **Rolling transcript.** A multi-source transcript (`core/src/runtime/transcript.ts`) merges STT byproducts and inline audio output across taps so later lenses see what was said earlier in the session — at zero extra API spend on providers that already transcribe.
 - **Multi-language responses.** 11 Latin-script European languages (English, Dansk, Svenska, Norsk, Deutsch, Français, Español, Italiano, Português, Nederlands, Polski). Verdict labels stay canonical English so HUD glyphs render correctly.
 - **Glanceable HUD layout.** Lens-specific result on the 576×288 4-bit greyscale G2 display. Result persists until the next action.
@@ -322,8 +322,8 @@ npm test --workspace=@veritaslens/core -- tests/personas.test.ts -t "fact"
 | `edition` | `"202601"` |
 | `name` | `"VeritasLens"` (≤ 20 chars) |
 | `version` | Semver `x.y.z` — bump for each release |
-| `min_app_version` | `"2.0.0"` |
-| `min_sdk_version` | `"0.0.10"` |
+| `min_app_version` | `"2.2.10"` |
+| `min_sdk_version` | `"0.0.16"` |
 | `entrypoint` | `"index.html"` |
 
 The `network` whitelist must contain every provider host:
@@ -352,7 +352,7 @@ Add `--check` after `pack` to verify `package_id` availability on the store befo
 
 - Audio is held in a configurable rolling **in-memory** PCM ring buffer (30 s – 5 min). Eviction is FIFO; the buffer is released when the session ends.
 - Nothing is written to disk, IndexedDB, or any external audio store.
-- Voice-activity detection (Silero ONNX) runs **locally** in the WebView / RN bundle before any network call; silent or too-noisy taps never leave the device.
+- Voice-activity detection (Silero v6 + Earshot WASM) runs **locally** in the G2 WebView before analysis uploads. FFT is the fallback when model assets cannot load; native consumers use the FFT adapter without browser WASM.
 - Session history (analysis results, not audio) is persisted on-device — Even App KV on G2, `AsyncStorage` on Rayban — and never sent to any server.
 - API keys are stored per-provider on-device. On Rayban they land in `expo-secure-store` (iOS Keychain); on G2 they sit in the Even App KV store alongside other settings.
 - The only outbound hosts declared in `app.json` are the seven LLM providers above. Each request goes directly from the WebView / phone to the provider you chose; there is no VeritasLens server in the loop.
@@ -376,3 +376,60 @@ MIT. See [LICENSE](LICENSE).
 ---
 
 *Built with the [Even Hub SDK](https://hub.evenrealities.com/docs/getting-started/overview) and [Expo](https://expo.dev).*
+
+### Custom chat and Whisper endpoints
+
+Choose **Custom OpenAI-compatible endpoint** for chat, or **Custom Whisper
+endpoint** for speech-to-text. Configure each server's API base URL, model ID,
+and optional API key. Include its API path (usually `/v1`): VeritasLens appends
+`/chat/completions`, `/models`, or `/audio/transcriptions`. Chat model IDs can
+be entered manually when `/models` is unavailable. Custom Whisper servers must
+accept multipart `file`, `model`, and `response_format=json`, and return JSON
+with a `text` property. Keys remain stored on the device.
+
+Chat and speech-to-text each support an ordered list of fallback URLs. These
+are **alternate addresses of the same server**, sharing its model ID and API
+key. For a local server reached over LAN at home and Tailscale away from home:
+
+| Setting | Example |
+| --- | --- |
+| Primary chat URL | `http://192.168.1.20:1234/v1` |
+| Chat fallback URL | `http://100.100.10.20:1234/v1` |
+| Primary Whisper URL | `http://192.168.1.20:8000/v1` |
+| Whisper fallback URL | `http://100.100.10.20:8000/v1` |
+
+Use your actual addresses and ports. The app tries the primary first, then each
+fallback in the order entered (one URL per line). With alternates configured,
+an address has 10 seconds to respond with headers before the next is tried.
+Connection failures, timeouts, HTTP 408/429, and 5xx responses trigger fallback.
+Invalid requests or authentication errors (including 400/401/403) are surfaced
+without switching addresses. Cancelling stops the whole operation. An already
+opened chat stream is never replayed on a different server, and chat fallback
+reuses the existing transcript rather than uploading audio again. If every
+address fails, the provider's existing retry/error handling applies.
+
+Fallback lists are stored separately per primary URL, so switching between
+servers preserves each list. Whisper settings also apply to Claude transcription
+and the optional Gemini/OpenRouter transcript sidecar. Connection tests use the
+unsaved endpoint, model, credentials, and fallback lists; **Load models** uses
+chat alternates too.
+
+Even Hub requires **every primary and fallback origin** in the packaged network
+whitelist. Before using new addresses on Even G2, run from the repository root:
+
+```sh
+node scripts/add-openai-endpoint.mjs \
+  http://192.168.1.20:1234/v1 http://100.100.10.20:1234/v1 \
+  http://192.168.1.20:8000/v1 http://100.100.10.20:8000/v1
+npm run build --workspace @veritaslens/even-g2
+npm run pack --workspace @veritaslens/even-g2
+```
+
+Install the repacked app, then configure those URLs in Settings. Servers must
+allow browser CORS, including preflight requests for `Content-Type` and
+`Authorization`. HTTPS is required for production; HTTP is for LAN development
+and may be blocked by the phone's browser or native transport policy. Localhost
+refers to the phone running the app; use the server's LAN or Tailscale address
+when it runs on another computer. The Ray-Ban app does not use the Even Hub
+manifest. The app tries configured addresses; it does not connect or disconnect
+Tailscale for you. Existing built-in provider settings continue to work.

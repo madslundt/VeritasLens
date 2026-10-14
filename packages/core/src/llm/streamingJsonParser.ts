@@ -255,7 +255,9 @@ export class StreamingJsonParser {
         }
         case 'in_root_object': {
           // Walk through any nested object — depth tracking only, no events.
-          if (ch === '{' || ch === '[') {
+          if (ch === '"') {
+            this.inString = true;
+          } else if (ch === '{' || ch === '[') {
             this.depth++;
           } else if (ch === '}' || ch === ']') {
             this.depth--;
@@ -265,7 +267,9 @@ export class StreamingJsonParser {
           break;
         }
         case 'in_root_array': {
-          if (ch === '{') {
+          if (ch === '"') {
+            this.inString = true;
+          } else if (ch === '{') {
             if (this.depth === this.arrayBracketDepth + 1 && this.currentItemStart === -1) {
               this.currentItemStart = this.pos;
             }

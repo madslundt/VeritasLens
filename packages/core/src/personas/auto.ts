@@ -34,6 +34,7 @@ const AUTO_CLASSIFIER_PREAMBLE = `You are VeritasLens, a real-time analysis assi
 The user just provided a short audio clip. Your job is to pick the SINGLE best analysis lens to apply, from these options:`;
 
 const DISAMBIGUATION_NOTES = `Pick exactly one. If multiple lenses could plausibly apply, pick the SINGLE most useful one for the listener.
+Choose based on the MOST RECENT complete question or claim in the current audio, not an older topic from conversation history. Preserve negation and qualifiers; do not infer a question or claim from an unfinished or unclear sentence.
 Prefer "fact-checker" over "trivia" when the speaker is asserting a claim rather than asking.
 Prefer "fact-checker" over "devils-advocate" when a specific factual claim can be verified.
 Prefer "fact-checker" over "companion" when the speaker is asserting a check-worthy claim. Prefer "companion" over "fact-checker" when the audio is open discussion of a topic without a specific verifiable assertion.

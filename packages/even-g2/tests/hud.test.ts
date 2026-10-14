@@ -460,7 +460,7 @@ describe('discreet mode', () => {
     expect(menuOptionAtIndex(0)).toBe('back');
   });
 
-  it('baseline layout renders the corner recording dot + bottom hint (no separate REC chip)', async () => {
+  it('baseline listening renders only a corner indicator with an empty feedback footer', async () => {
     await saveDiscreet(fakeSetLs, false);
     setActiveLayout('baseline');
     await bootstrapHud('picker');
@@ -471,7 +471,7 @@ describe('discreet mode', () => {
     // no separate '● REC' chip at the bottom anymore.
     expect(findText(payload, 'vl-rec')).toBeUndefined();
     expect(findText(payload, 'vl-status')?.content).toBe('•');
-    expect(findText(payload, 'vl-act-hint')?.content).toBe('Tap: menu · Double-tap: check');
+    expect(findText(payload, 'vl-act-hint')?.content).toBe('');
     expect(findText(payload, 'vl-clock')).toBeUndefined();
   });
 
@@ -1268,21 +1268,22 @@ describe('line-aware pagination', () => {
       type: 'fact-check',
       claims: [{ quote: '', verdict: 'TRUE', claim: 'C', reason: longReason }],
     });
-    // Walk through every page; each page must fit within the unified-body
-    // budget. Baseline = 9 lines × 27px = 243px. Page 0 now uses the same
-    // budget as continuation pages (one container, no claim/verdict slot
-    // eating the top of the screen).
+    // Measure against the actual container, including its padding, rather
+    // than a second copy of the layout's dimensions.
     let upgrades = 1;
-    const maxHeightPx = 9 * 27;
+    const body = findText(lastRebuildPayload(), 'vl-reason')!;
+    const innerWidth = body.width! - 2 * body.paddingLength!;
+    const maxHeightPx = body.height! - 2 * body.paddingLength!;
     let page = lastUpgradeByName('vl-reason')!;
     expect(page).toBeDefined();
-    expect(measureTextWrap(page, 536).height).toBeLessThanOrEqual(maxHeightPx);
+    expect(measureTextWrap(page, innerWidth).height).toBeLessThanOrEqual(maxHeightPx);
     while (true) {
       bridge.textContainerUpgrade.mockClear();
-      await scrollActiveReason(1);
+      const outcome = await scrollActiveReason(1);
+      if (outcome === 'hidden' || outcome === 'noop') break;
       const next = lastUpgradeByName('vl-reason');
       if (!next) break; // hit the end
-      expect(measureTextWrap(next, 536).height).toBeLessThanOrEqual(maxHeightPx);
+      expect(measureTextWrap(next, innerWidth).height).toBeLessThanOrEqual(maxHeightPx);
       page = next;
       upgrades++;
       if (upgrades > 50) throw new Error('runaway pagination loop');
@@ -2313,6 +2314,115 @@ describe('blankActiveForThinking', () => {
   });
 });
 
+describe('full-screen answers and quiet recording', () => {
+  type Text = {
+    containerName: string; content: string; xPosition: number; yPosition: number;
+    width: number; height: number; paddingLength: number; textColor: number; isEventCapture: number;
+  };
+  function rebuiltTexts(): Text[] {
+    const calls = bridge.rebuildPageContainer.mock.calls as unknown as Array<[{ payload: { textObject: Array<{ payload: Text }> } }]>;
+    return calls.at(-1)![0].payload.textObject.map((t) => t.payload);
+  }
+  function lastText(name: string): string {
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { containerName: string; content: string } }]>;
+    return calls.map((c) => c[0].payload).filter((c) => c.containerName === name).at(-1)?.content ?? '';
+  }
+
+  it('dims the recording indicator and keeps routine instructions off the HUD', async () => {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    const { setActiveHint, setStatus } = await import('../src/runtime/hud');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    expect(rebuiltTexts().filter((t) => t.content.trim())).toEqual([
+      expect.objectContaining({ containerName: 'vl-status', content: '•', textColor: 1 }),
+    ]);
+    const status = rebuiltTexts().find((t) => t.containerName === 'vl-status')!;
+    for (const content of ['•', 'AUTO', 'R1/3|', 'ERR']) {
+      expect(measureTextWrap(content, status.width - 2 * status.paddingLength).height)
+        .toBeLessThanOrEqual(status.height - 2 * status.paddingLength);
+    }
+    bridge.textContainerUpgrade.mockClear();
+    await setActiveHint('Fact Check · Double-tap to cancel');
+    expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+    await setStatus('thinking');
+    const calls = bridge.textContainerUpgrade.mock.calls as unknown as Array<[{ payload: { textColor: number } }]>;
+    expect(calls.at(-1)![0].payload.textColor).toBe(3);
+  });
+
+  it.each(['baseline', 'discreet-result'] as const)('gives %s answers the entire canvas and exactly one event capturer', async (layout) => {
+    await bootstrapHud('picker');
+    setActiveLayout(layout);
+    await showActivePage(getPersona('fact-checker')!);
+    const texts = rebuiltTexts();
+    const body = texts.find((t) => t.containerName === 'vl-reason')!;
+    expect(body).toMatchObject({ xPosition: 0, yPosition: 0, width: 576, height: 288, paddingLength: 4, isEventCapture: 1 });
+    expect(texts.filter((t) => t.isEventCapture === 1)).toHaveLength(1);
+  });
+
+  it('fits all ten lines on one page without reserving a line for a short position tag', async () => {
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('eli5')!);
+    const explanation = Array.from({ length: 10 }, (_, i) => `Line ${i + 1}`).join('\n');
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation }] });
+    expect(lastText('vl-reason')).toBe(`1/1 · ${explanation}`);
+    expect(await scrollActiveReason(1)).toBe('hidden');
+    expect(await scrollActiveReason(-1)).toBe('revealed');
+    expect(lastText('vl-reason')).toBe(`1/1 · ${explanation}`);
+  });
+
+  it('clears transient feedback before an answer and keeps background processing off its text', async () => {
+    const { flashActiveHint, setStatus } = await import('../src/runtime/hud');
+    vi.useFakeTimers();
+    try {
+      await bootstrapHud('picker');
+      await showActivePage(getPersona('fact-checker')!);
+      await flashActiveHint('No speech captured');
+      expect(lastText('vl-act-hint')).toBe('No speech captured');
+      await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation: 'An answer' }] });
+      expect(lastText('vl-act-hint')).toBe('');
+      bridge.textContainerUpgrade.mockClear();
+      await setStatus('R1/3');
+      expect(bridge.textContainerUpgrade).not.toHaveBeenCalled();
+      expect(lastText('vl-status')).toBe('');
+      await vi.advanceTimersByTimeAsync(3000);
+      expect(lastText('vl-act-hint')).toBe('');
+      await scrollActiveReason(1);
+      expect(lastText('vl-status')).toBe('R1/3');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps long answer fields intact across pages, including text beyond the former 60-character cutoff', async () => {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('trivia')!);
+    const answer = `${'The full answer includes supporting details. '.repeat(30)}TAIL_MARKER`;
+    await setLensResult({ type: 'trivia', claims: [{ quote: '', question: 'Question', answer, description: '' }] });
+    const pages = [lastText('vl-reason')];
+    while (await scrollActiveReason(1) === 'scrolled') pages.push(lastText('vl-reason'));
+    expect(pages.some((p) => p.includes('TAIL_MARKER'))).toBe(true);
+    for (const page of pages) {
+      expect(measureTextWrap(page, 568).height).toBeLessThanOrEqual(280);
+      expect(page.length).toBeLessThanOrEqual(1000);
+    }
+  });
+
+  it('bounds SDK payloads and position indicators for unusually long narrow text', async () => {
+    const { measureTextWrap } = await import('@evenrealities/pretext');
+    await bootstrapHud('picker');
+    await showActivePage(getPersona('eli5')!);
+    const explanation = 'i'.repeat(14000);
+    await setLensResult({ type: 'eli5', claims: [{ quote: '', explanation }] });
+    const pages = [lastText('vl-reason')];
+    while (await scrollActiveReason(1) === 'scrolled') pages.push(lastText('vl-reason'));
+    expect(pages.length).toBeGreaterThan(12);
+    expect(pages.map((p) => p.replace(/^1\/1 · /, '').replace(/\n\n\d+\/\d+$/, '')).join('')).toBe(explanation);
+    for (const page of pages) {
+      expect(page.length).toBeLessThanOrEqual(1000);
+      expect(measureTextWrap(page, 568).height).toBeLessThanOrEqual(280);
+    }
+  });
+});
+
 describe('splitResultByClaim parity (lifecycle ↔ hud synthesis)', () => {
   // Locks the rule that lifecycle's storage-time split and hud.ts's synthesis
   // path agree for every multi-claim lens. A divergence is what caused the
@@ -2355,4 +2465,3 @@ describe('splitResultByClaim parity (lifecycle ↔ hud synthesis)', () => {
     expect(splitResultByClaim(result)).toEqual([result]);
   });
 });
-

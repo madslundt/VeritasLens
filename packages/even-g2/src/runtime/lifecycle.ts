@@ -17,6 +17,7 @@ import {
   RECALL_CONTEXT_DIRECTIVE,
   callLens,
   callLensStream,
+  prepareLensTranscript,
   MAX_RETRIES,
   formatRelativeTime,
   getPersona,
@@ -40,6 +41,11 @@ import {
   parseSayMoreResponse,
   parseWearerSpeakResponse,
   openaiHostLabel,
+  normalizeOpenAiBaseUrl,
+  isCustomOpenAiBaseUrl,
+  isCustomSttHost,
+  defaultSttModel,
+  isOpenAiChatOnlyHost,
   GATE_TAIL_SEGMENTS,
   shouldAnalyze,
   runWhisperSidecar,
@@ -92,6 +98,7 @@ import {
   setLensResult,
   setLensStreamingHeading,
   clearLensStreamingHeading,
+  discardLensStreamingHeading,
   setMenuSpinner,
   setStatus,
   setSummaryBadgeState,
@@ -197,18 +204,37 @@ export function resolveAnalysisCursor(
  */
 const VAD_GATE_WINDOW_SEC = 10;
 
-/**
- * Return the API key for the currently-active provider. Empty string when
- * unset. The LLM facade (`src/llm/index.ts`) routes by `settings().provider`
- * and falls back to the matching provider key when `opts.apiKey` is omitted,
- * so call sites in this file only use this helper for the upfront "is the
- * user configured" check — they no longer forward the key into callLens.
- */
-function activeApiKey(): string {
-  const s = settings();
-  return s.provider === 'openai-compatible'
-    ? (s.openaiApiKeys[s.openaiBaseUrl] ?? '')
-    : s.geminiApiKey;
+/** Keep HUD startup and all audio analyses aligned with provider requirements. */
+export function providerConfigurationError(s: Settings): string | null {
+  let needsStt = false;
+  if (s.provider === 'claude') {
+    if (s.claudeApiKey.trim().length < 10) return 'Add a Claude API key in phone settings.';
+    needsStt = true;
+  } else if (s.provider === 'openai-compatible') {
+    let baseUrl: string;
+    try { baseUrl = normalizeOpenAiBaseUrl(s.openaiBaseUrl); }
+    catch { return 'Enter a valid API base URL in phone settings.'; }
+    if (!s.openaiModel.trim()) return 'Choose a chat model in phone settings.';
+    if (!isCustomOpenAiBaseUrl(baseUrl) && (s.openaiApiKeys[baseUrl] ?? '').trim().length < 10) {
+      return `Add a ${openaiHostLabel(baseUrl)} API key in phone settings.`;
+    }
+    needsStt = isOpenAiChatOnlyHost(baseUrl);
+  } else if (s.geminiApiKey.trim().length < 10) {
+    return 'Add a Gemini API key in phone settings.';
+  }
+  if (needsStt) {
+    try { normalizeOpenAiBaseUrl(s.sttHost); }
+    catch { return 'Enter a valid speech-to-text API base URL in phone settings.'; }
+    if (!(s.sttModel || defaultSttModel(s.sttHost)).trim()) return 'Choose a speech-to-text model in phone settings.';
+    if (!isCustomSttHost(s.sttHost) && !(s.openaiApiKeys[s.sttHost] ?? '').trim()) {
+      return `Add a ${openaiHostLabel(s.sttHost)} speech-to-text API key in phone settings.`;
+    }
+  }
+  return null;
+}
+
+function isProviderConfigured(s: Settings = settings()): boolean {
+  return providerConfigurationError(s) === null;
 }
 
 let running = false;
@@ -320,11 +346,6 @@ async function reloadHistoryFromStorage(): Promise<void> {
 }
 
 export async function startHudRuntime(): Promise<void> {
-  const isProviderConfigured = (): boolean => {
-    const s = settings();
-    if (s.provider === 'openai-compatible') return (s.openaiApiKeys[s.openaiBaseUrl] ?? '').trim().length >= 10;
-    return s.geminiApiKey.trim().length >= 10;
-  };
   const configured = isProviderConfigured();
   if (running) {
     if (configured) await showPickerPage();
@@ -352,11 +373,7 @@ export async function startHudRuntime(): Promise<void> {
 
 export async function refreshHudPage(): Promise<void> {
   if (!running) return;
-  const s = settings();
-  const configured =
-    s.provider === 'openai-compatible'
-      ? (s.openaiApiKeys[s.openaiBaseUrl] ?? '').trim().length >= 10
-      : s.geminiApiKey.trim().length >= 10;
+  const configured = isProviderConfigured();
   if (configured) await showPickerPage();
   else await showUnconfiguredPage();
 }
@@ -571,9 +588,12 @@ function handleEvent(event: EvenHubEvent): void {
       // raced in between abort and finally — otherwise the user can get stuck
       // unable to start a new analysis until they leave the session.
       const c = inflight;
+      const cancelledBuffer = buffer;
       inflight = null;
       analyzing = false;
       c?.abort();
+      clearLensStreamingHeading();
+      setLensPartialResult(null);
       // Tear the loading spinner down here rather than waiting for the abort to
       // surface in runAnalysis's catch. That catch only runs if the in-flight
       // call actually rejects with AbortError — but depending on where it is
@@ -584,6 +604,8 @@ function handleEvent(event: EvenHubEvent): void {
       // that invariant hold regardless of how the in-flight call unwinds.
       setAppPhase('listening');
       void (async () => {
+        await discardLensStreamingHeading(() => inflight === null && buffer === cancelledBuffer);
+        if (inflight !== null || buffer !== cancelledBuffer) return;
         await stopSpinner(); // also resets the status slot to 'listening'
         await setActiveHint(ACTIVE_HINT_DEFAULT);
       })().catch((err) => logDispatchError('cancel-analysis-fail', err));
@@ -1379,6 +1401,8 @@ function buildPromptWithContext(persona: Persona, lang: LanguageCode): string {
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
+    'The current audio is the evidence of what was said. Preserve names, numbers, units, negation, and qualifiers. Do not guess unclear words or complete a clipped sentence.',
+    'Prior transcript, summaries, and previous answers are context only, not fresh claims or independently verified facts. Focus on the most recent complete utterance in the current audio.',
     '',
     base,
   ];
@@ -1421,6 +1445,7 @@ function buildMeetingPromptWithContext(
   const parts = [
     'Focus only on clear human speech in the audio. Ignore background noise, music, and non-speech sounds.',
     'If no clear human speech is detected, set noSpeech to true in your response.',
+    'Preserve names, numbers, units, negation, and qualifiers. Do not guess unclear words or complete a clipped question. Use the most recent complete question in the current audio.',
     '',
     base,
   ];
@@ -1529,6 +1554,7 @@ async function runAnalysis(): Promise<void> {
   const page = currentHudPage();
   if (page === 'history-list' || page === 'history-detail' || page === 'mid-summary') await restoreActivePage();
   if (currentHudPage() !== 'active') return;
+  if (analyzing) return;
 
   if (!buffer || buffer.bytesBuffered === 0) {
     // User tapped before any audio arrived (e.g. immediately after entering
@@ -1540,16 +1566,10 @@ async function runAnalysis(): Promise<void> {
   }
 
   const s = settings();
-  const apiKey = s.provider === 'openai-compatible'
-    ? (s.openaiApiKeys[s.openaiBaseUrl] ?? '')
-    : s.geminiApiKey;
-  if (!apiKey) {
+  const configurationError = providerConfigurationError(s);
+  if (configurationError) {
     await setStatus('error');
-    setErrorMessage(
-      s.provider === 'openai-compatible'
-        ? `No ${openaiHostLabel(s.openaiBaseUrl)} API key.`
-        : 'No Gemini API key.',
-    );
+    setErrorMessage(configurationError);
     return;
   }
 
@@ -1582,97 +1602,93 @@ async function runAnalysis(): Promise<void> {
     return;
   }
 
-  // No-voice gate: analyse only audio captured *since the last completed
-  // analysis* (not the whole buffer). This makes re-tapping in silence after
-  // a fresh analysis correctly report "no speech captured" — otherwise the
-  // already-analysed voice content earlier in the buffer would falsely pass
-  // the gate. The cursor only advances on a completed attempt (success or
-  // noSpeech), so after an error/cancel this gate re-sees the same audio. The
-  // LLM's own noSpeech flag remains the safety net for ambiguous audio that
-  // DOES contain at least one voice frame.
-  //
-  // Bypassed when the user sets `voiceGateRmsFloor` to 0 (Settings → Voice
-  // detection → Off). Higher floor values make the gate stricter (only louder
-  // input passes); lower values are more permissive — useful when the G2's
-  // low-amplitude mic capture is being misclassified as silence.
-  const rmsFloor = settings().voiceGateRmsFloor;
-  if (rmsFloor > 0) {
-    const sincePcm = buffer.linearPcmSince(lastAnalysisByteOffset);
-    const gatePcm = tailPcm(sincePcm, buffer.sampleRate, VAD_GATE_WINDOW_SEC);
-    const va = await analyzeBufferForVoice(gatePcm, buffer.sampleRate, rmsFloor);
-    if (va.voiceFrames === 0) {
-      const noisy = va.noiseFrames > va.silenceFrames;
-      await showNoVoiceFeedback(noisy ? 'Too noisy to pick up voice' : 'No speech captured');
-      setAppPhase('listening');
-      return;
-    }
-  }
-  // Snapshot the buffer + byte position only after the gate passes. Allocating
-  // the linear PCM copy (~10 MB at the default buffer, ~190 MB at 5 min) and
-  // bumping the byte offset are wasted work when the gate rejects.
-  //
-  // Use `linearPcmSince(lastAnalysisByteOffset)` rather than `toLinearPcm()`
-  // so the LLM only sees audio captured *since the previous successful
-  // analysis*. The first tap of a session has offset 0 → it sees the whole
-  // buffer. Each subsequent tap sees only what was said since the last one,
-  // which (a) prevents Gemini from re-answering the same claim across
-  // consecutive taps and (b) shrinks the upload on rapid-tap workflows.
-  //
-  // The cursor is NOT advanced here: we capture the would-be offset into a
-  // local and commit it (in the finally) only when the analysis actually
-  // consumes the window — a displayed result or a completed noSpeech verdict.
-  // An error, timeout, or cancellation leaves `lastAnalysisByteOffset` where it
-  // was, so a retry re-includes this same audio instead of reporting `○`.
-  const linearPcm = buffer.linearPcmSince(lastAnalysisByteOffset);
-  const snapshotByteOffset = buffer.bytesProduced;
-
-  // Clear the store signal for sibling components (settings WebView). The HUD
-  // intentionally keeps the previous answer on screen during analysis so the
-  // wearer can review it while the spinner animates in the corner status slot
-  // (added to every active-page layout). Only rebuild the page when there is
-  // nothing meaningful to keep — e.g. on the first analysis of a session where
-  // the layout is still discreet-minimal/baseline idle.
-  setStateResult(null);
-  // Clear any partial from a prior analyze before kicking off a new one — the
-  // streaming path will repopulate it as Gemini emits its first claim object.
-  setLensPartialResult(null);
-
-  inflight?.abort();
+  // Freeze the window and claim the analysis before the first asynchronous
+  // VAD call. Audio keeps arriving during inference; it belongs to the NEXT
+  // tap, and another double-tap must cancel this attempt rather than start a
+  // second inference against the same stateful model.
+  const analysisStartedAt = performance.now();
+  const analysisBuffer = buffer;
+  const snapshotByteOffset = analysisBuffer.bytesProduced;
+  const linearPcm = analysisBuffer.linearPcmSince(lastAnalysisByteOffset);
   const controller = new AbortController();
   inflight = controller;
   analyzing = true;
-  setAppPhase('thinking');
-  // Dynamic hint = lens name + cancel affordance. The persona is fixed for
-  // manual lenses; for Auto we project the previous-winner lens in this
-  // session ("Auto → Fact-Check · …") so the wearer knows what's running
-  // before the classifier resolves. Cold first-tap (no winner yet) stays at
-  // bare "Auto · …" rather than guessing.
-  const predictedAutoLens =
-    persona.id === 'auto' && lastAutoWinnerInSession
-      ? getPersona(lastAutoWinnerInSession)?.name
-      : undefined;
-  const analyzingHint = predictedAutoLens
-    ? `${persona.name} → ${predictedAutoLens} · Double-tap to cancel`
-    : `${persona.name} · Double-tap to cancel`;
-  // The spinner writes its first frame synchronously; an intermediate
-  // setStatus('thinking') here would flash '...' before the spinner takes
-  // over, so we skip it and let the spinner own the status slot.
-  await setActiveHint(analyzingHint);
-  // Blank the result widget so the wearer's mental model is "spinner means
-  // working." `sessionPages` stay intact, so a swipe-up during the analysis
-  // re-reveals the prior answer via the existing `scrollActiveReason`
-  // `activeHidden` path — no extra gesture routing needed. The arrival of a
-  // partial or final result automatically clears the hidden flag and
-  // re-renders inside `setLensResult`, so auto-return is free.
-  await blankActiveForThinking();
-  startSpinner();
-
-  // Defaults to `error` so any unexpected throw or soft early-return inside the
-  // try (e.g. "No Auto lenses enabled", missing-key returns) leaves the cursor
-  // unadvanced — those consume no audio. Flipped to `success`/`noSpeech`/`abort`
-  // on the paths that should (or shouldn't) commit the snapshot offset.
+  const assertCurrentAnalysis = (): void => {
+    if (controller.signal.aborted || inflight !== controller || buffer !== analysisBuffer) {
+      throw new DOMException('Analysis cancelled', 'AbortError');
+    }
+  };
   let outcome: AnalysisOutcome = 'error';
+  let gateRejected = false;
+  let vadMs = 0;
+  let trimMs = 0;
+  let uploadedBytes = 0;
+  let answerMs: number | undefined;
+  let firstDisplayMs: number | undefined;
   try {
+    // No-voice gate: analyse only audio captured *since the last completed
+    // analysis* (not the whole buffer). This makes re-tapping in silence after
+    // a fresh analysis correctly report "no speech captured" — otherwise the
+    // already-analysed voice content earlier in the buffer would falsely pass
+    // the gate. The cursor only advances on a completed attempt (success or
+    // noSpeech), so after an error/cancel this gate re-sees the same audio. The
+    // LLM's own noSpeech flag remains the safety net for ambiguous audio that
+    // DOES contain at least one voice frame.
+    //
+    // Bypassed when the user sets `voiceGateRmsFloor` to 0 (Settings → Voice
+    // detection → Off). Higher floor values make the gate stricter (only louder
+    // input passes); lower values are more permissive — useful when the G2's
+    // low-amplitude mic capture is being misclassified as silence.
+    const rmsFloor = s.voiceGateRmsFloor;
+    if (rmsFloor > 0) {
+      const gateBytes = VAD_GATE_WINDOW_SEC * analysisBuffer.sampleRate * (analysisBuffer.bitsPerSample / 8) * analysisBuffer.channels;
+      const gatePcm = linearPcm.subarray(Math.max(0, linearPcm.length - gateBytes));
+      const gateStartedAt = performance.now();
+      const va = await analyzeBufferForVoice(gatePcm, analysisBuffer.sampleRate, rmsFloor);
+      vadMs = performance.now() - gateStartedAt;
+      assertCurrentAnalysis();
+      if (va.voiceFrames === 0) {
+        gateRejected = true;
+        const noisy = va.noiseFrames > va.silenceFrames;
+        await showNoVoiceFeedback(noisy ? 'Too noisy to pick up voice' : 'No speech captured');
+        assertCurrentAnalysis();
+        setAppPhase('listening');
+        return;
+      }
+    }
+    // Clear the phone's result and partials. The HUD's saved session pages
+    // remain available by swipe while the active page is blanked for thinking.
+    setStateResult(null);
+    setLensPartialResult(null);
+
+    setAppPhase('thinking');
+    // Dynamic hint = lens name + cancel affordance. The persona is fixed for
+    // manual lenses; for Auto we project the previous-winner lens in this
+    // session ("Auto → Fact-Check · …") so the wearer knows what's running
+    // before the classifier resolves. Cold first-tap (no winner yet) stays at
+    // bare "Auto · …" rather than guessing.
+    const predictedAutoLens =
+      persona.id === 'auto' && lastAutoWinnerInSession
+        ? getPersona(lastAutoWinnerInSession)?.name
+        : undefined;
+    const analyzingHint = predictedAutoLens
+      ? `${persona.name} → ${predictedAutoLens} · Double-tap to cancel`
+      : `${persona.name} · Double-tap to cancel`;
+    // The spinner writes its first frame synchronously; an intermediate
+    // setStatus('thinking') here would flash '...' before the spinner takes
+    // over, so we skip it and let the spinner own the status slot.
+    await setActiveHint(analyzingHint);
+    assertCurrentAnalysis();
+    // Blank the result widget so the wearer's mental model is "spinner means
+    // working." `sessionPages` stay intact, so a swipe-up during the analysis
+    // re-reveals the prior answer via the existing `scrollActiveReason`
+    // `activeHidden` path — no extra gesture routing needed. The arrival of a
+    // partial or final result automatically clears the hidden flag and
+    // re-renders inside `setLensResult`, so auto-return is free.
+    await blankActiveForThinking();
+    assertCurrentAnalysis();
+    startSpinner();
+
     // VAD-trim the upload to just the detected speech regions when enabled
     // (default) and Silero is available. The gate above already confirmed at
     // least one voice frame in the recent tail; here we re-run Silero against
@@ -1680,7 +1696,7 @@ async function runAnalysis(): Promise<void> {
     // full PCM silently when Silero is unavailable (FFT fallback returns
     // `null` segments) or when trimming would not shrink the payload.
     let pcmForUpload = linearPcm;
-    if (settings().voiceTrimEnabled) {
+    if (s.voiceTrimEnabled) {
       // Reuse the same RMS floor as the gate so trim and gate agree on what
       // counts as silence — passing the historical 200 here while the gate
       // used a lenient value would let the trim drop speech the gate
@@ -1688,11 +1704,14 @@ async function runAnalysis(): Promise<void> {
       // historical default so trim still has a meaningful floor; trim is
       // controlled by its own `voiceTrimEnabled` toggle anyway.
       const trimFloor = rmsFloor > 0 ? rmsFloor : 200;
-      const segments = await extractSpeechSegments(linearPcm, buffer.sampleRate, trimFloor);
+      const trimStartedAt = performance.now();
+      const segments = await extractSpeechSegments(linearPcm, analysisBuffer.sampleRate, trimFloor);
+      trimMs = performance.now() - trimStartedAt;
+      assertCurrentAnalysis();
       if (segments && segments.length > 0) {
         const trimmed = trimPcmToSegments(linearPcm, segments, {
-          sampleRate: buffer.sampleRate,
-          bytesPerSample: buffer.bitsPerSample / 8,
+          sampleRate: analysisBuffer.sampleRate,
+          bytesPerSample: analysisBuffer.bitsPerSample / 8,
         });
         if (trimmed.length < linearPcm.length) {
           pushDebugEvent({
@@ -1704,10 +1723,11 @@ async function runAnalysis(): Promise<void> {
       }
     }
     const wav = encodePcmToWav(pcmForUpload, {
-      sampleRate: buffer.sampleRate,
-      bitsPerSample: buffer.bitsPerSample,
-      channels: buffer.channels,
+      sampleRate: analysisBuffer.sampleRate,
+      bitsPerSample: analysisBuffer.bitsPerSample,
+      channels: analysisBuffer.channels,
     });
+    uploadedBytes = wav.length;
     const lang = settings().responseLanguage;
     const onRetry = async (attempt: number): Promise<void> => {
       // Keep the spinner running and switch its prefix to the retry label so
@@ -1753,6 +1773,7 @@ async function runAnalysis(): Promise<void> {
       // generic runAnalysis path: watch `answer` and push partials through
       // the throttled HUD writer so the response types in instead of landing
       // in one beat after the spinner.
+      let headingStarted = false;
       const rawText = await callLensStream({
         wav,
         prompt: `${meetingContext}\n\n${meetingPrompt}`,
@@ -1761,6 +1782,7 @@ async function runAnalysis(): Promise<void> {
         onRetry,
         grounding: webGrounding ? 'web_search' : undefined,
         onGroundingMode: (mode) => {
+          if (controller.signal.aborted || inflight !== controller) return;
           groundingMode = mode;
           setLensGroundingMode(mode);
         },
@@ -1769,12 +1791,18 @@ async function runAnalysis(): Promise<void> {
         },
         watchValueKeys: new Set<string>(['answer']),
         onPartialString: (name, partial) => {
-          if (name !== 'answer') return;
-          void stopSpinner();
-          void setStatus('');
+          if (name !== 'answer' || controller.signal.aborted || inflight !== controller) return;
+          if (!headingStarted) {
+            headingStarted = true;
+            firstDisplayMs = performance.now() - analysisStartedAt;
+            void stopSpinner();
+            void setStatus('');
+          }
           setLensStreamingHeading(partial);
         },
       });
+      assertCurrentAnalysis();
+      answerMs = performance.now() - analysisStartedAt;
       clearLensStreamingHeading();
       const result = parseMeetingPrepResponse(rawText, sections, { webGrounding });
       // Backfill the first claim's `sourceMeta` from the provider's
@@ -1826,12 +1854,15 @@ async function runAnalysis(): Promise<void> {
         ...(webCitations && webCitations.length > 0 ? { webCitations } : {}),
       }, (k, v) => getBridge().setLocalStorage(k, v));
       await reloadHistoryFromStorage();
+      assertCurrentAnalysis();
       // Pass the full session context so multiple Meeting Prep questions in
       // the same session accumulate as separate entries — without this, the
       // direct-call path in setLensResult would replace sessionEntries with a
       // synthetic one-entry list, breaking cross-question swipe-up navigation.
       const sessionEntriesNext = sessionHistory().filter((e) => e.sessionId === currentSessionId);
       await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set([newEntryId]) });
+      assertCurrentAnalysis();
+      firstDisplayMs ??= performance.now() - analysisStartedAt;
       await setStatus('displaying');
       await setActiveHint(ACTIVE_HINT_DEFAULT);
       outcome = 'success';
@@ -1848,6 +1879,19 @@ async function runAnalysis(): Promise<void> {
      * speculative result; run the main lens call below."
      */
     let speculativeRawText: string | null = null;
+    let speculativeGroundingMode: GroundingMode = 'grounded';
+    let speculativeWebCitations: WebCitation[] | undefined;
+    const captureTranscript = (text: string): void => {
+      if (s.transcriptMode === 'off' || controller.signal.aborted || inflight !== controller) return;
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const now = Date.now();
+      appendTranscriptSegment({ speaker: 'other', text: trimmed, startedAt: now, endedAt: now });
+    };
+    // Scope STT reuse to this snapshot. A new tap creates a new promise;
+    // transcript text is appended once even when Auto makes parallel calls.
+    let transcript: Promise<string> | undefined;
+    if (shouldRunWhisperSidecar()) void runWhisperSidecar(wav, 'other', controller.signal);
 
     if (persona.id === 'auto') {
       const enabled = (AUTO_LENS_CANDIDATES as readonly string[]).filter(
@@ -1858,6 +1902,8 @@ async function runAnalysis(): Promise<void> {
         await setStatus('No Auto lenses enabled — configure in settings');
         return;
       }
+      transcript = prepareLensTranscript(wav, controller.signal)
+        ?.then((text) => { captureTranscript(text); return text; });
       const classifierPrompt = buildPromptWithContext(
         { ...persona, buildPrompt: (l: LanguageCode) => buildAutoPrompt(l, enabled) },
         lang,
@@ -1866,6 +1912,7 @@ async function runAnalysis(): Promise<void> {
       const classifierModel = chooseClassifierModel(settings());
       const classifierCall = callLens({
         wav,
+        transcript,
         prompt: `${classifierContext}\n\n${classifierPrompt}`,
         schema: buildAutoClassifierSchema(enabled),
         model: classifierModel,
@@ -1879,7 +1926,7 @@ async function runAnalysis(): Promise<void> {
       // tokens. On hit we save one full sequential lens RTT.
       const speculativeId = lastAutoWinnerInSession;
       const speculativeLens =
-        speculativeId && speculativeId !== persona.id ? getPersona(speculativeId) : null;
+        speculativeId && enabled.includes(speculativeId) ? getPersona(speculativeId) : null;
       const speculativeCtrl = new AbortController();
       // Forward outer aborts (user cancel via double-tap, settings change,
       // teardown) onto the speculative controller so its fetch releases too.
@@ -1889,11 +1936,15 @@ async function runAnalysis(): Promise<void> {
       if (speculativeLens) {
         const specPrompt = buildPromptWithContext(speculativeLens, lang);
         const specContext = buildContextBlock(speculativeLens.name);
-        speculativeCall = callLens({
+        speculativeCall = callLensStream({
           wav,
+          transcript,
           prompt: `${specContext}\n\n${specPrompt}`,
           schema: speculativeLens.schema,
           signal: speculativeCtrl.signal,
+          grounding: speculativeLens.grounding,
+          onGroundingMode: (mode) => { speculativeGroundingMode = mode; },
+          onCitations: (cites) => { speculativeWebCitations = cites; },
           // Deliberately no onRetry: only the foreground call's retries
           // should flash R1/2/3 on the HUD spinner.
         });
@@ -1905,6 +1956,7 @@ async function runAnalysis(): Promise<void> {
       let chosenLensId: string;
       try {
         chosenLensId = parseAutoClassifierResponse(await classifierCall).chosenLensId;
+        assertCurrentAnalysis();
       } catch (err) {
         speculativeCtrl.abort();
         controller.signal.removeEventListener('abort', forwardAbort);
@@ -1944,6 +1996,7 @@ async function runAnalysis(): Promise<void> {
       controller.signal.removeEventListener('abort', forwardAbort);
     }
 
+    assertCurrentAnalysis();
     let rawText: string;
     // Captures the effective grounding mode for *this* call so we can decorate
     // the badge with a `°` suffix when the user picked a provider that can't
@@ -1962,36 +2015,12 @@ async function runAnalysis(): Promise<void> {
     setLensGroundingMode('grounded');
     if (speculativeRawText !== null) {
       rawText = speculativeRawText;
+      groundingMode = speculativeGroundingMode;
+      webCitations = speculativeWebCitations;
+      setLensGroundingMode(groundingMode);
     } else {
       const analysisPrompt = buildPromptWithContext(analysisPersona, lang);
       const analysisContext = buildContextBlock(analysisPersona.name);
-      // Capture the chat-byproduct transcript on Claude / OpenAI-compatible
-      // providers. The main runAnalysis path is always "wearer is listening"
-      // (wearer-speak has its own runWearerSpeakAnalyze entry that wires
-      // speaker='wearer'), so the speaker tag is 'other'.
-      const captureTranscript = (text: string): void => {
-        if (settings().transcriptMode === 'off') return;
-        const trimmed = text.trim();
-        if (!trimmed) return;
-        const now = Date.now();
-        appendTranscriptSegment({
-          speaker: 'other',
-          text: trimmed,
-          startedAt: now,
-          endedAt: now,
-        });
-      };
-      // Gemini + OpenRouter inline-audio paths never fire `onTranscript`
-      // because their lens call consumes audio inline. Fire a parallel
-      // whisper-sidecar call against the user's STT host so those providers
-      // still get a tagged transcript segment. Fired before the lens call so
-      // both run concurrently; the sidecar promise is intentionally not
-      // awaited — it lands in the background and is a no-op if it resolves
-      // after the session rotates. Aborts when the lens call is canceled via
-      // the shared controller signal.
-      if (shouldRunWhisperSidecar()) {
-        void runWhisperSidecar(wav, 'other', controller.signal);
-      }
       // Heading streaming wiring: when the active persona declares
       // `streamHeading` (Trivia answer, Translate translatedText, Companion
       // headline, ELI5 oneLine, …), the parser fires `onPartialString` events
@@ -2003,25 +2032,32 @@ async function runAnalysis(): Promise<void> {
       // a 150 ms throttle without strobe.
       const heading = analysisPersona.streamHeading;
       const watchValueKeys = heading ? new Set<string>([heading.field]) : undefined;
+      let headingStarted = false;
       const onPartialString = heading
         ? (name: string, partial: string): void => {
-            if (name !== heading.field) return;
+            if (name !== heading.field || controller.signal.aborted || inflight !== controller) return;
             // Strip the spinner the moment the answer starts arriving so the
             // streaming text isn't competing with the dots for the wearer's
             // attention. setStatus('') leaves the status row blank.
-            void stopSpinner();
-            void setStatus('');
+            if (!headingStarted) {
+              headingStarted = true;
+              firstDisplayMs = performance.now() - analysisStartedAt;
+              void stopSpinner();
+              void setStatus('');
+            }
             setLensStreamingHeading(partial);
           }
         : undefined;
       rawText = await callLensStream({
         wav,
+        transcript,
         prompt: `${analysisContext}\n\n${analysisPrompt}`,
         schema: analysisPersona.schema,
         signal: controller.signal,
         onRetry,
         grounding: analysisPersona.grounding,
         onGroundingMode: (mode) => {
+          if (controller.signal.aborted || inflight !== controller) return;
           groundingMode = mode;
           // Publish to the store so the live HUD reads the mark the moment
           // the resolver picks a mode — before the first byte of the result
@@ -2034,9 +2070,11 @@ async function runAnalysis(): Promise<void> {
         },
         watchValueKeys,
         onPartialString,
-        onTranscript: captureTranscript,
+        onTranscript: transcript ? undefined : captureTranscript,
       });
     }
+    assertCurrentAnalysis();
+    answerMs = performance.now() - analysisStartedAt;
     // Cancel any pending throttled streaming write before the final
     // setLensResult rebuilds the page. Without this a trailing flush can
     // land *after* the rebuild and overwrite it with a stale partial.
@@ -2044,6 +2082,7 @@ async function runAnalysis(): Promise<void> {
     const result = analysisPersona.parse(rawText);
     if (autoSelected) result.autoSelected = true;
     await stopSpinner();
+    assertCurrentAnalysis();
     // Final result now lives in `lensResult` — drop the partial so any
     // reactive `partial ?? final` consumer flips over to the authoritative
     // parse without one frame of stale partial data.
@@ -2101,18 +2140,28 @@ async function runAnalysis(): Promise<void> {
       (k, v) => getBridge().setLocalStorage(k, v),
     );
     await reloadHistoryFromStorage();
+    assertCurrentAnalysis();
     const sessionEntriesNext = sessionHistory().filter((e) => e.sessionId === currentSessionId);
     await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set(freshIds) });
+    assertCurrentAnalysis();
+    firstDisplayMs ??= performance.now() - analysisStartedAt;
     await setStatus('displaying');
     await setActiveHint(ACTIVE_HINT_DEFAULT);
     outcome = 'success';
     setAppPhase('displaying');
   } catch (err) {
+    // A cancelled/superseded attempt no longer owns the HUD. Its provider or
+    // VAD may settle late, but must not replace a newer answer or session.
+    if (inflight !== controller || buffer !== analysisBuffer) return;
     await stopSpinner();
+    if (inflight !== controller || buffer !== analysisBuffer) return;
+    clearLensStreamingHeading();
     // Defensive clear — partials are never written under the no-stream path,
     // but the signal still exists and we want to leave no stale state if a
     // pre-stream code path ever sets it again.
     setLensPartialResult(null);
+    await discardLensStreamingHeading(() => inflight === controller && buffer === analysisBuffer);
+    if (inflight !== controller || buffer !== analysisBuffer) return;
     if ((err as Error)?.name === 'AbortError') {
       // User cancelled via double-tap (which nulls `inflight` and clears
       // `analyzing` at the call site), or a back-to-back analysis aborted this
@@ -2158,6 +2207,14 @@ async function runAnalysis(): Promise<void> {
     if (errClearTimer) clearTimeout(errClearTimer);
     errClearTimer = setTimeout(clearErrorState, ERR_AUTO_CLEAR_MS);
   } finally {
+    const elapsed = (value: number | undefined): string => value === undefined ? '—' : `${Math.round(value)}ms`;
+    pushDebugEvent({
+      label: 'analysis-timing',
+      detail: `${controller.signal.aborted ? 'abort' : gateRejected ? 'noVoice' : outcome} | ` +
+        `audio=${(linearPcm.length / (analysisBuffer.sampleRate * 2)).toFixed(1)}s ` +
+        `upload=${Math.round(uploadedBytes / 1024)}KB | vad=${elapsed(vadMs)} trim=${elapsed(trimMs)} ` +
+        `answer=${elapsed(answerMs)} display=${elapsed(firstDisplayMs)} total=${elapsed(performance.now() - analysisStartedAt)}`,
+    });
     // Identity check prevents clobbering a newer controller spawned by a
     // back-to-back analysis. Nulling inflight here releases the AbortController
     // and, through its closure, the WAV snapshot that can be up to ~19 MB at
@@ -2204,15 +2261,10 @@ async function runSayMore(): Promise<void> {
     return;
   }
   const s = settings();
-  if (!activeApiKey()) {
-    // Without a key the call would fail in callLens; surface the missing-key
-    // state through the existing setStatus error path instead of throwing.
+  const configurationError = providerConfigurationError(s);
+  if (configurationError) {
     await setStatus('error');
-    setErrorMessage(
-      s.provider === 'openai-compatible'
-        ? `No ${openaiHostLabel(s.openaiBaseUrl)} API key.`
-        : 'No Gemini API key.',
-    );
+    setErrorMessage(configurationError);
     return;
   }
 
@@ -2355,10 +2407,10 @@ async function runWearerSpeakAnalyze(): Promise<void> {
     return;
   }
   const s = settings();
-  if (!activeApiKey()) {
+  if (!isProviderConfigured(s)) {
     pushDebugEvent({
       label: 'wearer-speak-fail',
-      detail: 'no api key configured',
+      detail: providerConfigurationError(s) ?? 'provider not configured',
     });
     return;
   }
@@ -2464,17 +2516,6 @@ function autoSummaryIntervalMs(bufferDurationSec: number): number {
 }
 
 /**
- * Return at most the most-recent `maxSeconds` of audio from a 16-bit LE PCM
- * buffer. Used by the VAD gate to bound Silero inference latency on long
- * ring-buffer windows. Returns the original buffer if it's already shorter.
- */
-function tailPcm(pcm: Uint8Array, sampleRate: number, maxSeconds: number): Uint8Array {
-  const maxBytes = maxSeconds * sampleRate * 2; // 16-bit mono ⇒ 2 bytes/sample
-  if (pcm.length <= maxBytes) return pcm;
-  return pcm.subarray(pcm.length - maxBytes);
-}
-
-/**
  * Disposer for the Solid effect that watches "critical" settings — the ones
  * that invalidate the audio capture path when changed (provider, model, API
  * key, buffer duration). On change, an active session is torn down via
@@ -2507,9 +2548,16 @@ function startSettingsWatcher(): void {
         s.geminiApiKey,
         s.geminiModel,
         s.geminiAutoModel,
+        s.claudeApiKey,
+        s.claudeModel,
         s.openaiApiKeys[s.openaiBaseUrl] ?? '',
         s.openaiBaseUrl,
         s.openaiModel,
+        s.sttHost,
+        s.sttModel,
+        JSON.stringify(s.openaiFallbackUrls?.[s.openaiBaseUrl] ?? []),
+        JSON.stringify(s.sttFallbackUrls?.[s.sttHost] ?? []),
+        s.openaiApiKeys[s.sttHost] ?? '',
         s.bufferDuration,
       ].join('|');
     });
@@ -2619,9 +2667,9 @@ function buildMidSummaryMenuItems(): MenuItem[] {
 
 async function runAutoSummary(): Promise<void> {
   if (!buffer || buffer.bytesBuffered === 0) return;
-  // Skip when the active provider has no API key — the facade would throw
+  // Skip when the active provider is not configured — the facade would throw
   // and we'd just be burning Silero inference time before discovering that.
-  if (!activeApiKey()) return;
+  if (!isProviderConfigured()) return;
   // Don't summarise a session that has no human input yet (no analyses) or
   // hasn't accumulated enough recording for a summary to be meaningful.
   if (!canRunSummary()) return;
@@ -2794,7 +2842,7 @@ interface StopTimeInputs {
 function captureStopTimeInputs(): StopTimeInputs | null {
   const s = settings();
   if (!s.autoSummaryEnabled) return null;
-  if (!activeApiKey()) return null;
+  if (!isProviderConfigured(s)) return null;
   const linearPcm =
     buffer && buffer.bytesBuffered > 0 ? buffer.toLinearPcm() : null;
   if (!linearPcm && intermediateSummaries.length === 0) return null;

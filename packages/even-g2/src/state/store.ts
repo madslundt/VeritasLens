@@ -25,12 +25,13 @@ import {
   DEFAULT_OPENAI_BASE_URL,
   DEFAULT_OPENAI_MODEL,
   DEFAULT_STT_HOST,
-  DEFAULT_STT_MODEL,
+  defaultSttModel,
   DEFAULT_TRANSCRIPT_MODE,
   GEMINI_MODEL_PATTERN,
   LANGUAGES,
   OPENAI_BASE_URLS,
-  STT_HOSTS,
+  normalizeOpenAiBaseUrl,
+  isCustomOpenAiBaseUrl,
 } from '@veritaslens/core';
 import type {
   AppMode,
@@ -53,6 +54,7 @@ import type {
   Settings,
   SttHost,
   TranscriptMode,
+  WebCitation,
 } from '@veritaslens/core';
 
 const emptyOpenaiKeys = (): Record<OpenAiBaseUrl, string> =>
@@ -78,12 +80,15 @@ const openaiKeyStorageKey = (baseUrl: OpenAiBaseUrl): string =>
 const SETTINGS_KEY_OPENAI_TRANSCRIBE_PREFIX = 'veritaslens.openaiTranscribeModel.';
 const openaiTranscribeStorageKey = (baseUrl: OpenAiBaseUrl): string =>
   `${SETTINGS_KEY_OPENAI_TRANSCRIBE_PREFIX}${baseUrl}`;
+const SETTINGS_KEY_OPENAI_CUSTOM_URLS = 'veritaslens.openaiCustomUrls';
 const SETTINGS_KEY_OPENAI_BASE_URL = 'veritaslens.openaiBaseUrl';
 const SETTINGS_KEY_OPENAI_MODEL = 'veritaslens.openaiModel';
 /** STT host used for chat-only providers (DeepSeek, Perplexity). One of `STT_HOSTS`. */
 const SETTINGS_KEY_STT_HOST = 'veritaslens.sttHost';
 /** Transcription model id on `sttHost`. Empty means "use the first entry of `STT_MODELS_BY_HOST[sttHost]`". */
 const SETTINGS_KEY_STT_MODEL = 'veritaslens.sttModel';
+const SETTINGS_KEY_OPENAI_FALLBACK_URLS = 'veritaslens.openaiFallbackUrls';
+const SETTINGS_KEY_STT_FALLBACK_URLS = 'veritaslens.sttFallbackUrls';
 const SETTINGS_KEY_LANGUAGE = 'veritaslens.responseLanguage';
 const SETTINGS_KEY_BUFFER_DURATION = 'veritaslens.bufferDuration';
 const SETTINGS_KEY_MIC_SOURCE = 'veritaslens.micSource';
@@ -220,7 +225,9 @@ const [settings, setSettings] = createSignal<Settings>({
   openaiModel: DEFAULT_OPENAI_MODEL,
   openaiTranscribeModels: emptyOpenaiKeys(),
   sttHost: DEFAULT_STT_HOST,
-  sttModel: DEFAULT_STT_MODEL,
+  sttModel: defaultSttModel(DEFAULT_STT_HOST),
+  openaiFallbackUrls: {},
+  sttFallbackUrls: {},
   responseLanguage: DEFAULT_LANGUAGE,
   bufferDuration: DEFAULT_BUFFER_DURATION,
   micSource: DEFAULT_MIC_SOURCE,
@@ -271,10 +278,26 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
   const safeGet = async (k: string): Promise<string> => {
     try { return await getLocalStorage(k); } catch { return ''; }
   };
-  const perHostKeyReads = OPENAI_BASE_URLS.map((u) =>
+  const [savedCustomUrls, rawActiveUrl, rawActiveSttUrl, rawChatFallbacks, rawSttFallbacks] = await Promise.all([
+    safeGet(SETTINGS_KEY_OPENAI_CUSTOM_URLS), safeGet(SETTINGS_KEY_OPENAI_BASE_URL),
+    safeGet(SETTINGS_KEY_STT_HOST), safeGet(SETTINGS_KEY_OPENAI_FALLBACK_URLS), safeGet(SETTINGS_KEY_STT_FALLBACK_URLS),
+  ]);
+  const customUrls: string[] = [];
+  try {
+    const parsed: unknown = JSON.parse(savedCustomUrls);
+    if (Array.isArray(parsed)) for (const raw of parsed) {
+      if (typeof raw !== 'string') continue;
+      try { customUrls.push(normalizeOpenAiBaseUrl(raw)); } catch { /* ignore corrupt URLs */ }
+    }
+  } catch { /* no custom endpoints yet */ }
+  for (const active of [rawActiveUrl, rawActiveSttUrl]) {
+    if (active) try { customUrls.push(normalizeOpenAiBaseUrl(active)); } catch { /* invalid saved URL */ }
+  }
+  const hosts = [...new Set([...OPENAI_BASE_URLS, ...customUrls])];
+  const perHostKeyReads = hosts.map((u) =>
     safeGet(openaiKeyStorageKey(u)).then((v) => [u, v] as const),
   );
-  const perHostTranscribeReads = OPENAI_BASE_URLS.map((u) =>
+  const perHostTranscribeReads = hosts.map((u) =>
     safeGet(openaiTranscribeStorageKey(u)).then((v) => [u, v] as const),
   );
   const [fixedReads, perHostKeys, perHostTranscribe] = await Promise.all([
@@ -286,7 +309,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_CLAUDE_KEY),
       safeGet(SETTINGS_KEY_CLAUDE_MODEL),
       safeGet(SETTINGS_KEY_OPENAI_KEY_LEGACY),
-      safeGet(SETTINGS_KEY_OPENAI_BASE_URL),
+      Promise.resolve(rawActiveUrl),
       safeGet(SETTINGS_KEY_OPENAI_MODEL),
       safeGet(SETTINGS_KEY_LANGUAGE),
       safeGet(SETTINGS_KEY_BUFFER_DURATION),
@@ -298,7 +321,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_VOICE_GATE_LEGACY),
       safeGet(SETTINGS_KEY_VOICE_TRIM),
       safeGet(SETTINGS_KEY_AUTO_DISABLED_LENSES),
-      safeGet(SETTINGS_KEY_STT_HOST),
+      Promise.resolve(rawActiveSttUrl),
       safeGet(SETTINGS_KEY_STT_MODEL),
       safeGet(SETTINGS_KEY_AUTO_MODE_ENABLED),
       safeGet(SETTINGS_KEY_AUTO_MODE_START_MS),
@@ -356,9 +379,9 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
   const openaiApiKeys = emptyOpenaiKeys();
   for (const entry of perHostKeys) {
     const [url, value] = entry as readonly [OpenAiBaseUrl, string];
-    if (value) openaiApiKeys[url] = value;
+    openaiApiKeys[url] = value ?? '';
   }
-  if (!openaiApiKeys[coercedBaseUrl] && rawLegacyOpenaiKey) {
+  if (!isCustomOpenAiBaseUrl(coercedBaseUrl) && !openaiApiKeys[coercedBaseUrl] && rawLegacyOpenaiKey) {
     openaiApiKeys[coercedBaseUrl] = rawLegacyOpenaiKey;
   }
   const openaiTranscribeModels = emptyOpenaiKeys();
@@ -378,7 +401,9 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     openaiModel: rawOpenaiModel || DEFAULT_OPENAI_MODEL,
     openaiTranscribeModels,
     sttHost: coerceSttHost(rawSttHost),
-    sttModel: rawSttModel || DEFAULT_STT_MODEL,
+    sttModel: rawSttModel || defaultSttModel(coerceSttHost(rawSttHost)),
+    openaiFallbackUrls: coerceFallbackMap(rawChatFallbacks),
+    sttFallbackUrls: coerceFallbackMap(rawSttFallbacks),
     responseLanguage: coerceLanguage(rawLang),
     bufferDuration: coerceBufferDuration(rawBuffer),
     // Only 'phone' opts out of the glasses default; empty/garbage falls back to
@@ -549,7 +574,8 @@ export async function saveOpenaiKeys(
   keys: Record<OpenAiBaseUrl, string>,
 ): Promise<boolean> {
   const writes = await Promise.all(
-    OPENAI_BASE_URLS.map((u) => setLs(openaiKeyStorageKey(u), keys[u] ?? '')),
+    [...Object.keys(keys).map((u) => setLs(openaiKeyStorageKey(u), keys[u] ?? '')),
+      setLs(SETTINGS_KEY_OPENAI_CUSTOM_URLS, JSON.stringify(Object.keys(keys).filter(isCustomOpenAiBaseUrl)))],
   );
   const ok = writes.every(Boolean);
   if (ok) setSettings({ ...settings(), openaiApiKeys: { ...keys } });
@@ -557,13 +583,13 @@ export async function saveOpenaiKeys(
 }
 
 export const saveOpenaiBaseUrl = (setLs: SetLs, url: OpenAiBaseUrl): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_OPENAI_BASE_URL, 'openaiBaseUrl', url);
+  saveSetting(setLs, SETTINGS_KEY_OPENAI_BASE_URL, 'openaiBaseUrl', normalizeOpenAiBaseUrl(url));
 
 export const saveOpenaiModel = (setLs: SetLs, model: string): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_OPENAI_MODEL, 'openaiModel', model);
 
 export const saveSttHost = (setLs: SetLs, host: SttHost): Promise<boolean> =>
-  saveSetting(setLs, SETTINGS_KEY_STT_HOST, 'sttHost', host);
+  saveSetting(setLs, SETTINGS_KEY_STT_HOST, 'sttHost', normalizeOpenAiBaseUrl(host));
 
 export const saveSttModel = (setLs: SetLs, model: string): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_STT_MODEL, 'sttModel', model);
@@ -578,7 +604,7 @@ export async function saveOpenaiTranscribeModels(
   models: Record<OpenAiBaseUrl, string>,
 ): Promise<boolean> {
   const writes = await Promise.all(
-    OPENAI_BASE_URLS.map((u) => setLs(openaiTranscribeStorageKey(u), models[u] ?? '')),
+    Object.keys(models).map((u) => setLs(openaiTranscribeStorageKey(u), models[u] ?? '')),
   );
   const ok = writes.every(Boolean);
   if (ok) setSettings({ ...settings(), openaiTranscribeModels: { ...models } });
@@ -807,6 +833,13 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
   const persistedGrounding = e['groundingMode'] === 'grounded' || e['groundingMode'] === 'groundless'
     ? (e['groundingMode'] as 'grounded' | 'groundless')
     : undefined;
+  const persistedCitations = Array.isArray(e['webCitations'])
+    ? e['webCitations'].filter((c): c is WebCitation =>
+        c !== null && typeof c === 'object' &&
+        typeof c.domain === 'string' && c.domain.trim().length > 0 &&
+        ['url', 'title', 'snippet'].every((key) => c[key] === undefined || typeof c[key] === 'string'),
+      ).slice(0, 20)
+    : [];
   return {
     id: String(e['id'] ?? `${Date.now()}-mig`),
     sessionId: String(e['sessionId'] ?? ''),
@@ -819,6 +852,7 @@ function migrateEntry(raw: unknown): HistoryEntry | null {
     result: migratedResult as HistoryEntry['result'],
     ...(persistedTags ? { tags: persistedTags } : {}),
     ...(persistedGrounding ? { groundingMode: persistedGrounding } : {}),
+    ...(persistedCitations.length > 0 ? { webCitations: persistedCitations } : {}),
   };
 }
 
@@ -927,18 +961,58 @@ function coerceClaudeModel(raw: string | null | undefined): ClaudeModel {
 }
 
 function coerceOpenaiBaseUrl(raw: string | null | undefined): OpenAiBaseUrl {
-  if (raw && (OPENAI_BASE_URLS as readonly string[]).includes(raw)) {
-    return raw as OpenAiBaseUrl;
+  if (raw) {
+    try { return normalizeOpenAiBaseUrl(raw); } catch { /* invalid saved URL */ }
   }
   return DEFAULT_OPENAI_BASE_URL;
 }
 
 function coerceSttHost(raw: string | null | undefined): SttHost {
-  if (raw && (STT_HOSTS as readonly string[]).includes(raw)) {
-    return raw as SttHost;
-  }
+  if (raw) try { return normalizeOpenAiBaseUrl(raw); } catch { /* invalid saved URL */ }
   return DEFAULT_STT_HOST;
 }
+
+/** Alternate addresses are ordered and share the primary server's credentials. */
+export function normalizeFallbackUrls(primary: string, urls: readonly string[]): string[] {
+  const base = normalizeOpenAiBaseUrl(primary);
+  return [...new Set(urls.filter((url) => url.trim()).map(normalizeOpenAiBaseUrl))]
+    .filter((url) => url !== base);
+}
+
+function coerceFallbackMap(raw: string): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return result;
+    for (const [primary, entries] of Object.entries(parsed)) {
+      try {
+        const base = normalizeOpenAiBaseUrl(primary);
+        if (!Array.isArray(entries)) continue;
+        const urls: string[] = [];
+        for (const value of entries) {
+          if (typeof value !== 'string') continue;
+          try { urls.push(normalizeOpenAiBaseUrl(value)); } catch { /* skip corrupt alternate */ }
+        }
+        result[base] = normalizeFallbackUrls(base, urls);
+      } catch { /* skip corrupt primary */ }
+    }
+  } catch { /* no saved fallbacks */ }
+  return result;
+}
+
+async function saveFallbackMap(setLs: SetLs, field: 'openaiFallbackUrls' | 'sttFallbackUrls', values: Record<string, string[]>): Promise<boolean> {
+  const normalized = Object.fromEntries(Object.entries(values)
+    .map(([primary, urls]) => [normalizeOpenAiBaseUrl(primary), normalizeFallbackUrls(primary, urls)]));
+  const key = field === 'openaiFallbackUrls' ? SETTINGS_KEY_OPENAI_FALLBACK_URLS : SETTINGS_KEY_STT_FALLBACK_URLS;
+  const ok = await setLs(key, JSON.stringify(normalized));
+  if (ok) setSettings({ ...settings(), [field]: normalized });
+  return ok;
+}
+
+export const saveOpenaiFallbackUrls = (setLs: SetLs, values: Record<string, string[]>) =>
+  saveFallbackMap(setLs, 'openaiFallbackUrls', values);
+export const saveSttFallbackUrls = (setLs: SetLs, values: Record<string, string[]>) =>
+  saveFallbackMap(setLs, 'sttFallbackUrls', values);
 
 function coerceAutoDisabledLenses(raw: string): string[] {
   try {

@@ -53,6 +53,9 @@ import {
   saveProvider,
   saveSttHost,
   saveSttModel,
+  saveOpenaiFallbackUrls,
+  saveSttFallbackUrls,
+  normalizeFallbackUrls,
   saveResponseLanguage,
   saveTranscriptMode,
   saveTranslationMode,
@@ -64,7 +67,8 @@ import {
   settings,
 } from '@/state/store';
 import { getBridge } from '@/runtime/bridge';
-import { isHudRunning, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
+import { ApiKeyInput, SettingsIcon, lensDescription } from '@/views/SettingsUi';
+import { isHudRunning, providerConfigurationError, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import { probeAndCacheLocation, probeLocation } from '@/runtime/location';
 import {
   resolveProviderGrounding,
@@ -74,11 +78,15 @@ import {
   CLAUDE_MODELS,
   LANGUAGES,
   OPENAI_BASE_URLS,
-  OPENAI_CHAT_ONLY_HOSTS,
+  isOpenAiChatOnlyHost,
+  isCustomOpenAiBaseUrl,
+  normalizeOpenAiBaseUrl,
   OPENAI_INLINE_AUDIO_HOSTS,
   OPENAI_TRANSCRIBE_MODELS,
   STT_HOSTS,
   STT_MODELS_BY_HOST,
+  isCustomSttHost,
+  defaultSttModel,
   gameDifficultyLabel,
   gameFormatLabel,
   openaiHostLabel,
@@ -114,7 +122,7 @@ const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
 ];
 
 const MIC_SOURCE_OPTIONS: { value: MicSource; label: string }[] = [
-  { value: 'glasses', label: 'Glasses (default)' },
+  { value: 'glasses', label: 'Glasses' },
   { value: 'phone', label: 'Phone' },
 ];
 
@@ -142,7 +150,7 @@ const PROVIDER_OPTIONS: ProviderOption[] = [
 function providerOptionValue(provider: LlmProvider, baseUrl: OpenAiBaseUrl): string {
   if (provider === 'gemini') return 'gemini';
   if (provider === 'claude') return 'claude';
-  return `openai-compatible:${baseUrl}`;
+  return isCustomOpenAiBaseUrl(baseUrl) ? 'custom' : `openai-compatible:${baseUrl}`;
 }
 
 /**
@@ -158,6 +166,7 @@ function openaiKeyPlaceholder(baseUrl: OpenAiBaseUrl): string {
     case 'https://openrouter.ai/api/v1': return 'sk-or-…';
     case 'https://api.deepseek.com/v1': return 'sk-…';
     case 'https://api.perplexity.ai': return 'pplx-…';
+    default: return 'Optional API key';
   }
 }
 
@@ -175,19 +184,19 @@ function openaiKeyPlaceholder(baseUrl: OpenAiBaseUrl): string {
 const ApiKeyLink: Component<{ host: OpenAiBaseUrl }> = (props) => (
   <Switch>
     <Match when={props.host === 'https://api.openai.com/v1'}>
-      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">platform.openai.com/api-keys</a>
+      <a href="https://platform.openai.com/api-keys" target="_blank" rel="noreferrer">Get an API key</a>
     </Match>
     <Match when={props.host === 'https://api.groq.com/openai/v1'}>
-      <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">console.groq.com/keys</a>
+      <a href="https://console.groq.com/keys" target="_blank" rel="noreferrer">Get an API key</a>
     </Match>
     <Match when={props.host === 'https://openrouter.ai/api/v1'}>
-      <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">openrouter.ai/keys</a>
+      <a href="https://openrouter.ai/keys" target="_blank" rel="noreferrer">Get an API key</a>
     </Match>
     <Match when={props.host === 'https://api.deepseek.com/v1'}>
-      <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">platform.deepseek.com/api_keys</a>
+      <a href="https://platform.deepseek.com/api_keys" target="_blank" rel="noreferrer">Get an API key</a>
     </Match>
     <Match when={props.host === 'https://api.perplexity.ai'}>
-      <a href="https://www.perplexity.ai/settings/api" target="_blank" rel="noreferrer">perplexity.ai/settings/api</a>
+      <a href="https://www.perplexity.ai/settings/api" target="_blank" rel="noreferrer">Get an API key</a>
     </Match>
   </Switch>
 );
@@ -403,6 +412,13 @@ export const SettingsView: Component = () => {
   // value for whichever host is currently selected in the Provider dropdown.
   const [draftOpenaiKeys, setDraftOpenaiKeys] = createSignal<Record<OpenAiBaseUrl, string>>({ ...settings().openaiApiKeys });
   const [draftOpenaiBaseUrl, setDraftOpenaiBaseUrl] = createSignal<OpenAiBaseUrl>(settings().openaiBaseUrl);
+  const [draftCustomUrl, setDraftCustomUrl] = createSignal(isCustomOpenAiBaseUrl(settings().openaiBaseUrl) ? settings().openaiBaseUrl : '');
+  const isCustomEndpoint = () => draftProvider() === 'openai-compatible' && isCustomOpenAiBaseUrl(draftOpenaiBaseUrl());
+  const customUrlError = (): string | null => {
+    if (!isCustomEndpoint()) return null;
+    try { normalizeOpenAiBaseUrl(draftCustomUrl()); return null; }
+    catch (err) { return err instanceof Error ? err.message : String(err); }
+  };
   const draftOpenaiKey = (): string => draftOpenaiKeys()[draftOpenaiBaseUrl()] ?? '';
   const setDraftOpenaiKey = (key: string): void => {
     setDraftOpenaiKeys((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: key }));
@@ -422,12 +438,40 @@ export const SettingsView: Component = () => {
   const isInlineAudioHost = (baseUrl: OpenAiBaseUrl): boolean =>
     OPENAI_INLINE_AUDIO_HOSTS.has(baseUrl);
   const isChatOnlyHost = (baseUrl: OpenAiBaseUrl): boolean =>
-    OPENAI_CHAT_ONLY_HOSTS.has(baseUrl);
+    isOpenAiChatOnlyHost(baseUrl);
   // Cross-host STT draft. Used only when the active chat host is in
   // OPENAI_CHAT_ONLY_HOSTS — for everyone else, the per-chat-host transcribe
   // override above (draftOpenaiTranscribeModel) carries the same role.
   const [draftSttHost, setDraftSttHost] = createSignal<SttHost>(settings().sttHost);
   const [draftSttModel, setDraftSttModel] = createSignal<string>(settings().sttModel);
+  const [draftCustomSttModel, setDraftCustomSttModel] = createSignal(isCustomSttHost(settings().sttHost) ? settings().sttModel : '');
+  const [draftCustomSttUrl, setDraftCustomSttUrl] = createSignal(isCustomSttHost(settings().sttHost) ? settings().sttHost : '');
+  const fallbackTextMap = (map: Record<string, string[]> | undefined): Record<string, string> =>
+    Object.fromEntries(Object.entries(map ?? {}).map(([url, entries]) => [url, entries.join('\n')]));
+  const [draftChatFallbacks, setDraftChatFallbacks] = createSignal(fallbackTextMap(settings().openaiFallbackUrls));
+  const [draftSttFallbacks, setDraftSttFallbacks] = createSignal(fallbackTextMap(settings().sttFallbackUrls));
+  const normalizeFallbackDraft = (map: Record<string, string>): Record<string, string[]> =>
+    Object.fromEntries(Object.entries(map).filter(([primary]) => primary.trim())
+      .map(([primary, text]) => [normalizeOpenAiBaseUrl(primary), normalizeFallbackUrls(primary, text.split('\n'))]));
+  const fallbackError = (): string | null => {
+    try { normalizeFallbackDraft(draftChatFallbacks()); normalizeFallbackDraft(draftSttFallbacks()); return null; }
+    catch (err) { return err instanceof Error ? err.message : String(err); }
+  };
+  const sttUrlError = (): string | null => {
+    try { normalizeOpenAiBaseUrl(draftSttHost()); return null; }
+    catch (err) { return err instanceof Error ? err.message : String(err); }
+  };
+  const needsDraftStt = () => draftProvider() === 'claude'
+    || (draftProvider() === 'openai-compatible' && isChatOnlyHost(draftOpenaiBaseUrl()));
+  const sttDraftError = (): string | null => {
+    if (sttUrlError()) return sttUrlError();
+    if (!(draftSttModel().trim() || defaultSttModel(draftSttHost()))) return 'Enter a speech-to-text model ID.';
+    if (needsDraftStt() && !isCustomSttHost(draftSttHost()) && !(draftOpenaiKeys()[draftSttHost()] ?? '').trim()) {
+      return `Add a ${openaiHostLabel(draftSttHost())} speech-to-text API key.`;
+    }
+    return null;
+  };
+
   const [openaiModels, setOpenaiModels] = createSignal<string[]>([]);
   const [openaiModelsLoading, setOpenaiModelsLoading] = createSignal(false);
   // Outcome of the most recent /models probe per provider. Used to gate
@@ -738,6 +782,43 @@ export const SettingsView: Component = () => {
     mainTest().state === 'running' || autoTest().state === 'running';
   type SettingsTab = 'lenses' | 'history' | 'settings' | 'llm';
   const [activeTab, setActiveTab] = createSignal<SettingsTab>('lenses');
+  const pageCopy = {
+    lenses: { title: 'Your lenses', description: 'Choose a lens on your glasses. Double-tap to analyze.' },
+    history: { title: 'History', description: 'A second look at the conversation.' },
+    settings: { title: 'Settings', description: 'Fine-tune your listening experience.' },
+    llm: { title: 'AI setup', description: 'Bring your provider. Make it yours.' },
+  };
+  const changeTab = (tab: SettingsTab): void => {
+    setActiveTab(tab);
+    window.scrollTo({ top: 0, behavior: 'instant' });
+  };
+  const lensRows = createMemo(() => {
+    const primary = ['auto', 'translation', MEETING_PREP_ID];
+    const all = personas();
+    return [
+      ...primary.flatMap((id) => all.filter((p) => p.id === id)),
+      ...all.filter((p) => !primary.includes(p.id)),
+    ];
+  });
+  const providerHint = createMemo(() => {
+    if (draftProvider() === 'gemini') return 'Understands audio directly. Supports web search.';
+    if (draftProvider() === 'claude') return 'Uses a separate speech-to-text provider to listen.';
+    if (isInlineAudioHost(draftOpenaiBaseUrl())) return 'Sends audio directly to an audio-capable model.';
+    if (isChatOnlyHost(draftOpenaiBaseUrl())) return 'Uses a separate speech-to-text provider to listen.';
+    return 'Transcribes your audio, then analyzes the conversation.';
+  });
+  // Keep typing above the keyboard in WebViews that do not resize the page.
+  const [keyboardInset, setKeyboardInset] = createSignal(0);
+  const updateKeyboardInset = (): void => {
+    const viewport = window.visualViewport;
+    setKeyboardInset(viewport ? Math.max(0, window.innerHeight - viewport.height - viewport.offsetTop) : 0);
+  };
+  window.visualViewport?.addEventListener('resize', updateKeyboardInset);
+  window.visualViewport?.addEventListener('scroll', updateKeyboardInset);
+  onCleanup(() => {
+    window.visualViewport?.removeEventListener('resize', updateKeyboardInset);
+    window.visualViewport?.removeEventListener('scroll', updateKeyboardInset);
+  });
 
   // Session log navigation
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
@@ -834,13 +915,17 @@ export const SettingsView: Component = () => {
       .finally(() => { if (!ac.signal.aborted) setModelsLoading(false); });
   }
 
+  let openaiModelsController: AbortController | null = null;
   function refreshOpenAiModels(): void {
-    if (openaiModelsLoading() || draftOpenaiKey().trim().length < 10) return;
+    if (openaiModelsLoading() || customUrlError() || fallbackError() || (!isCustomEndpoint() && draftOpenaiKey().trim().length < 10)) return;
     if (openaiModels().length > 0) return;
     const ac = new AbortController();
+    openaiModelsController?.abort();
+    openaiModelsController = ac;
     setOpenaiModelsLoading(true);
     setOpenaiFetchState('loading');
-    void fetchOpenAiModels(draftOpenaiKey(), draftOpenaiBaseUrl(), ac.signal)
+    void fetchOpenAiModels(draftOpenaiKey(), draftOpenaiBaseUrl(), ac.signal,
+      normalizeFallbackUrls(draftOpenaiBaseUrl(), (draftChatFallbacks()[draftOpenaiBaseUrl()] ?? '').split('\n')))
       .then((models) => {
         if (ac.signal.aborted) return;
         if (models.length > 0) {
@@ -875,9 +960,15 @@ export const SettingsView: Component = () => {
   }, { defer: true }));
 
   let openaiKeyDebounce: ReturnType<typeof setTimeout> | null = null;
-  createEffect(on([draftOpenaiKey, draftOpenaiBaseUrl], ([key]) => {
+  createEffect(on([draftOpenaiKey, draftOpenaiBaseUrl, draftProvider], ([key]) => {
+    openaiModelsController?.abort();
+    openaiModelsController = null;
+    setOpenaiModels([]);
+    setOpenaiModelsLoading(false);
+    setOpenaiFetchState('idle');
     if (openaiKeyDebounce) clearTimeout(openaiKeyDebounce);
     if (draftProvider() !== 'openai-compatible') return;
+    if (isCustomEndpoint()) { setOpenaiModels([]); setOpenaiFetchState('idle'); return; }
     if (key.trim().length < 10) return;
     openaiKeyDebounce = setTimeout(() => {
       setOpenaiModels([]);
@@ -889,6 +980,7 @@ export const SettingsView: Component = () => {
   onCleanup(() => {
     if (geminiKeyDebounce) clearTimeout(geminiKeyDebounce);
     if (openaiKeyDebounce) clearTimeout(openaiKeyDebounce);
+    openaiModelsController?.abort();
   });
 
   /**
@@ -904,7 +996,7 @@ export const SettingsView: Component = () => {
    */
   const canSave = createMemo(() => {
     const provider = draftProvider();
-    if (mainTest().state === 'fail' || autoTest().state === 'fail') return false;
+    if (mainTest().state === 'fail' || autoTest().state === 'fail' || fallbackError() || sttDraftError()) return false;
     if (provider === 'gemini') {
       if (draftKey().trim().length < 10) return false;
       const st = geminiFetchState();
@@ -913,11 +1005,13 @@ export const SettingsView: Component = () => {
       if (draftClaudeKey().trim().length < 10) return false;
       const st = claudeFetchState();
       if (st === 'loading' || st === 'fail') return false;
-      // Claude needs an STT key too — fail-fast in the UI rather than at first
-      // call. Reads from the saved store (not the draft) since the STT key
-      // lives in the openai-compatible tab's per-host slot.
-      if (!(settings().openaiApiKeys[draftSttHost()] ?? '').trim()) return false;
+
     } else {
+      if (isCustomEndpoint()) {
+        if (customUrlError() || !draftOpenaiModel().trim()) return false;
+
+        return true;
+      }
       if (draftOpenaiKey().trim().length < 10) return false;
       const st = openaiFetchState();
       if (st === 'loading' || st === 'fail') return false;
@@ -1034,6 +1128,9 @@ export const SettingsView: Component = () => {
    * refreshes when both tabs are dirty.
    */
   const onSave = async () => {
+    if (customUrlError() || sttDraftError() || fallbackError()) { setKeyError(customUrlError() || sttDraftError() || fallbackError()); return; }
+    if (isCustomEndpoint()) setDraftOpenaiKeys((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: draftOpenaiKey() }));
+    if (isCustomSttHost(draftSttHost())) setDraftOpenaiKeys((prev) => ({ ...prev, [draftSttHost()]: prev[draftSttHost()] ?? '' }));
     setSaveState('saving');
     try {
       const bridge = getBridge();
@@ -1055,6 +1152,8 @@ export const SettingsView: Component = () => {
         openaiTranscribe,
         sttHost,
         sttModel,
+        chatFallbacks,
+        sttFallbacks,
         language,
         buffer,
         micSource,
@@ -1091,7 +1190,9 @@ export const SettingsView: Component = () => {
           (Object.entries(draftOpenaiTranscribeModels()) as Array<[OpenAiBaseUrl, string]>).map(([u, v]) => [u, v.trim()]),
         ) as Record<OpenAiBaseUrl, string>),
         saveSttHost(setLs, draftSttHost()),
-        saveSttModel(setLs, draftSttModel().trim()),
+        saveSttModel(setLs, draftSttModel().trim() || defaultSttModel(draftSttHost())),
+        saveOpenaiFallbackUrls(setLs, normalizeFallbackDraft(draftChatFallbacks())),
+        saveSttFallbackUrls(setLs, normalizeFallbackDraft(draftSttFallbacks())),
         saveResponseLanguage(setLs, draftLanguage()),
         saveBufferDuration(setLs, draftBuffer()),
         saveMicSource(setLs, draftMicSource()),
@@ -1117,7 +1218,7 @@ export const SettingsView: Component = () => {
       else setPrepError(prepResult.error ?? 'Could not save meeting prep.');
       const allOk = [
         provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, openaiKeys,
-        openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel,
+        openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel, chatFallbacks, sttFallbacks,
         language, buffer, micSource, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim,
         autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
         romanize, translationSourceLangs, transcriptMode, prepWebGrounding,
@@ -1144,6 +1245,11 @@ export const SettingsView: Component = () => {
         // clears even when the save was a no-op (e.g. the wearer toggled then
         // toggled back before pressing Save).
         setDraftMeetingPrepWebGrounding(meetingPrepWebGrounding());
+        setDraftChatFallbacks(fallbackTextMap(settings().openaiFallbackUrls));
+        setDraftSttFallbacks(fallbackTextMap(settings().sttFallbackUrls));
+        setDraftSttModel(settings().sttModel);
+        setDraftSttHost(settings().sttHost);
+        if (isCustomSttHost(settings().sttHost)) setDraftCustomSttUrl(settings().sttHost);
         setSaveState('saved');
         if (savedFadeTimer) clearTimeout(savedFadeTimer);
         savedFadeTimer = setTimeout(() => setSaveState('idle'), 1500);
@@ -1168,10 +1274,7 @@ export const SettingsView: Component = () => {
 
   /**
    * Dirty flags: drafts vs persisted store. Drive the cross-tab "unsaved
-   * changes" bar that surfaces above the bottom nav when the user navigates
-   * away from a tab without saving. The bar only fires for tabs the user
-   * isn't currently looking at — when they're on the tab itself, the in-tab
-   * Save button is already visible.
+   * changes" bar above the bottom navigation on every tab.
    */
   const shallowRecordEq = (
     a: Record<string, string>,
@@ -1198,6 +1301,8 @@ export const SettingsView: Component = () => {
       || !shallowRecordEq(draftOpenaiTranscribeModels() as Record<string, string>, s.openaiTranscribeModels as Record<string, string>)
       || draftSttHost() !== s.sttHost
       || draftSttModel() !== s.sttModel
+      || !shallowRecordEq(draftChatFallbacks(), fallbackTextMap(s.openaiFallbackUrls))
+      || !shallowRecordEq(draftSttFallbacks(), fallbackTextMap(s.sttFallbackUrls))
     );
   });
   const appDirty = createMemo(() => {
@@ -1288,7 +1393,8 @@ export const SettingsView: Component = () => {
     // Pre-flight: a missing API key isn't a model failure, so surface it on
     // the key input instead of as a model-test result. Skips the network call
     // entirely (and avoids polluting `mainTest` with a key-shaped error).
-    if (apiKey.trim().length < 10) {
+    if (customUrlError() || fallbackError() || (needsDraftStt() && sttDraftError())) { setKeyError(customUrlError() || fallbackError() || sttDraftError()); return; }
+    if (apiKey.trim().length < 10 && !(isOpenAi && isCustomEndpoint())) {
       setKeyError(
         isClaude
           ? 'Missing Anthropic API key.'
@@ -1311,14 +1417,16 @@ export const SettingsView: Component = () => {
     // audio hosts (OpenRouter) skip transcription entirely — pass undefined.
     // Chat-only hosts (DeepSeek, Perplexity) borrow STT from draftSttHost
     // and use that host's key from the per-host key draft.
-    const isChatOnly = isOpenAi && isChatOnlyHost(baseUrl);
+    const isChatOnly = isClaude || (isOpenAi && isChatOnlyHost(baseUrl));
     const draftTranscribe = isOpenAi && !isInlineAudioHost(baseUrl) && !isChatOnly
       ? (draftOpenaiTranscribeModel().trim() || undefined)
       : undefined;
-    const sttDraftHost: SttHost | undefined = isChatOnly ? draftSttHost() : undefined;
-    const sttDraftModel = isChatOnly ? (draftSttModel().trim() || undefined) : undefined;
-    const sttDraftApiKey = isChatOnly ? (draftOpenaiKeys()[draftSttHost()] ?? '').trim() : undefined;
-    if (isChatOnly && !sttDraftApiKey) {
+    const sttDraftHost: SttHost = draftSttHost();
+    const sttDraftModel = draftSttModel().trim() || defaultSttModel(sttDraftHost);
+    const sttDraftApiKey = (draftOpenaiKeys()[draftSttHost()] ?? '').trim();
+    const testStt = isChatOnly || (draftTranscriptMode() !== 'off'
+      && (isCustomSttHost(sttDraftHost) || !!sttDraftApiKey));
+    if (isChatOnly && !isCustomSttHost(sttDraftHost) && !sttDraftApiKey) {
       // STT key input lives right below the host picker — surface a hint
       // pointing at it rather than asking the user to navigate elsewhere.
       setKeyError(`Add a ${openaiHostLabel(draftSttHost())} API key in the Speech-to-text section so ${openaiHostLabel(baseUrl)} can transcribe.`);
@@ -1335,9 +1443,11 @@ export const SettingsView: Component = () => {
           provider,
           baseUrl,
           transcribeModel: draftTranscribe,
-          sttHost: sttDraftHost,
-          sttModel: sttDraftModel,
-          sttApiKey: sttDraftApiKey,
+          sttHost: testStt ? sttDraftHost : undefined,
+          sttModel: testStt ? sttDraftModel : undefined,
+          sttApiKey: testStt ? sttDraftApiKey : undefined,
+          fallbackUrls: isOpenAi ? normalizeFallbackUrls(baseUrl, (draftChatFallbacks()[baseUrl] ?? '').split('\n')) : undefined,
+          sttFallbackUrls: normalizeFallbackUrls(sttDraftHost, (draftSttFallbacks()[sttDraftHost] ?? '').split('\n')),
           lightweight: probeOpts?.lightweight,
         });
         return { state: 'ok', message: `Works · ${r.latencyMs} ms` };
@@ -1422,7 +1532,12 @@ export const SettingsView: Component = () => {
     <div class="search-results">
       <Show
         when={props.matches.length > 0}
-        fallback={<p class="muted">No matches for “{searchQuery()}”.</p>}
+        fallback={<div class="empty-state empty-state--search">
+          <span class="empty-state-symbol"><SettingsIcon name="search" /></span>
+          <h2>No matching moments</h2>
+          <p>Try a different word, lens, or topic.</p>
+          <button type="button" class="secondary" onClick={() => setSearchQuery('')}>Clear search</button>
+        </div>}
       >
         <ul class="history-list">
           <For each={props.matches}>
@@ -1459,7 +1574,14 @@ export const SettingsView: Component = () => {
     <div class="session-list">
       <Show
         when={sessionGroups().length > 0}
-        fallback={<p class="muted">No analyses yet this session.</p>}
+        fallback={
+          <div class="empty-state">
+            <span class="empty-state-symbol"><SettingsIcon name="history" /></span>
+            <h2>Your moments, remembered</h2>
+            <p>Analyses from your glasses will appear here, ready to revisit.</p>
+            <button type="button" class="secondary" onClick={() => changeTab('lenses')}>Explore lenses</button>
+          </div>
+        }
       >
         <Show
           when={pendingDeleteId() === '__all__'}
@@ -1551,48 +1673,64 @@ export const SettingsView: Component = () => {
     </div>
   );
 
-  return (
-    <main class="settings">
-      <header>
-        <h1>VeritasLens</h1>
-        <p class="tagline">Silent intelligence for your G2.</p>
-      </header>
+  const hasUnsavedChanges = createMemo(() => llmDirty() || appDirty() || lensDirty());
+  const savedWithoutChanges = (): boolean => saveState() === 'saved' && !hasUnsavedChanges();
 
+  return (
+    <main class="settings" style={{ '--keyboard-inset': `${keyboardInset()}px` }}>
+      <header class="app-header">
+        <div class="brand"><SettingsIcon name="lens" /><span>VeritasLens</span></div>
+        <div class="device-status" role="status">
+          <span class="device-dot" classList={{ connected: deviceStatus()?.connectType === 'connected' }} />
+          <Show when={deviceStatus()} fallback={<span>G2 offline</span>}>
+            {(status) => <>
+              <span>{status().connectType === 'connected' ? 'G2 connected'
+                : status().connectType === 'connecting' ? 'Connecting' : 'G2 offline'}</span>
+              <Show when={typeof status().batteryLevel === 'number'}>
+                <span class="device-battery">{status().batteryLevel}%</span>
+              </Show>
+            </>}
+          </Show>
+        </div>
+      </header>
+      <div class="page-heading">
+        <h1>{pageCopy[activeTab()].title}</h1>
+        <p>{pageCopy[activeTab()].description}</p>
+      </div>
+
+      <div class="tab-content" id="settings-panel" role="tabpanel" aria-labelledby={`tab-${activeTab()}`}>
       <Show when={activeTab() === 'lenses'}>
         <>
-          <Show
-            when={deviceStatus()}
-            fallback={<div class="device-badge muted">Waiting for glasses…</div>}
-          >
-            {(s) => (
-              <div class="device-badge">
-                <span class={`dot ${s().connectType}`} />
-                <span>{s().connectType}</span>
-                <Show when={typeof s().batteryLevel === 'number'}>
-                  <span class="sep">·</span>
-                  <span>{s().batteryLevel}%</span>
-                </Show>
-                <Show when={s().isWearing}>
-                  <span class="sep">·</span>
-                  <span>wearing</span>
-                </Show>
+          <Show when={providerConfigurationError(settings()) !== null}>
+            <section class="setup-prompt" aria-label="Connect your AI">
+              <div class="setup-prompt-copy">
+                <SettingsIcon name="ai" />
+                <div><h2>Connect your AI</h2><p>Add a provider and API key to get started.</p></div>
               </div>
-            )}
+              <button type="button" class="primary" onClick={() => changeTab('llm')}>
+                Set up AI <SettingsIcon name="arrow" />
+              </button>
+            </section>
           </Show>
 
-          <section class="lenses-card">
+          <section class="lenses-card lens-catalog">
             <div class="field-header">
-              <span class="field-label">Lenses</span>
+              <h2>Everyday lenses</h2>
             </div>
             <ul class="lens-list">
-              <For each={personas()}>
-                {(p) => (
+              <For each={lensRows()}>
+                {(p, index) => (
+                  <>
+                  <Show when={index() === 3}>
+                    <li class="lens-group-heading"><h2>Specialized lenses</h2></li>
+                  </Show>
                   <Switch
                     fallback={
-                      <li class="lens-row">
+                      <li class="lens-row lens-row--catalog">
+                        <span class="lens-symbol"><SettingsIcon name={p.id} /></span>
                         <div class="lens-info">
                           <strong>{p.name}</strong>
-                          <span class="lens-desc">{p.description}</span>
+                          <span class="lens-desc">{lensDescription(p.id, p.description)}</span>
                         </div>
                       </li>
                     }
@@ -1603,6 +1741,7 @@ export const SettingsView: Component = () => {
                         classList={{ 'lens-row--open': autoConfigExpanded() }}
                       >
                         <div class="lens-row-head">
+                          <span class="lens-symbol"><SettingsIcon name={p.id} /></span>
                           <div class="lens-row-title">
                             <strong>{p.name}</strong>
                             <span class="lens-tag lens-tag--ok">
@@ -1610,12 +1749,13 @@ export const SettingsView: Component = () => {
                             </span>
                           </div>
                           <div class="lens-row-sub">
-                            <span class="lens-desc">{p.description}</span>
+                            <span class="lens-desc">{lensDescription(p.id, p.description)}</span>
                             <button
                               type="button"
                               class="meeting-prep-trigger"
                               classList={{ open: autoConfigExpanded() }}
                               aria-expanded={autoConfigExpanded()}
+                              aria-label={autoConfigExpanded() ? 'Close Auto settings' : 'Configure Auto'}
                               onClick={() => setAutoConfigExpanded((v) => !v)}
                             >
                               <span>{autoConfigExpanded() ? 'Done' : 'Configure'}</span>
@@ -1662,6 +1802,7 @@ export const SettingsView: Component = () => {
                         classList={{ 'lens-row--open': translationConfigExpanded() }}
                       >
                         <div class="lens-row-head">
+                          <span class="lens-symbol"><SettingsIcon name={p.id} /></span>
                           <div class="lens-row-title">
                             <strong>{p.name}</strong>
                             <span class="lens-tag lens-tag--ok">
@@ -1673,12 +1814,13 @@ export const SettingsView: Component = () => {
                             </span>
                           </div>
                           <div class="lens-row-sub">
-                            <span class="lens-desc">{p.description}</span>
+                            <span class="lens-desc">{lensDescription(p.id, p.description)}</span>
                             <button
                               type="button"
                               class="meeting-prep-trigger"
                               classList={{ open: translationConfigExpanded() }}
                               aria-expanded={translationConfigExpanded()}
+                              aria-label={translationConfigExpanded() ? 'Close Translate settings' : 'Configure Translate'}
                               onClick={() => setTranslationConfigExpanded((v) => !v)}
                             >
                               <span>{translationConfigExpanded() ? 'Done' : 'Configure'}</span>
@@ -1703,7 +1845,7 @@ export const SettingsView: Component = () => {
                                 languages so you can hold up your end of a conversation;
                                 <strong> Listen-in</strong> drops the starters so you just see what's
                                 being said (cheaper request and a less crowded HUD). Tip: enable
-                                Auto mode in the App tab for hands-free continuous translation.
+                                Auto mode in Settings for hands-free continuous translation.
                               </span>
                               <label class="toggle-row" style="margin-top: 8px;">
                                 <input
@@ -1785,6 +1927,7 @@ export const SettingsView: Component = () => {
                         classList={{ 'lens-row--open': prepExpanded() }}
                       >
                         <div class="lens-row-head">
+                          <span class="lens-symbol"><SettingsIcon name={p.id} /></span>
                           {/* Row 1 — title left, badge right. Full row width so
                               the badge actually reaches the row's right edge. */}
                           <div class="lens-row-title">
@@ -1801,12 +1944,13 @@ export const SettingsView: Component = () => {
                           </div>
                           {/* Row 2 — description left, toggle right. */}
                           <div class="lens-row-sub">
-                            <span class="lens-desc">{p.description}</span>
+                            <span class="lens-desc">{lensDescription(p.id, p.description)}</span>
                             <button
                               type="button"
                               class="meeting-prep-trigger"
                               classList={{ open: prepExpanded() }}
                               aria-expanded={prepExpanded()}
+                              aria-label={prepExpanded() ? 'Close Meeting Prep settings' : 'Configure Meeting Prep'}
                               onClick={() => setPrepExpanded((v) => !v)}
                             >
                               <span>{prepExpanded() ? 'Done' : 'Configure'}</span>
@@ -1964,6 +2108,7 @@ export const SettingsView: Component = () => {
                       </li>
                     </Match>
                   </Switch>
+                  </>
                 )}
               </For>
             </ul>
@@ -1971,15 +2116,14 @@ export const SettingsView: Component = () => {
 
           <section class="lenses-card">
             <div class="field-header">
-              <span class="field-label">Games</span>
+              <h2>Games</h2>
               <span class="muted" style="margin-left: 0.5rem; font-size: 0.85em;">
                 {gamePresets().length} / {GAME_PRESETS_CAP}
               </span>
             </div>
             <p class="field-hint">
-              Hands-free quizzes, true/false rounds, and riddles you can play on the glasses.
-              Tap the Games entry at the top of the lens picker to start one — Random is always available.
-              Random picks nudge toward topics from your recent session summaries when any are saved.
+              Quizzes, true-or-false rounds, and riddles for your glasses. Open Games in the
+              glasses picker to play a preset or try Random.
             </p>
             <ul class="lens-list">
               <For each={gamePresets()}>
@@ -2082,12 +2226,27 @@ export const SettingsView: Component = () => {
             void onSave();
           }}
         >
+            <h2>Connection</h2>
             <label class="field">
-              <span class="field-label">Provider</span>
+              <span class="field-label">AI provider</span>
               <select
+                aria-label="AI provider"
                 value={providerOptionValue(draftProvider(), draftOpenaiBaseUrl())}
                 onChange={(e) => {
+                  if (e.currentTarget.value === 'custom') {
+                    setDraftProvider('openai-compatible');
+                    try { setDraftOpenaiBaseUrl(normalizeOpenAiBaseUrl(draftCustomUrl())); }
+                    catch { setDraftOpenaiBaseUrl(draftCustomUrl()); }
+                    setOpenaiModels([]);
+                    setOpenaiFetchState('idle');
+                    clearStatuses();
+                    return;
+                  }
                   const parsed = parseProviderOption(e.currentTarget.value);
+                  if (parsed.provider !== 'openai-compatible') {
+                    try { normalizeOpenAiBaseUrl(draftOpenaiBaseUrl()); }
+                    catch { setDraftOpenaiBaseUrl(settings().openaiBaseUrl); }
+                  }
                   setDraftProvider(parsed.provider);
                   if (parsed.provider === 'openai-compatible') {
                     setDraftOpenaiBaseUrl(parsed.baseUrl);
@@ -2096,56 +2255,18 @@ export const SettingsView: Component = () => {
                 }}
               >
                 <For each={PROVIDER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
+                <option value="custom">Custom OpenAI-compatible endpoint</option>
               </select>
-              <span class="field-hint">
-                Gemini analyses audio directly. OpenAI and Groq transcribe the
-                audio first (Whisper), then analyse the transcript. OpenRouter
-                sends the audio inline to multimodal models. One API key per
-                host, stored only on this device.
-              </span>
-              <span class="field-hint">
-                {(() => {
-                  // The grounding-capability hint surfaces whether fact-style
-                  // lenses (fact-check, trivia, devil's advocate, companion)
-                  // will resolve to a web-search call or run on training data
-                  // alone for the currently-drafted provider/model. Computed
-                  // from the same helper the runtime uses, so the hint can't
-                  // drift away from actual behaviour.
-                  const provider = draftProvider();
-                  const model = provider === 'gemini'
-                    ? draftModel()
-                    : provider === 'claude'
-                      ? draftClaudeModel()
-                      : draftOpenaiModel();
-                  const baseUrl = provider === 'openai-compatible' ? draftOpenaiBaseUrl() : undefined;
-                  const resolved = resolveProviderGrounding(provider, baseUrl, 'web_search', model);
-                  // DeepSeek borrows the wearer's Perplexity Search key —
-                  // resolver returns `grounded` regardless, but the actual
-                  // runtime downgrades to groundless when no Perplexity key
-                  // is on file. Surface the dependency explicitly so the
-                  // wearer knows what's needed.
-                  if (resolved.prefetchSearch === 'perplexity') {
-                    const pplxKey = (draftOpenaiKeys()['https://api.perplexity.ai'] ?? '').trim();
-                    return pplxKey
-                      ? 'Grounded via your Perplexity key (DeepSeek has no native web search, so VeritasLens reuses Perplexity Search before each grounded lens call).'
-                      : 'Add a Perplexity API key (under the Perplexity provider) to enable web search on DeepSeek. Without it, fact-style lenses run on training data only and the HUD marks them with a trailing °.';
-                  }
-                  return resolved.mode === 'grounded'
-                    ? 'Grounded: fact-style lenses pull fresh web results before answering.'
-                    : 'Groundless: this host has no web search — fact-style lenses run on training data only. The HUD marks groundless answers with a trailing °.';
-                })()}
-              </span>
+              <span class="field-hint">{providerHint()}</span>
             </label>
+
 
             <Show when={draftProvider() === 'gemini'}>
               <label class="field">
                 <span class="field-label">API key</span>
-                <input
-                  type="password"
-                  autocomplete="off"
-                  spellcheck={false}
+                <ApiKeyInput
                   placeholder="AIza…"
-                  classList={{ 'input-error': keyError() !== null }}
+                  error={keyError() !== null}
                   value={draftKey()}
                   onInput={(e) => { setDraftKey(e.currentTarget.value); clearStatuses(); }}
                 />
@@ -2153,9 +2274,9 @@ export const SettingsView: Component = () => {
                   <span class="field-error">{keyError()}</span>
                 </Show>
                 <span class="field-hint">
-                  Stored only on this device. Get one at{' '}
+                  Stored on this device.{' '}
                   <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer">
-                    aistudio.google.com
+                    Get an API key
                   </a>
                   .
                 </span>
@@ -2163,21 +2284,22 @@ export const SettingsView: Component = () => {
 
               <label class="field">
                 <span class="field-label">
-                  Model
+                  Analysis model
                   <Show when={modelsLoading()}>
                     <span class="spinner inline" />
                   </Show>
                 </span>
                 <select
+                  aria-label="Analysis model"
                   value={draftModel()}
                   disabled={draftKey().trim().length < 10}
                   onFocus={refreshGeminiModels}
                   onChange={(e) => { setDraftModel(e.currentTarget.value as GeminiModel); clearStatuses(); }}
                 >
-                  <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
+                  <For each={availableModels()}>{(m) => <option value={m}>{draftKey().trim().length < 10 ? 'Select a model' : m}</option>}</For>
                 </select>
                 <Show when={draftKey().trim().length < 10}>
-                  <span class="field-hint">Enter an API key above to load available models.</span>
+                  <span class="field-hint">Enter your API key to load models.</span>
                 </Show>
                 <Show when={draftKey().trim().length >= 10 && modelsLoading()}>
                   <span class="field-hint">Loading models from Gemini…</span>
@@ -2195,7 +2317,7 @@ export const SettingsView: Component = () => {
                     onClick={onTest}
                     disabled={anyTestRunning() || draftKey().trim().length < 10}
                   >
-                    <Show when={anyTestRunning()} fallback="Test model">
+                    <Show when={anyTestRunning()} fallback="Test connection">
                       <span class="spinner inline" />
                       Testing…
                     </Show>
@@ -2218,9 +2340,12 @@ export const SettingsView: Component = () => {
                 </div>
               </label>
 
+              <details class="settings-disclosure">
+                <summary>Advanced model settings<SettingsIcon name="chevron" /></summary>
               <label class="field">
                 <span class="field-label">Auto-lens classifier model</span>
                 <select
+                  aria-label="Auto-lens classifier model"
                   value={draftAutoModel() ?? ''}
                   disabled={draftKey().trim().length < 10 || modelsLoading()}
                   onChange={(e) => {
@@ -2238,17 +2363,15 @@ export const SettingsView: Component = () => {
                   lighter one (e.g. flash-lite) to stay under per-model rate limits.
                 </span>
               </label>
+              </details>
             </Show>
 
             <Show when={draftProvider() === 'claude'}>
               <label class="field">
                 <span class="field-label">API key</span>
-                <input
-                  type="password"
-                  autocomplete="off"
-                  spellcheck={false}
+                <ApiKeyInput
                   placeholder="sk-ant-…"
-                  classList={{ 'input-error': keyError() !== null }}
+                  error={keyError() !== null}
                   value={draftClaudeKey()}
                   onInput={(e) => { setDraftClaudeKey(e.currentTarget.value); clearStatuses(); }}
                 />
@@ -2256,16 +2379,17 @@ export const SettingsView: Component = () => {
                   <span class="field-error">{keyError()}</span>
                 </Show>
                 <span class="field-hint">
-                  Stored only on this device. Get one at{' '}
+                  Stored on this device.{' '}
                   <a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noreferrer">
-                    console.anthropic.com/settings/keys
+                    Get an API key
                   </a>.
                 </span>
               </label>
 
               <label class="field">
-                <span class="field-label">Model</span>
+                <span class="field-label">Analysis model</span>
                 <select
+                  aria-label="Analysis model"
                   value={draftClaudeModel()}
                   disabled={draftClaudeKey().trim().length < 10}
                   onChange={(e) => { setDraftClaudeModel(e.currentTarget.value as ClaudeModel); clearStatuses(); }}
@@ -2280,49 +2404,33 @@ export const SettingsView: Component = () => {
                 </Show>
               </label>
 
-              <div class="field">
-                <span class="field-label">Transcription host (Whisper)</span>
-                <span class="field-hint">
-                  Claude is text-only; the runtime first transcribes your audio
-                  on a Whisper host. Pick which one (and a model) below — same
-                  routing as DeepSeek and Perplexity. The transcription host's
-                  API key is taken from its OpenAI-compatible slot.
-                </span>
-                <select
-                  value={draftSttHost()}
-                  onChange={(e) => { setDraftSttHost(e.currentTarget.value as SttHost); clearStatuses(); }}
-                >
-                  <For each={STT_HOSTS}>{(host) => (
-                    <option value={host}>{openaiHostLabel(host)}</option>
-                  )}</For>
-                </select>
-                <span class="field-hint" style="margin-top: 0.5rem;">STT model on {openaiHostLabel(draftSttHost())}:</span>
-                <select
-                  value={draftSttModel() || STT_MODELS_BY_HOST[draftSttHost()][0]}
-                  onChange={(e) => { setDraftSttModel(e.currentTarget.value); clearStatuses(); }}
-                >
-                  <For each={STT_MODELS_BY_HOST[draftSttHost()]}>{(m) => (
-                    <option value={m}>{m}</option>
-                  )}</For>
-                </select>
-                <Show when={!(settings().openaiApiKeys[draftSttHost()] ?? '').trim()}>
-                  <span class="field-error">
-                    Add a {openaiHostLabel(draftSttHost())} API key in its provider tab so
-                    transcription can run before each Anthropic call.
-                  </span>
-                </Show>
-              </div>
             </Show>
 
             <Show when={draftProvider() === 'openai-compatible'}>
+              <Show when={isCustomEndpoint()}>
+                <label class="field">
+                  <span class="field-label">API base URL</span>
+                  <input type="url" autocomplete="off" spellcheck={false}
+                    placeholder="https://…/v1" value={draftCustomUrl()}
+                    onInput={(e) => {
+                      const raw = e.currentTarget.value;
+                      setDraftCustomUrl(raw);
+                      try { setDraftOpenaiBaseUrl(normalizeOpenAiBaseUrl(raw)); }
+                      catch { setDraftOpenaiBaseUrl(raw); }
+                      setOpenaiModels([]);
+                      setOpenaiFetchState('idle');
+                      clearStatuses();
+                    }} />
+                  <Show when={customUrlError()}><span class="field-error">{customUrlError()}</span></Show>
+                  <span class="field-hint">Include the API path your server uses (usually /v1). Local servers may leave the API key empty. Speech is transcribed by the Whisper host below.</span>
+                  <span class="field-hint">On Even G2, add this server's origin to the app network whitelist and repack before use. The server must allow browser CORS requests.</span>
+                </label>
+              </Show>
               <label class="field">
                 <span class="field-label">API key</span>
-                <input
-                  type="password"
-                  autocomplete="off"
-                  spellcheck={false}
+                <ApiKeyInput
                   placeholder={openaiKeyPlaceholder(draftOpenaiBaseUrl())}
-                  classList={{ 'input-error': keyError() !== null }}
+                  error={keyError() !== null}
                   value={draftOpenaiKey()}
                   onInput={(e) => { setDraftOpenaiKey(e.currentTarget.value); clearStatuses(); }}
                 />
@@ -2330,20 +2438,30 @@ export const SettingsView: Component = () => {
                   <span class="field-error">{keyError()}</span>
                 </Show>
                 <span class="field-hint">
-                  Stored only on this device. Get one at <ApiKeyLink host={draftOpenaiBaseUrl()} />.
+                  <Show when={!isCustomEndpoint()} fallback="Optional for servers that do not require authentication. Stored only on this device.">
+                    Stored on this device. <ApiKeyLink host={draftOpenaiBaseUrl()} />
+                  </Show>
                 </span>
               </label>
 
               <label class="field">
                 <span class="field-label">
-                  Model
+                  Analysis model
                   <Show when={openaiModelsLoading()}>
                     <span class="spinner inline" />
                   </Show>
                 </span>
+                <Show when={isCustomEndpoint()}>
+                  <input type="text" aria-label="Model ID" autocomplete="off" spellcheck={false}
+                    placeholder="Model ID served by your endpoint" value={draftOpenaiModel()}
+                    onInput={(e) => { setDraftOpenaiModel(e.currentTarget.value); clearStatuses(); }} />
+                  <button type="button" class="secondary" onClick={refreshOpenAiModels}
+                    disabled={!!customUrlError() || openaiModelsLoading()}>Load models</button>
+                </Show>
                 <select
+                  aria-label="Analysis model"
                   value={draftOpenaiModel()}
-                  disabled={draftOpenaiKey().trim().length < 10}
+                  disabled={!isCustomEndpoint() && draftOpenaiKey().trim().length < 10}
                   onFocus={refreshOpenAiModels}
                   onChange={(e) => { setDraftOpenaiModel(e.currentTarget.value); clearStatuses(); }}
                 >
@@ -2361,26 +2479,26 @@ export const SettingsView: Component = () => {
                     {(m) => <option value={m}>{m}</option>}
                   </For>
                 </select>
-                <Show when={draftOpenaiKey().trim().length < 10}>
+                <Show when={!isCustomEndpoint() && draftOpenaiKey().trim().length < 10}>
                   <span class="field-hint">Enter an API key above to load available models.</span>
                 </Show>
-                <Show when={draftOpenaiKey().trim().length >= 10 && openaiModelsLoading()}>
+                <Show when={(isCustomEndpoint() || draftOpenaiKey().trim().length >= 10) && openaiModelsLoading()}>
                   <span class="field-hint">Loading models from this provider…</span>
                 </Show>
-                <Show when={draftOpenaiKey().trim().length >= 10 && !openaiModelsLoading() && openaiFetchState() === 'ok'}>
+                <Show when={(isCustomEndpoint() || draftOpenaiKey().trim().length >= 10) && !openaiModelsLoading() && openaiFetchState() === 'ok'}>
                   <span class="field-hint">Models available.</span>
                 </Show>
-                <Show when={draftOpenaiKey().trim().length >= 10 && !openaiModelsLoading() && openaiFetchState() === 'fail'}>
-                  <span class="field-error">Could not load models — check the API key.</span>
+                <Show when={(isCustomEndpoint() || draftOpenaiKey().trim().length >= 10) && !openaiModelsLoading() && openaiFetchState() === 'fail'}>
+                  <span class="field-error">Could not load models — check the endpoint and key, or enter a model ID manually.</span>
                 </Show>
                 <div class="model-test-row">
                   <button
                     type="button"
                     class="secondary"
                     onClick={onTest}
-                    disabled={anyTestRunning() || draftOpenaiKey().trim().length < 10}
+                    disabled={anyTestRunning() || !!customUrlError() || (!isCustomEndpoint() && draftOpenaiKey().trim().length < 10)}
                   >
-                    <Show when={anyTestRunning()} fallback="Test model">
+                    <Show when={anyTestRunning()} fallback="Test connection">
                       <span class="spinner inline" />
                       Testing…
                     </Show>
@@ -2417,66 +2535,121 @@ export const SettingsView: Component = () => {
                 </label>
               </Show>
 
-              <Show when={isChatOnlyHost(draftOpenaiBaseUrl())}>
-                <div class="config-section-divider" role="separator">
-                  <span>Speech-to-text</span>
-                </div>
-                <p class="field-hint">
-                  {openaiHostLabel(draftOpenaiBaseUrl())} doesn't transcribe audio. VeritasLens
-                  will send the WAV to a separate Whisper host you pick below and forward only
-                  the transcript to {openaiHostLabel(draftOpenaiBaseUrl())}.
-                </p>
-                <label class="field">
-                  <span class="field-label">STT host</span>
-                  <select
-                    value={draftSttHost()}
-                    onChange={(e) => {
-                      const next = e.currentTarget.value as SttHost;
-                      setDraftSttHost(next);
-                      // Reset the STT model whenever the host changes so a stale
-                      // Groq model id can't be silently sent to OpenAI Whisper.
-                      const first = STT_MODELS_BY_HOST[next][0] ?? '';
-                      setDraftSttModel(first);
-                      clearStatuses();
-                    }}
-                  >
-                    <For each={STT_HOSTS}>
-                      {(h) => <option value={h}>{openaiHostLabel(h)} Whisper</option>}
-                    </For>
-                  </select>
-                </label>
-                <label class="field">
-                  <span class="field-label">{openaiHostLabel(draftSttHost())} API key</span>
-                  <input
-                    type="password"
-                    autocomplete="off"
-                    spellcheck={false}
-                    placeholder={openaiKeyPlaceholder(draftSttHost())}
-                    value={draftOpenaiKeys()[draftSttHost()] ?? ''}
-                    onInput={(e) => {
-                      const next = e.currentTarget.value;
-                      setDraftOpenaiKeys((prev) => ({ ...prev, [draftSttHost()]: next }));
-                      clearStatuses();
-                    }}
-                  />
-                  <span class="field-hint">
-                    Used for transcription only — the chat call still goes to {openaiHostLabel(draftOpenaiBaseUrl())}.
-                    Get one at <ApiKeyLink host={draftSttHost()} />.
-                  </span>
-                </label>
-                <label class="field">
-                  <span class="field-label">STT model</span>
-                  <select
-                    value={draftSttModel() || STT_MODELS_BY_HOST[draftSttHost()][0]}
-                    onChange={(e) => { setDraftSttModel(e.currentTarget.value); clearStatuses(); }}
-                  >
-                    <For each={STT_MODELS_BY_HOST[draftSttHost()]}>
-                      {(m) => <option value={m}>{m}</option>}
-                    </For>
-                  </select>
-                </label>
-              </Show>
             </Show>
+
+            <Show when={draftProvider() === 'openai-compatible'}>
+              <details class="settings-disclosure">
+                <summary>Advanced connection settings<SettingsIcon name="chevron" /></summary>
+                <label class="field">
+                <span class="field-label">Chat fallback URLs</span>
+                <textarea class="meeting-prep-body" aria-label="Chat fallback URLs" rows={3} placeholder="Alternate chat base URL, one per line"
+                  value={draftChatFallbacks()[draftOpenaiBaseUrl()] ?? ''}
+                  onInput={(e) => { setDraftChatFallbacks((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: e.currentTarget.value })); clearStatuses(); }} />
+                <span class="field-hint">Optional alternate addresses of the same chat server, one per line, tried in order after the primary address fails. They share its API key and model. Include every origin in the Even network whitelist before repacking.</span>
+                </label>
+              </details>
+            </Show>
+            <details class="settings-disclosure" open={needsDraftStt() || !!sttDraftError()}>
+              <summary>Speech-to-text setup<SettingsIcon name="chevron" /></summary>
+              <div class="disclosure-body">
+            <p class="field-hint">Used by text-only providers and live speaker tagging for Gemini and OpenRouter. Choose Groq, OpenAI, or your own Whisper-compatible server.</p>
+            <label class="field">
+              <span class="field-label">Speech-to-text provider</span>
+              <select aria-label="Speech-to-text provider" value={isCustomSttHost(draftSttHost()) ? 'custom' : draftSttHost()}
+                onChange={(e) => {
+                  let host = e.currentTarget.value === 'custom' ? draftCustomSttUrl() : e.currentTarget.value;
+                  try { host = normalizeOpenAiBaseUrl(host); } catch { /* keep draft validation visible */ }
+                  setDraftSttHost(host); setDraftSttModel(e.currentTarget.value === 'custom' ? draftCustomSttModel() : defaultSttModel(host)); clearStatuses();
+                }}>
+                <For each={STT_HOSTS}>{(host) => <option value={host}>{openaiHostLabel(host)} Whisper</option>}</For>
+                <option value="custom">Custom Whisper-compatible endpoint</option>
+              </select>
+            </label>
+            <Show when={isCustomSttHost(draftSttHost())}>
+              <label class="field">
+                <span class="field-label">Speech-to-text API base URL</span>
+                <input type="url" aria-label="Speech-to-text API base URL" placeholder="http://your-server:8000/v1"
+                  autocomplete="off" spellcheck={false} value={draftCustomSttUrl()}
+                  onInput={(e) => {
+                    const raw = e.currentTarget.value; setDraftCustomSttUrl(raw);
+                    try { setDraftSttHost(normalizeOpenAiBaseUrl(raw)); } catch { setDraftSttHost(raw); }
+                    clearStatuses();
+                  }} />
+                <Show when={sttUrlError()}><span class="field-error">{sttUrlError()}</span></Show>
+                <span class="field-hint">The server must expose /audio/transcriptions below this base URL and allow browser CORS. Add its origin to the Even network whitelist before repacking.</span>
+              </label>
+            </Show>
+            <label class="field">
+              <span class="field-label">Speech-to-text API key</span>
+              <ApiKeyInput label="Speech-to-text API key" placeholder={isCustomSttHost(draftSttHost()) ? 'Optional API key' : openaiKeyPlaceholder(draftSttHost())}
+                value={draftOpenaiKeys()[draftSttHost()] ?? ''}
+                onInput={(e) => { const key = e.currentTarget.value; setDraftOpenaiKeys((prev) => ({ ...prev, [draftSttHost()]: key })); clearStatuses(); }} />
+              <span class="field-hint">{isCustomSttHost(draftSttHost()) ? 'Optional for servers without authentication.' : 'Used for transcription on the selected host.'}</span>
+            </label>
+            <label class="field">
+              <span class="field-label">Speech-to-text model</span>
+              <Show when={isCustomSttHost(draftSttHost())} fallback={
+                <select aria-label="Speech-to-text model" value={draftSttModel() || defaultSttModel(draftSttHost())}
+                  onChange={(e) => { setDraftSttModel(e.currentTarget.value); clearStatuses(); }}>
+                  <For each={STT_MODELS_BY_HOST[draftSttHost()] ?? []}>{(model) => <option value={model}>{model}</option>}</For>
+                </select>
+              }>
+                <input type="text" aria-label="Speech-to-text model" placeholder="Model ID served by your Whisper endpoint"
+                  autocomplete="off" spellcheck={false} value={draftSttModel()}
+                  onInput={(e) => { setDraftSttModel(e.currentTarget.value); setDraftCustomSttModel(e.currentTarget.value); clearStatuses(); }} />
+              </Show>
+              <Show when={sttDraftError() && !sttUrlError()}><span class="field-error">{sttDraftError()}</span></Show>
+            </label>
+                <details class="settings-disclosure">
+                  <summary>Fallback addresses<SettingsIcon name="chevron" /></summary>
+            <label class="field">
+              <span class="field-label">Speech-to-text fallback URLs</span>
+              <textarea class="meeting-prep-body" aria-label="Speech-to-text fallback URLs" rows={3} placeholder="Alternate Whisper base URL, one per line"
+                value={draftSttFallbacks()[draftSttHost()] ?? ''}
+                onInput={(e) => { setDraftSttFallbacks((prev) => ({ ...prev, [draftSttHost()]: e.currentTarget.value })); clearStatuses(); }} />
+              <span class="field-hint">Optional alternate addresses of the same Whisper server, one per line, tried in order. They share the primary server's API key and model. Include every origin in the Even network whitelist before repacking.</span>
+            </label>
+                </details>
+              </div>
+            </details>
+            <Show when={fallbackError()}><span class="field-error">Fallback URL: {fallbackError()}</span></Show>
+
+            <details class="settings-disclosure provider-capabilities">
+              <summary>Web search availability<SettingsIcon name="chevron" /></summary>
+              <span class="field-hint">
+                {(() => {
+                  // The grounding-capability hint surfaces whether fact-style
+                  // lenses (fact-check, trivia, devil's advocate, companion)
+                  // will resolve to a web-search call or run on training data
+                  // alone for the currently-drafted provider/model. Computed
+                  // from the same helper the runtime uses, so the hint can't
+                  // drift away from actual behaviour.
+                  const provider = draftProvider();
+                  const model = provider === 'gemini'
+                    ? draftModel()
+                    : provider === 'claude'
+                      ? draftClaudeModel()
+                      : draftOpenaiModel();
+                  const baseUrl = provider === 'openai-compatible' ? draftOpenaiBaseUrl() : undefined;
+                  const resolved = resolveProviderGrounding(provider, baseUrl, 'web_search', model);
+                  // DeepSeek borrows the wearer's Perplexity Search key —
+                  // resolver returns `grounded` regardless, but the actual
+                  // runtime downgrades to groundless when no Perplexity key
+                  // is on file. Surface the dependency explicitly so the
+                  // wearer knows what's needed.
+                  if (resolved.prefetchSearch === 'perplexity') {
+                    const pplxKey = (draftOpenaiKeys()['https://api.perplexity.ai'] ?? '').trim();
+                    return pplxKey
+                      ? 'Grounded via your Perplexity key (DeepSeek has no native web search, so VeritasLens reuses Perplexity Search before each grounded lens call).'
+                      : 'Add a Perplexity API key (under the Perplexity provider) to enable web search on DeepSeek. Without it, fact-style lenses run on training data only and the HUD marks them with a trailing °.';
+                  }
+                  return resolved.mode === 'grounded'
+                    ? 'Grounded: fact-style lenses pull fresh web results before answering.'
+                    : 'Groundless: this host has no web search — fact-style lenses run on training data only. The HUD marks groundless answers with a trailing °.';
+                })()}
+              </span>
+            </details>
+            <p class="privacy-note">Your audio is sent to your chosen provider when you analyze.</p>
 
         </form>
       </Show>
@@ -2489,13 +2662,12 @@ export const SettingsView: Component = () => {
             void onSave();
           }}
         >
-            <div class="config-section-divider" role="separator">
-              <span>Basics</span>
-            </div>
+            <h2 class="config-section-divider">Essentials</h2>
 
             <label class="field">
               <span class="field-label">Response language</span>
               <select
+                aria-label="Response language"
                 value={draftLanguage()}
                 onChange={(e) => setDraftLanguage(e.currentTarget.value as LanguageCode)}
               >
@@ -2506,88 +2678,113 @@ export const SettingsView: Component = () => {
             </label>
 
             <label class="field">
-              <span class="field-label">Recording buffer</span>
+              <span class="field-label">Audio window</span>
               <select
+                aria-label="Audio window"
                 value={draftBuffer()}
                 onChange={(e) => setDraftBuffer(Number(e.currentTarget.value) as BufferDuration)}
               >
                 <For each={BUFFER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
               </select>
               <span class="field-hint">
-                How much past audio each analysis includes. Longer captures more conversation
-                but sends a bigger payload to the provider.
+                The recent conversation included in each analysis.
               </span>
             </label>
 
             <label class="field">
               <span class="field-label">Microphone</span>
               <select
+                aria-label="Microphone"
                 value={draftMicSource()}
                 onChange={(e) => setDraftMicSource(e.currentTarget.value as MicSource)}
               >
                 <For each={MIC_SOURCE_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
               </select>
-              <span class="field-hint">
-                Which microphone to record from. Glasses uses the on-board array; choose Phone
-                if the glasses mic underperforms or isn't available on your device.
-              </span>
             </label>
 
-            <div class="config-section-divider" role="separator">
-              <span>Audio</span>
-            </div>
+            <h2 class="config-section-divider">Listening &amp; display</h2>
 
-            <div class="field">
-              <span class="field-label">Auto mode</span>
+            <div class="field preference-field">
               <label class="toggle-row">
                 <input
                   type="checkbox"
                   checked={draftAutoMode()}
                   onChange={(e) => setDraftAutoMode(e.currentTarget.checked)}
                 />
-                <span>Analyze when I stop speaking</span>
+                <span>Auto mode</span>
               </label>
+
+              <span class="field-hint">
+                Analyze when you stop speaking.
+              </span>
+            </div>
+
+            <div class="field preference-field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftVoiceTrim()}
+                  onChange={(e) => setDraftVoiceTrim(e.currentTarget.checked)}
+                />
+                <span>Trim silence</span>
+              </label>
+            </div>
+
+            <div class="field preference-field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftDiscreet()}
+                  onChange={(e) => setDraftDiscreet(e.currentTarget.checked)}
+                />
+                <span>Discreet display</span>
+              </label>
+            </div>
+
+            <details class="settings-disclosure">
+              <summary>Advanced audio tuning<SettingsIcon name="chevron" /></summary>
+              <div class="disclosure-body">
               <Show when={draftAutoMode()}>
                 <div class="slider-row" style={{ 'margin-top': '0.5rem' }}>
                   <input
                     type="range"
+                    aria-label="Minimum voice duration"
                     min={AUTO_MODE_START_MS_MIN}
                     max={AUTO_MODE_START_MS_MAX}
                     step={AUTO_MODE_STEP_MS}
                     value={draftAutoModeStart()}
                     onInput={(e) => setDraftAutoModeStart(Number(e.currentTarget.value))}
                   />
-                  {/* Pinned to the same min-width as the other two auto-mode rows so all
-                      three slider tracks line up — otherwise the longer "Trailing silence"
-                      label squeezes its own slider narrower than the rest. */}
-                  <span class="slider-value" style={{ 'min-width': '10rem' }}>
-                    Min voice {(draftAutoModeStart() / 1000).toFixed(2)} s
+                  <span class="slider-value">
+                    Minimum speech {(draftAutoModeStart() / 1000).toFixed(2)} s
                   </span>
                 </div>
                 <div class="slider-row">
                   <input
                     type="range"
+                    aria-label="Pause before analysis"
                     min={AUTO_MODE_SILENCE_MS_MIN}
                     max={AUTO_MODE_SILENCE_MS_MAX}
                     step={AUTO_MODE_STEP_MS}
                     value={draftAutoModeSilence()}
                     onInput={(e) => setDraftAutoModeSilence(Number(e.currentTarget.value))}
                   />
-                  <span class="slider-value" style={{ 'min-width': '10rem' }}>
-                    Trailing silence {(draftAutoModeSilence() / 1000).toFixed(2)} s
+                  <span class="slider-value">
+                    Pause {(draftAutoModeSilence() / 1000).toFixed(2)} s
                   </span>
                 </div>
                 <div class="slider-row">
                   <input
                     type="range"
+                    aria-label="Maximum analysis interval"
                     min={AUTO_MODE_INTERVAL_MS_MIN}
                     max={AUTO_MODE_INTERVAL_MS_MAX}
                     step={AUTO_MODE_INTERVAL_STEP_MS}
                     value={draftAutoModeInterval()}
                     onInput={(e) => setDraftAutoModeInterval(Number(e.currentTarget.value))}
                   />
-                  <span class="slider-value" style={{ 'min-width': '10rem' }}>
-                    Max interval {(draftAutoModeInterval() / 1000).toFixed(0)} s
+                  <span class="slider-value">
+                    Maximum wait {(draftAutoModeInterval() / 1000).toFixed(0)} s
                   </span>
                 </div>
                 <Show when={draftTranscriptMode() === 'off'}>
@@ -2597,18 +2794,12 @@ export const SettingsView: Component = () => {
                   </span>
                 </Show>
               </Show>
-              <span class="field-hint">
-                Analyzes automatically when you finish speaking — no tap needed. The sliders tune
-                how long you have to talk, how long a pause counts as "done", and the longest it
-                will wait if you never pause.
-              </span>
-            </div>
-
             <div class="field">
               <span class="field-label">Voice sensitivity</span>
               <div class="slider-row">
                 <input
                   type="range"
+                  aria-label="Voice sensitivity"
                   min="0"
                   max={VOICE_GATE_RMS_MAX}
                   step={VOICE_GATE_RMS_STEP}
@@ -2626,40 +2817,13 @@ export const SettingsView: Component = () => {
               </span>
             </div>
 
-            <div class="field">
-              <span class="field-label">Trim silence</span>
-              <label class="toggle-row">
-                <input
-                  type="checkbox"
-                  checked={draftVoiceTrim()}
-                  onChange={(e) => setDraftVoiceTrim(e.currentTarget.checked)}
-                />
-                <span>Strip silence before upload</span>
-              </label>
-              <span class="field-hint">
-                Cuts silent gaps out of the audio before sending — smaller, cleaner request. Turn
-                off if you want the model to hear ambient sound (music, room tone).
-              </span>
-            </div>
+              </div>
+            </details>
 
-            <div class="field">
-              <span class="field-label">Discreet HUD</span>
-              <label class="toggle-row">
-                <input
-                  type="checkbox"
-                  checked={draftDiscreet()}
-                  onChange={(e) => setDraftDiscreet(e.currentTarget.checked)}
-                />
-                <span>Hide the hint row while listening</span>
-              </label>
-              <span class="field-hint">
-                Shows only a small recording dot on the glasses. Double-tap to reveal the answer.
-              </span>
-            </div>
+            <details class="settings-disclosure">
+              <summary>Memory &amp; context<SettingsIcon name="chevron" /></summary>
+              <div class="disclosure-body">
 
-            <div class="config-section-divider" role="separator">
-              <span>Memory</span>
-            </div>
 
             <div class="field">
               <span class="field-label">Session memory</span>
@@ -2761,7 +2925,7 @@ export const SettingsView: Component = () => {
                 })()}
               </Show>
               <div style={{ 'margin-top': '0.5rem', display: 'flex', 'flex-direction': 'column', gap: '0.35rem' }}>
-                <button type="button" onClick={() => { void runLocationTest(); }} style={{ 'align-self': 'flex-start' }}>
+                <button type="button" class="secondary" onClick={() => { void runLocationTest(); }} style={{ 'align-self': 'flex-start' }}>
                   Test location now
                 </button>
                 <Show when={locationTestState()}>
@@ -2775,15 +2939,12 @@ export const SettingsView: Component = () => {
             </div>
 
 
-            <div
-              class="lens-row lens-row--expandable lens-row--open"
-              style={{ 'margin-top': '0.75rem' }}
-            >
-              <div
-                class="meeting-prep-inline"
-                style={{ 'border-top': 'none', 'margin-top': '0', 'padding-top': '0' }}
-              >
-                <span class="field-label">HUD glyphs</span>
+              </div>
+            </details>
+            <details class="settings-disclosure">
+              <summary>Glasses status guide<SettingsIcon name="chevron" /></summary>
+              <div class="disclosure-body">
+                <p class="field-hint">Discreet display shows only a recording dot while listening. Double-tap to reveal an answer. Trim silence removes quiet gaps before uploading audio.</p>
                 <ul class="status-legend">
                   <li><code>OK</code> — idle, ready for a tap</li>
                   <li><code>|</code> <code>/</code> <code>-</code> <code>\</code> — request in flight</li>
@@ -2796,22 +2957,21 @@ export const SettingsView: Component = () => {
                 </ul>
                 <p class="field-hint" style={{ 'margin-top': '0.75rem' }}>
                   Audio stays in memory only. API key is sent with each provider request.
-                  Session log clears on close.
+                  Saved history stays on this device.
                 </p>
               </div>
-            </div>
+            </details>
         </form>
       </Show>
 
       <Show when={activeTab() === 'history'}>
         <section class="session-log">
-          <input
-            class="history-search-input"
-            type="text"
-            placeholder="Search"
-            value={searchQuery()}
-            onInput={(e) => setSearchQuery(e.currentTarget.value)}
-          />
+          <div class="history-search">
+            <SettingsIcon name="search" />
+            <input class="history-search-input" type="search" aria-label="Search your history"
+              placeholder="Search your history" value={searchQuery()}
+              onInput={(e) => setSearchQuery(e.currentTarget.value)} />
+          </div>
           <Show
             when={searchQuery().trim().length > 0}
             fallback={
@@ -2826,6 +2986,8 @@ export const SettingsView: Component = () => {
 
       </Show>
 
+      </div>
+
       {/*
         Bottom-fixed stack: optional Save bar on top, tab nav below. Wrapping
         both in one fixed container guarantees zero gap between them (the
@@ -2839,25 +3001,27 @@ export const SettingsView: Component = () => {
         an API key.
       */}
       <div class="bottom-stack">
-        <Show when={llmDirty() || appDirty() || lensDirty()}>
-          <div class="action-bar" role="region" aria-label="Unsaved changes">
+        <Show when={hasUnsavedChanges() || saveState() !== 'idle'}>
+          <div class="action-bar" role="region" aria-label="Settings save status">
             <span class="action-bar-status">
-              <span>Unsaved changes</span>
-              <Show when={saveState() === 'saved'}>
-                <span class="status ok">Saved</span>
-              </Show>
-              <Show when={saveState() === 'error'}>
-                <span class="status err">Could not save</span>
+              <span role="status" aria-live="polite" classList={{ status: saveState() !== 'idle', ok: savedWithoutChanges(), err: saveState() === 'error' }}>
+                {savedWithoutChanges() ? 'Changes saved' : saveState() === 'error' ? 'Could not save. Try again.'
+                  : saveState() === 'saving' ? 'Saving your changes…' : 'Unsaved changes'}
+              </span>
+              <Show when={llmDirty() && !canSave() && saveState() !== 'saving'}>
+                <button type="button" class="link-button save-setup-link" onClick={() => changeTab('llm')}>Complete AI setup to save</button>
               </Show>
             </span>
+            <Show when={!savedWithoutChanges()}>
             <button
               type="button"
               class="primary"
               disabled={(llmDirty() && !canSave()) || saveState() === 'saving'}
               onClick={() => void onSave()}
             >
-              {saveState() === 'saving' ? 'Saving…' : 'Save'}
+              {saveState() === 'saving' ? 'Saving…' : 'Save changes'}
             </button>
+            </Show>
           </div>
         </Show>
         <nav class="bottom-nav" role="tablist" aria-label="Sections">
@@ -2871,38 +3035,10 @@ export const SettingsView: Component = () => {
             every platform.
           */}
           <For each={[
-            { id: 'lenses' as const, label: 'Lenses', dirty: (): boolean => lensDirty(), svg: (
-              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
-                <circle cx="11" cy="11" r="8" fill="none" stroke="currentColor" stroke-width="1.5" />
-                <circle cx="11" cy="11" r="3" fill="currentColor" />
-              </svg>
-            ) },
-            { id: 'history' as const, label: 'History', dirty: (): boolean => false, svg: (
-              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
-                <circle cx="11" cy="11" r="8" fill="none" stroke="currentColor" stroke-width="1.5" />
-                <path d="M11 6.5v5l3 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" />
-              </svg>
-            ) },
-            { id: 'settings' as const, label: 'Settings', dirty: (): boolean => appDirty(), svg: (
-              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
-                <circle cx="11" cy="11" r="2.5" fill="none" stroke="currentColor" stroke-width="1.5" />
-                <path
-                  d="M11 1.5v3M11 17.5v3M3.8 3.8l2.1 2.1M16.1 16.1l2.1 2.1M1.5 11h3M17.5 11h3M3.8 18.2l2.1-2.1M16.1 5.9l2.1-2.1"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                />
-              </svg>
-            ) },
-            { id: 'llm' as const, label: 'LLM', dirty: (): boolean => llmDirty(), svg: (
-              <svg viewBox="0 0 22 22" width="22" height="22" aria-hidden="true">
-                <path
-                  d="M11 2 L12.4 9.6 L20 11 L12.4 12.4 L11 20 L9.6 12.4 L2 11 L9.6 9.6 Z"
-                  fill="currentColor"
-                />
-              </svg>
-            ) },
+            { id: 'lenses' as const, label: 'Lenses', dirty: lensDirty, icon: 'lens' },
+            { id: 'history' as const, label: 'History', dirty: (): boolean => false, icon: 'history' },
+            { id: 'settings' as const, label: 'Settings', dirty: appDirty, icon: 'settings' },
+            { id: 'llm' as const, label: 'AI setup', dirty: llmDirty, icon: 'ai' },
           ]}>
             {(t) => (
               <button
@@ -2911,10 +3047,24 @@ export const SettingsView: Component = () => {
                 class="bottom-nav-btn"
                 classList={{ active: activeTab() === t.id }}
                 aria-selected={activeTab() === t.id}
-                onClick={() => setActiveTab(t.id)}
+                id={`tab-${t.id}`}
+                aria-controls="settings-panel"
+                tabIndex={activeTab() === t.id ? 0 : -1}
+                onClick={() => changeTab(t.id)}
+                onKeyDown={(e) => {
+                  const tabs: SettingsTab[] = ['lenses', 'history', 'settings', 'llm'];
+                  const index = tabs.indexOf(t.id);
+                  const next = e.key === 'ArrowRight' ? tabs[(index + 1) % tabs.length]
+                    : e.key === 'ArrowLeft' ? tabs[(index + tabs.length - 1) % tabs.length]
+                    : e.key === 'Home' ? tabs[0] : e.key === 'End' ? tabs[tabs.length - 1] : undefined;
+                  if (!next) return;
+                  e.preventDefault();
+                  changeTab(next);
+                  document.getElementById(`tab-${next}`)?.focus();
+                }}
               >
                 <span class="bottom-nav-icon" aria-hidden="true">
-                  {t.svg}
+                  <SettingsIcon name={t.icon} />
                   <Show when={t.dirty()}>
                     <span class="bottom-nav-dot" aria-label="Unsaved changes" />
                   </Show>

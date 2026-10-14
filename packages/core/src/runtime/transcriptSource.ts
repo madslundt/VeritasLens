@@ -22,7 +22,7 @@
 
 import { settings } from '@/state/store';
 import { transcribeAudio } from '@/llm/openai';
-import { STT_MODELS_BY_HOST } from '@/types';
+import { defaultSttModel, isCustomSttHost } from '@/types';
 import {
   appendSegment,
   currentSessionId,
@@ -72,14 +72,15 @@ export async function runWhisperSidecar(
   const s = settings();
   const sttHost = s.sttHost;
   const sttApiKey = s.openaiApiKeys[sttHost] ?? '';
-  if (!sttApiKey) return;
-  const sttModel = s.sttModel || STT_MODELS_BY_HOST[sttHost]?.[0];
+  if (!sttApiKey && !isCustomSttHost(sttHost)) return;
+  const sttModel = s.sttModel || defaultSttModel(sttHost);
   if (!sttModel) return;
 
   try {
     const transcript = await transcribeAudio({
       apiKey: sttApiKey,
       baseUrl: sttHost,
+      fallbackUrls: s.sttFallbackUrls?.[sttHost],
       model: sttModel,
       wav,
       signal,

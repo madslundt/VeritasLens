@@ -12,9 +12,24 @@
     "jsx": "react-native",
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
-    }
+      "@/*": [
+        "../core/src/*"
+      ]
+    },
+    "types": [
+      "vitest/globals",
+      "vite/client"
+    ]
   },
-  "include": ["**/*.ts", "**/*.tsx", "modules/**/*.ts"],
-  "exclude": ["node_modules", "ios", "android", "dist"]
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "modules/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "ios",
+    "android",
+    "dist"
+  ]
 }

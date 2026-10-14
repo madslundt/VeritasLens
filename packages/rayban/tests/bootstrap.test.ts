@@ -106,6 +106,58 @@ describe('bootstrap', () => {
     expect(settings.ttsRate).toBe(1.5);
   });
 
+  it('hydrates custom endpoints and their per-endpoint keys', async () => {
+    mockStorage({
+      'veritaslens.provider': 'openai-compatible',
+      'veritaslens.openaiBaseUrl': 'http://localhost:1234/v1/',
+      'veritaslens.openaiCustomUrls': JSON.stringify(['http://localhost:1234/v1', 'https://other.example/api', 'invalid']),
+      'veritaslens.openaiKey.http://localhost:1234/v1': 'local-key',
+      'veritaslens.openaiKey.https://other.example/api': 'other-key',
+    });
+    await bootstrap();
+    expect(useStore.getState().settings.openaiBaseUrl).toBe('http://localhost:1234/v1');
+    expect(core.settings().openaiApiKeys['http://localhost:1234/v1']).toBe('local-key');
+    expect(core.settings().openaiApiKeys['https://other.example/api']).toBe('other-key');
+  });
+
+  it('survives invalid custom URL storage', async () => {
+    mockStorage({
+      'veritaslens.openaiBaseUrl': 'javascript:alert(1)',
+      'veritaslens.openaiCustomUrls': '{broken',
+    });
+    await bootstrap();
+    expect(useStore.getState().settings.openaiBaseUrl).toBe('https://api.openai.com/v1');
+  });
+
+  it('restores a custom Whisper server and its secret without requiring a custom chat URL', async () => {
+    mockStorage({
+      'veritaslens.sttHost': 'http://localhost:8000/v1/',
+      'veritaslens.sttModel': 'whisper-custom',
+      'veritaslens.openaiKey.http://localhost:8000/v1': 'speech-key',
+    });
+    await bootstrap();
+    expect(useStore.getState().settings).toMatchObject({ sttHost: 'http://localhost:8000/v1', sttModel: 'whisper-custom' });
+    expect(core.settings().openaiApiKeys['http://localhost:8000/v1']).toBe('speech-key');
+  });
+
+  it('restores ordered fallback addresses into both settings stores', async () => {
+    const chat = { 'https://chat.example/v1': ['https://chat-backup.example/v1'] };
+    const speech = { 'https://speech.example/v1': ['https://speech-backup.example/v1', 'http://localhost:8000/v1'] };
+    mockStorage({
+      'veritaslens.openaiFallbackUrls': JSON.stringify(chat),
+      'veritaslens.sttFallbackUrls': JSON.stringify(speech),
+    });
+    await bootstrap();
+    expect(useStore.getState().settings).toMatchObject({ openaiFallbackUrls: chat, sttFallbackUrls: speech });
+    expect(core.settings()).toMatchObject({ openaiFallbackUrls: chat, sttFallbackUrls: speech });
+  });
+
+  it('resets damaged custom speech and fallback settings safely', async () => {
+    mockStorage({ 'veritaslens.sttHost': 'javascript:alert(1)', 'veritaslens.openaiFallbackUrls': '{broken', 'veritaslens.sttFallbackUrls': '[]' });
+    await bootstrap();
+    expect(core.settings()).toMatchObject({ sttHost: core.DEFAULT_STT_HOST, sttModel: core.DEFAULT_STT_MODEL, openaiFallbackUrls: {}, sttFallbackUrls: {} });
+  });
+
   it('uses defaults when storage returns null', async () => {
     // All mocks return null (set in beforeEach).
     await bootstrap();
@@ -156,6 +208,25 @@ describe('patchFullSettings', () => {
 
     // Getter now reflects the patched value — no new configureSettings call needed.
     expect(getter().geminiApiKey).toBe('new-api-key-123');
+  });
+
+  it('mirrors current UI routing into the core settings closure', async () => {
+    await bootstrap();
+    useStore.getState().updateSettings({ provider: 'openai-compatible', openaiBaseUrl: 'http://localhost:1234/v1', openaiModel: 'local-model' });
+    patchFullSettings({});
+    expect(core.settings()).toMatchObject({ provider: 'openai-compatible', openaiBaseUrl: 'http://localhost:1234/v1', openaiModel: 'local-model' });
+  });
+
+  it('mirrors edited custom speech and fallback addresses without another bootstrap', async () => {
+    await bootstrap();
+    const next = {
+      sttHost: 'https://speech.example/v1', sttModel: 'whisper-custom',
+      sttFallbackUrls: { 'https://speech.example/v1': ['http://localhost:8000/v1'] },
+      openaiFallbackUrls: { 'https://chat.example/v1': ['https://chat-backup.example/v1'] },
+    };
+    useStore.getState().updateSettings(next);
+    patchFullSettings({});
+    expect(core.settings()).toMatchObject(next);
   });
 
   it('does not clobber unpatched fields', async () => {
