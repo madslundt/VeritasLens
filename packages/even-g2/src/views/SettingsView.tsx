@@ -2700,9 +2700,9 @@ export const SettingsView: Component = () => {
                 <label class="toggle-row toggle-row--full">
                   <input type="checkbox" aria-label="Use Tavily web search" checked={draftTavilyEnabled()}
                     onChange={(e) => setDraftTavilyEnabled(e.currentTarget.checked)} />
-                  <span>Use Tavily when the provider has no web search</span>
+                  <span>Use Tavily for lens search fallback and factual games</span>
                 </label>
-                <p class="field-hint">Off by default. Search-enabled lenses send a short text query from captured speech to Tavily. Native provider search takes priority. Failed or empty searches still return an answer marked as ungrounded.</p>
+                <p class="field-hint">Off by default. Search-enabled lenses send a short query from captured speech; factual games search their topic once per batch. Native provider search takes priority for lenses. Failed or empty searches still allow answers and games. Every lens and game stays available when Tavily is off.</p>
                 <label class="field">
                   <span class="field-label">Tavily API key</span>
                   <ApiKeyInput label="Tavily API key" placeholder="tvly-…" value={draftTavilyKey()}

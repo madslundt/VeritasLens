@@ -206,6 +206,10 @@ export async function startGame(preset: GamePreset): Promise<void> {
       prompt,
       schema: GAME_RESPONSE_SCHEMA,
       signal: controller.signal,
+      search: { format: preset.format, topic: preset.topic, recentTopics: recentRandomTopics, preferredTopics: recentConversationTopics },
+      onCitations: (citations) => {
+        if (!controller.signal.aborted && inflight === controller) session.webCitations = citations;
+      },
       onRetry: async (attempt) => {
         retryLabel = `R${attempt}/3`;
         // Mirror the lens spinner cadence — flash the retry label on the loading
@@ -213,6 +217,7 @@ export async function startGame(preset: GamePreset): Promise<void> {
         await showGameLoadingPage(preset, retryLabel);
       },
     });
+    if (controller.signal.aborted || inflight !== controller) return;
     const parsed = parseGameResponse(rawText, preset.format);
     // Shuffle multi-choice option order so the LLM's bias toward
     // correctIndex=0 doesn't make the quiz a tap-the-top game. No-op for
@@ -231,6 +236,7 @@ export async function startGame(preset: GamePreset): Promise<void> {
       index: 0,
       answers: Array(questions.length).fill(null),
       phase: 'question',
+      ...(session.webCitations?.length ? { webCitations: session.webCitations } : {}),
     };
     setSession(nextSession);
     await showGameQuestionPage(nextSession);
@@ -424,6 +430,7 @@ async function persistGameIfRequested(session: GameSession): Promise<void> {
       badge,
       quote: '',
       result,
+      ...(session.webCitations?.length ? { webCitations: session.webCitations } : {}),
       tags: [session.preset.format, session.preset.difficulty, session.preset.topic.toLowerCase()].filter(Boolean),
     }, (k, v) => getBridge().setLocalStorage(k, v));
   } catch (err) {

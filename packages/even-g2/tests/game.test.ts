@@ -74,7 +74,8 @@ import {
   startGame,
 } from '../src/runtime/game';
 import { GAME_LENGTH, RANDOM_GAME_PRESET_ID } from '@veritaslens/core';
-import type { GamePreset } from '@veritaslens/core';
+import type { GamePreset, CallGameOptions } from '@veritaslens/core';
+import { sessionHistory, setSessionHistory } from '../src/state/store';
 
 const quizPreset: GamePreset = {
   id: 'p1',
@@ -102,6 +103,7 @@ beforeEach(async () => {
   // Defensive: drop any leftover session from a previous test.
   await cancelGame().catch(() => undefined);
   hudCalls.picker.mockClear();
+  setSessionHistory([]);
 });
 
 describe('materializeRandomPreset', () => {
@@ -116,6 +118,34 @@ describe('materializeRandomPreset', () => {
 });
 
 describe('startGame', () => {
+  it('forwards the game format/topic and retains search sources in game history', async () => {
+    const citations = [{ domain: 'example.org', url: 'https://example.org/evidence' }];
+    callGameMock.mockImplementationOnce(async (opts) => {
+      (opts as CallGameOptions).onCitations?.(citations);
+      return makeQuizPayload();
+    });
+    await startGame({ ...quizPreset, saveToHistory: true });
+    expect(callGameMock).toHaveBeenCalledWith(expect.objectContaining({
+      search: expect.objectContaining({ format: 'quiz-mc', topic: 'World War II' }),
+    }));
+    expect(currentGameSession()!.webCitations).toEqual(citations);
+    await selectAnswer(0);
+    await cancelGame();
+    expect(sessionHistory()[0]!.webCitations).toEqual(citations);
+  });
+
+  it('does not show a late result from an abandoned game', async () => {
+    let complete: (text: string) => void = () => {};
+    callGameMock.mockImplementationOnce(() => new Promise<string>((resolve) => { complete = resolve; }));
+    const pending = startGame(quizPreset);
+    await vi.waitFor(() => expect(callGameMock).toHaveBeenCalled());
+    await cancelGame();
+    complete(makeQuizPayload());
+    await pending;
+    expect(currentGameSession()).toBeNull();
+    expect(hudCalls.question).not.toHaveBeenCalled();
+  });
+
   it('transitions loading → question on success and pushes the loading + question HUD pages', async () => {
     callGameMock.mockResolvedValueOnce(makeQuizPayload());
     await startGame(quizPreset);

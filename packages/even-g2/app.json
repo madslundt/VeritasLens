@@ -2,14 +2,14 @@
   "package_id": "com.veritaslens.app",
   "edition": "202601",
   "name": "VeritasLens",
-  "version": "0.17.4",
+  "version": "0.17.5",
   "min_app_version": "2.2.10",
   "min_sdk_version": "0.0.16",
   "entrypoint": "index.html",
   "permissions": [
     {
       "name": "network",
-      "desc": "Sends audio to your chosen transcription or AI provider. Optional Tavily search sends a transcript-derived text query for web results. Each service receives only its own credential during analysis or connection tests.",
+      "desc": "Sends audio to your chosen transcription or AI provider. Optional Tavily search sends a transcript-derived query or game topic (including the location for Near me games). Each service receives only its own credential during analysis, game generation, or connection tests.",
       "whitelist": [
         "https://generativelanguage.googleapis.com",
         "https://api.openai.com",

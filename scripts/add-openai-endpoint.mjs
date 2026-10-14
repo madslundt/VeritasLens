@@ -19,6 +19,6 @@ const manifest = JSON.parse(await readFile(path, 'utf8'));
 const permission = manifest.permissions.find((p) => p.name === 'network');
 if (!permission) throw new Error('The Even G2 manifest has no network permission.');
 permission.whitelist = [...new Set([...permission.whitelist, ...origins])];
-permission.desc = 'Sends audio to your chosen transcription/AI provider and transcript-derived queries to Tavily when enabled, including configured custom endpoints. Credentials go only to the corresponding service during analysis or connection tests.';
+permission.desc = 'Sends audio to your chosen transcription/AI provider, including configured custom endpoints. Optional Tavily search sends transcript-derived queries or game topics (including Near me locations). Each service receives only its own credential during analysis, game generation, or connection tests.';
 await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`);
 console.log('Endpoint origins added. Rebuild and repack the Even G2 app before installing.');

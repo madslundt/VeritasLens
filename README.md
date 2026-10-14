@@ -457,3 +457,13 @@ are injected into the answer prompt and preserved as citations. Empty results,
 invalid keys, throttling, and network failures leave the answer marked as
 ungrounded (`°`) without blocking it. Stalled searches time out after 15 seconds
 and analysis continues. Cancellation stops the search too.
+
+Quiz and true/false games also use optional Tavily search, with any AI provider,
+once per question batch. The game clients do not have native search integration.
+Saved topics and “Near me” games search their topic; Random factual games choose
+a specific topic before searching, preferring recent conversation topics while
+avoiding recent Random picks. The search receives only the topic, not the full
+prompt, question history, or audio. Evidence is supplied to the generator and
+saved as sources in game history. Riddles skip search. Disabled, unconfigured,
+empty, or failed search leaves the existing game generation available. All
+lenses and game formats remain available regardless of the Tavily toggle.

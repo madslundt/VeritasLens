@@ -1,9 +1,9 @@
 // src/llm/gameClient.ts
 //
 // Text-only generation path for game sessions. Game mode bypasses the audio
-// lifecycle entirely (no mic, no WAV, no transcription), so this client makes
-// a single text-only request against the active provider and returns the raw
-// JSON text the persona parser consumes.
+// lifecycle entirely (no mic, no WAV, no transcription). Optional Tavily
+// evidence precedes a text-only generation request against the active provider;
+// the returned JSON is consumed by the game persona parser.
 //
 // Reuses the retry shape from `callLens` (transient HTTP statuses, Retry-After
 // hints, ±25% jitter on fallback delays) so the HUD's R1/3 flash works the
@@ -20,12 +20,14 @@ import {
   type GeminiModel,
   type LlmProvider,
   type OpenAiBaseUrl,
+  type WebCitation,
 } from '@/types';
 import { MAX_RETRIES, parseGoogleRetryDelayMs, parseRetryAfterMs } from './gemini';
 import { toStrictSchema } from './openai';
 import { fetchWithEndpointFallback } from '@/llm/endpointFallback';
 import { withFetchTimeout, UploadTimeoutError } from './fetchTimeout';
 import { settings } from '@/state/store';
+import { prepareGameSearch, type GameSearchOptions } from '@/llm/gameSearch';
 
 const CHAT_TIMEOUT_MS = 60_000;
 const MAX_RETRY_DELAY_MS = 8_000;
@@ -39,6 +41,9 @@ export interface CallGameOptions {
   signal?: AbortSignal;
   /** Called before each retry (attempt = 1..MAX_RETRIES). */
   onRetry?: (attempt: number) => void | Promise<void>;
+  /** Opt-in factual-game evidence; riddles always skip search. */
+  search?: GameSearchOptions;
+  onCitations?: (citations: WebCitation[]) => void;
 }
 
 /**
@@ -49,6 +54,19 @@ export interface CallGameOptions {
  */
 export async function callGame(opts: CallGameOptions): Promise<string> {
   const s = settings();
+  // Validate the generation credential before spending a search request.
+  if (s.provider === 'claude' && !s.claudeApiKey) throw new Error('Missing Anthropic API key.');
+  if (s.provider === 'gemini' && !s.geminiApiKey) throw new Error('Missing Gemini API key.');
+  if (s.provider === 'openai-compatible' && !s.openaiApiKeys[s.openaiBaseUrl] && !isCustomOpenAiBaseUrl(s.openaiBaseUrl)) {
+    throw new Error('Missing OpenAI-compatible API key.');
+  }
+  // Search once outside provider retries; games have no native search wiring.
+  const evidence = await prepareGameSearch(opts, s);
+  opts.signal?.throwIfAborted();
+  opts = { ...opts, prompt: evidence.prompt };
+  if (evidence.citations.length) {
+    try { opts.onCitations?.(evidence.citations); } catch { /* subscriber errors */ }
+  }
   switch (s.provider) {
     case 'claude':
       return callGameClaude(opts, s.claudeApiKey, resolveClaudeModel(s.claudeModel));
@@ -77,7 +95,6 @@ interface GenerateContentResponse {
 }
 
 async function callGameGemini(opts: CallGameOptions, apiKey: string, model: GeminiModel): Promise<string> {
-  if (!apiKey) throw new Error('Missing Gemini API key.');
   const bodyJson = JSON.stringify({
     contents: [{ role: 'user', parts: [{ text: opts.prompt }] }],
     generationConfig: {
@@ -134,7 +151,6 @@ async function callGameOpenAi(
   fallbackUrls?: readonly string[],
 ): Promise<string> {
   baseUrl = normalizeOpenAiBaseUrl(baseUrl);
-  if (!apiKey && !isCustomOpenAiBaseUrl(baseUrl)) throw new Error('Missing OpenAI-compatible API key.');
   const strict = toStrictSchema(opts.schema);
   const bodyJson = JSON.stringify({
     model,
@@ -187,7 +203,6 @@ interface MessagesResponse {
 }
 
 async function callGameClaude(opts: CallGameOptions, apiKey: string, model: ClaudeModel): Promise<string> {
-  if (!apiKey) throw new Error('Missing Anthropic API key.');
   const bodyJson = JSON.stringify({
     model,
     max_tokens: 4096,
@@ -266,6 +281,7 @@ async function runWithRetry(
   let lastError: Error | undefined;
   let nextDelayMs = 1000;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    outerSignal?.throwIfAborted();
     if (attempt > 0) {
       await onRetry?.(attempt);
       await retryDelay(nextDelayMs, outerSignal);
@@ -273,6 +289,7 @@ async function runWithRetry(
     const attemptCtl = withFetchTimeout(outerSignal, CHAT_TIMEOUT_MS);
     try {
       const result = await attemptOnce(attemptCtl.signal);
+      outerSignal?.throwIfAborted();
       attemptCtl.cleanup();
       return result;
     } catch (err) {

@@ -1,0 +1,5 @@
+VeritasLens 0.17.5
+
+Adds optional Tavily web search to quiz and true/false games, including Random and Near me. Searches run once per batch and sources are saved in game history. Search errors and timeouts fall back to normal generation; riddles skip search. All lenses and game formats remain available with Tavily on or off, and disabling it keeps the saved key.
+
+Permissions: no new hosts or permission categories. The network description now covers game topics, including location topics for Near me games.

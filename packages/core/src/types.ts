@@ -285,6 +285,8 @@ export interface GameSession {
   /** User's selected option per question; null for skipped riddle. */
   answers: (number | null)[];
   phase: 'loading' | 'question' | 'feedback' | 'end';
+  /** Search evidence for the batch, retained with completed/partial history. */
+  webCitations?: WebCitation[];
 }
 
 /** Sentinel preset id used by the runtime Random entry. Never persisted. */

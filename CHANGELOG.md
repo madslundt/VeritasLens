@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.17.5 — 2026-10-14
+
+- Add optional Tavily evidence to factual game batches across AI providers, including saved topics, Random, and Near me. Search once per batch, outside generation retries; riddles skip search.
+- Preserve normal game generation after empty, invalid, failed, or timed-out searches. Retain sources with completed and partial game history, and discard late results after cancellation.
+- Keep all lenses and game formats available regardless of the Tavily toggle. Update the network permission description to cover game-topic queries without adding hosts or permission categories.
+
 ## 0.17.4 — 2026-10-14
 
 - Simplify LLM and Whisper model selection to dropdowns. Opening a custom-server dropdown loads its available models; manual model fields and separate load buttons are removed.
