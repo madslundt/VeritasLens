@@ -1,4 +1,5 @@
 import React from 'react';
+import type { BufferDuration } from '@veritaslens/core';
 import {
   View,
   Text,
@@ -29,7 +30,9 @@ export function SettingsScreen() {
     void setLocalStorage(KEY_CAMERA_ENABLED, String(value));
   }
 
-  const bufferOptions: Array<{ seconds: 30 | 60 | 120 | 180 | 300; label: string }> = [
+  const bufferOptions: Array<{ seconds: BufferDuration; label: string }> = [
+    { seconds: 10, label: '10 sec' },
+    { seconds: 15, label: '15 sec' },
     { seconds: 30, label: '30 sec' },
     { seconds: 60, label: '1 min' },
     { seconds: 120, label: '2 min' },
@@ -135,6 +138,7 @@ const styles = StyleSheet.create({
   },
   segmentButton: {
     flex: 1,
+    minWidth: 64,
     backgroundColor: '#1a1a1a',
     borderRadius: 8,
     paddingVertical: 10,

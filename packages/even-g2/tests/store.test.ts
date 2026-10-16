@@ -18,6 +18,7 @@ import {
   pushHistoryEntry,
   updateHistoryEntry,
   saveAutoSummaryEnabled,
+  saveAudioCompressionEnabled,
   saveBufferDuration,
   saveMicSource,
   saveTranscriptMode,
@@ -249,6 +250,7 @@ describe('loadSettings', () => {
     expect(s.bufferDuration).toBe(DEFAULT_BUFFER_DURATION);
     expect(s.micSource).toBe(DEFAULT_MIC_SOURCE);
     expect(s.autoSummaryEnabled).toBe(false);
+    expect(s.audioCompressionEnabled).toBe(true);
   });
 
   it('coerces unknown values back to defaults per field', async () => {
@@ -270,6 +272,31 @@ describe('loadSettings', () => {
     const ls = fakeLocalStorage();
     await loadSettings(ls.get);
     expect(settings().micSource).toBe('glasses');
+  });
+
+  it('defaults audio upload compression on when the setting is missing or invalid', async () => {
+    const ls = fakeLocalStorage();
+    await loadSettings(ls.get);
+    expect(settings().audioCompressionEnabled).toBe(true);
+    ls.data.set('veritaslens.audioCompressionEnabled', 'invalid');
+    await loadSettings(ls.get);
+    expect(settings().audioCompressionEnabled).toBe(true);
+  });
+
+  it.each([false, true])('persists audio upload compression=%s across reloads', async (enabled) => {
+    const ls = fakeLocalStorage();
+    expect(await saveAudioCompressionEnabled(ls.set, enabled)).toBe(true);
+    expect(ls.data.get('veritaslens.audioCompressionEnabled')).toBe(String(enabled));
+    expect(settings().audioCompressionEnabled).toBe(enabled);
+    await loadSettings(async () => '');
+    await loadSettings(ls.get);
+    expect(settings().audioCompressionEnabled).toBe(enabled);
+  });
+
+  it('keeps the active compression preference when saving fails', async () => {
+    await loadSettings(async () => '');
+    expect(await saveAudioCompressionEnabled(async () => false, false)).toBe(false);
+    expect(settings().audioCompressionEnabled).toBe(true);
   });
 
   it('clamps a persisted 600s buffer duration from 0.6.x down to the new 300s cap', async () => {

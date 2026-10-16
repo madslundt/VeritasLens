@@ -13,6 +13,7 @@ export async function transcribeConversationAudio(wav: Uint8Array, signal: Abort
   const error = captionConfigurationError();
   if (error) throw new Error(error);
   return transcribeAudio({ apiKey: s.openaiApiKeys[s.sttHost] ?? '', baseUrl: s.sttHost,
+    audioCompressionEnabled: s.audioCompressionEnabled ?? true,
     fallbackUrls: s.sttFallbackUrls?.[s.sttHost], model: s.sttModel || defaultSttModel(s.sttHost), wav, signal });
 }
 

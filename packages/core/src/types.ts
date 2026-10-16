@@ -622,7 +622,7 @@ export type LanguageCode = keyof typeof LANGUAGES;
 export const DEFAULT_LANGUAGE: LanguageCode = 'en';
 
 /** Seconds the rolling PCM buffer holds. */
-export type BufferDuration = 30 | 60 | 120 | 180 | 300;
+export type BufferDuration = 10 | 15 | 30 | 60 | 120 | 180 | 300;
 
 /**
  * Binary control for the rolling tagged transcript pipeline. See the
@@ -810,6 +810,8 @@ export interface Settings {
    * available, since FFT does not produce segment boundaries.
    */
   voiceTrimEnabled: boolean;
+  /** Lossless FLAC for supported audio uploads; falls back to WAV when unavailable. */
+  audioCompressionEnabled: boolean;
   /**
    * Lens IDs excluded from the Auto dispatcher. Default `[]` means all
    * Auto candidates are enabled. Stored as a JSON-serialised string array

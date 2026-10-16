@@ -82,6 +82,7 @@ export async function runWhisperSidecar(
       baseUrl: sttHost,
       fallbackUrls: s.sttFallbackUrls?.[sttHost],
       model: sttModel,
+      audioCompressionEnabled: s.audioCompressionEnabled ?? true,
       wav,
       signal,
     });

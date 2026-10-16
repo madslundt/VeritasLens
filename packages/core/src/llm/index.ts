@@ -200,6 +200,7 @@ export function prepareLensTranscript(wav: Uint8Array, signal: AbortSignal): Pro
   return resolveLensTranscript({
     apiKey: stt.transcribeApiKey, baseUrl: stt.transcribeBaseUrl,
     transcribeModel: stt.transcribeModel, wav, signal,
+    audioCompressionEnabled: s.audioCompressionEnabled ?? true,
     transcribeFallbackUrls: s.provider === 'claude' || isOpenAiChatOnlyHost(s.openaiBaseUrl)
       ? s.sttFallbackUrls?.[stt.transcribeBaseUrl] : s.openaiFallbackUrls?.[s.openaiBaseUrl],
   });
@@ -234,6 +235,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       transcribeFallbackUrls: s.sttFallbackUrls?.[sttHost],
       transcribeModel: sttModel,
       wav: opts.wav,
+      audioCompressionEnabled: opts.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true,
       signal: opts.signal,
       transcript: opts.transcript,
     });
@@ -270,6 +272,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
       transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
       transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
       wav: opts.wav,
+      audioCompressionEnabled: opts.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true,
       transcript: opts.transcript,
       prompt: opts.prompt,
       schema: opts.schema,
@@ -283,6 +286,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
     apiKey: opts.apiKey ?? s.geminiApiKey,
     model: (opts.model as GeminiModel | undefined) ?? s.geminiModel,
     wav: opts.wav,
+    audioCompressionEnabled: opts.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true,
     prompt: opts.prompt,
     schema: opts.schema,
     signal: opts.signal,
@@ -322,6 +326,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       transcribeFallbackUrls: s.sttFallbackUrls?.[sttHost],
       transcribeModel: sttModel,
       wav: opts.wav,
+      audioCompressionEnabled: opts.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true,
       signal: opts.signal,
       transcript: opts.transcript,
     });
@@ -380,6 +385,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
         transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
         transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
         wav: opts.wav,
+        audioCompressionEnabled: opts.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true,
         transcript: opts.transcript,
         prompt: opts.prompt,
         schema: opts.schema,
@@ -406,6 +412,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
       transcribeBaseUrl: stt.isCrossHost ? stt.transcribeBaseUrl : undefined,
       transcribeApiKey: stt.isCrossHost ? stt.transcribeApiKey : undefined,
       wav: opts.wav,
+      audioCompressionEnabled: opts.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true,
       transcript: opts.transcript,
       prompt: opts.prompt,
       schema: opts.schema,
@@ -436,6 +443,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
     apiKey: opts.apiKey ?? s.geminiApiKey,
     model: geminiModel,
     wav: opts.wav,
+    audioCompressionEnabled: opts.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true,
     prompt: opts.prompt,
     schema: opts.schema,
     signal: opts.signal,
@@ -500,11 +508,13 @@ export async function runSelfTest(
     sttModel?: string;
     sttApiKey?: string;
     lightweight?: boolean;
+    audioCompressionEnabled?: boolean;
   },
 ): Promise<{ latencyMs: number }> {
   const s = settings();
   const provider = overrides?.provider ?? s.provider;
   const baseUrl = overrides?.baseUrl ?? s.openaiBaseUrl;
+  const audioCompressionEnabled = overrides?.audioCompressionEnabled ?? s.audioCompressionEnabled ?? true;
   if ((provider === 'gemini' || provider === 'claude'
     || (provider === 'openai-compatible' && OPENAI_INLINE_AUDIO_HOSTS.has(baseUrl))) && overrides?.sttHost !== undefined) {
     const sttHost = overrides.sttHost;
@@ -512,6 +522,7 @@ export async function runSelfTest(
     if (!sttApiKey && !isCustomSttHost(sttHost)) throw new Error(`Add a ${openaiHostLabel(sttHost)} API key for transcription.`);
     await transcribeAudio({
       baseUrl: sttHost, apiKey: sttApiKey,
+      audioCompressionEnabled,
       model: overrides.sttModel || s.sttModel || defaultSttModel(sttHost),
       fallbackUrls: overrides.sttFallbackUrls ?? s.sttFallbackUrls?.[sttHost],
       wav: encodePcmToWav(new Uint8Array(16_000 * 2), { sampleRate: 16_000, bitsPerSample: 16, channels: 1 }),
@@ -520,6 +531,7 @@ export async function runSelfTest(
   if (provider === 'gemini') {
     return runGeminiSelfTest(apiKey, model as GeminiModel | undefined, {
       lightweight: overrides?.lightweight,
+      audioCompressionEnabled,
     });
   }
   if (provider === 'claude') {
@@ -540,6 +552,7 @@ export async function runSelfTest(
       || defaultSttModel(sttHost);
     return runOpenAiSelfTest(apiKey, baseUrl, model ?? s.openaiModel, sttModel, {
       transcribeBaseUrl: sttHost,
+      audioCompressionEnabled,
       transcribeApiKey: sttApiKey,
       fallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
       transcribeFallbackUrls: overrides?.sttFallbackUrls ?? s.sttFallbackUrls?.[sttHost],
@@ -550,6 +563,7 @@ export async function runSelfTest(
     || s.openaiTranscribeModels[baseUrl]
     || OPENAI_TRANSCRIBE_MODELS[baseUrl];
   return runOpenAiSelfTest(apiKey, baseUrl, model ?? s.openaiModel, transcribeModel, {
+    audioCompressionEnabled,
     fallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
     transcribeFallbackUrls: overrides?.fallbackUrls ?? s.openaiFallbackUrls?.[baseUrl],
   });

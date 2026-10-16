@@ -2,7 +2,7 @@
   "package_id": "com.veritaslens.app",
   "edition": "202601",
   "name": "VeritasLens",
-  "version": "0.18.0",
+  "version": "0.18.1",
   "min_app_version": "2.2.10",
   "min_sdk_version": "0.0.16",
   "entrypoint": "index.html",
@@ -25,7 +25,7 @@
     },
     {
       "name": "g2-microphone",
-      "desc": "VeritasLens listens to a rolling in-memory buffer of nearby audio (30 seconds to 5 minutes, configurable). Audio is never written to disk, ages out of the buffer, and is cleared when the session ends."
+      "desc": "VeritasLens listens to a rolling in-memory buffer of nearby audio (10 seconds to 5 minutes, configurable). Audio is never written to disk, ages out of the buffer, and is cleared when the session ends."
     },
     {
       "name": "phone-microphone",

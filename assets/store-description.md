@@ -25,6 +25,6 @@ Or leave **Auto** on and let VeritasLens pick the right lens for what it just he
 Pick **Google Gemini** (analyses audio directly), **OpenAI**, or **Groq** (Whisper-transcribes first). One API key, stored only on this device.
 
 **Privacy by architecture**
-No companion server. No telemetry. No account. Audio lives in a rolling in-memory buffer (30 s, 2 min, or 5 min), is never written to disk, and is dropped the instant your request returns. The only outbound traffic is to the provider you chose.
+No companion server. No telemetry. No account. Audio lives in a rolling in-memory buffer (10 seconds to 5 minutes), is never written to disk, and is dropped the instant your request returns. The only outbound traffic is to the provider you chose.
 
 Tap. Analyse. Glance. The conversation never paused.

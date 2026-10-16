@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { HistoryEntry, LensResult, SttHost } from '@veritaslens/core';
+import type { BufferDuration, HistoryEntry, LensResult, SttHost } from '@veritaslens/core';
 
 export type AppPhase = 'booting' | 'idle' | 'listening' | 'thinking' | 'displaying' | 'error';
 
@@ -10,7 +10,7 @@ export interface RaybanSettings {
   cameraEnabled: boolean;
   ttsEnabled: boolean;
   ttsRate: number;
-  bufferDurationSec: 30 | 60 | 120 | 180 | 300;
+  bufferDurationSec: BufferDuration;
   provider: LlmProvider;
   geminiModel: string;
   claudeModel: string;

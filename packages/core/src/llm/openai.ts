@@ -17,6 +17,8 @@ import { encodePcmToWav } from '@/runtime/audioBuffer';
 import { normalizeOpenAiBaseUrl, isCustomOpenAiBaseUrl, isCustomSttHost, OPENAI_INLINE_AUDIO_HOSTS, OPENAI_TRANSCRIBE_MODELS, openaiHostLabel, type OpenAiBaseUrl, type GroundingMode, type WebCitation } from '@/types';
 import { MAX_RETRIES, parseRetryAfterMs } from './gemini';
 import { withFetchTimeout, UploadTimeoutError, throwIfAborted as checkAborted } from '@/llm/fetchTimeout';
+import { prepareAudioUpload } from '@/runtime/audioUpload';
+import { pushDebugEvent } from '@/state/store';
 import { fetchWithEndpointFallback } from '@/llm/endpointFallback';
 import { StreamingJsonParser } from './streamingJsonParser';
 import { NoSpeechError } from '@/personas/_utils';
@@ -56,6 +58,8 @@ export interface CallOpenAiLensOptions {
   transcribeApiKey?: string;
   /** WAV-encoded audio bytes. Transcribed before chat completions. */
   wav: Uint8Array;
+  /** Enable lossless compression for STT. OpenRouter inline audio stays WAV. */
+  audioCompressionEnabled?: boolean;
   /** One snapshot's shared STT result (Auto classifier and answer reuse it). */
   transcript?: Promise<string>;
   /** Fully-built, language-aware system prompt. */
@@ -131,7 +135,7 @@ export function toStrictSchema(schema: unknown): unknown {
 
 /** Resolve STT once per audio snapshot, including its empty-speech verdict. */
 export async function resolveLensTranscript(opts: Pick<CallOpenAiLensOptions,
-  'apiKey' | 'baseUrl' | 'transcribeBaseUrl' | 'transcribeApiKey' | 'transcribeModel' | 'wav' | 'signal' | 'transcript' | 'transcribeFallbackUrls' | 'fallbackUrls'
+  'apiKey' | 'baseUrl' | 'transcribeBaseUrl' | 'transcribeApiKey' | 'transcribeModel' | 'wav' | 'signal' | 'transcript' | 'transcribeFallbackUrls' | 'fallbackUrls' | 'audioCompressionEnabled'
 >): Promise<string> {
   const sttBaseUrl = opts.transcribeBaseUrl ?? opts.baseUrl;
   const sttApiKey = opts.transcribeBaseUrl && opts.transcribeBaseUrl !== opts.baseUrl
@@ -145,6 +149,7 @@ export async function resolveLensTranscript(opts: Pick<CallOpenAiLensOptions,
     fallbackUrls: opts.transcribeFallbackUrls ?? (sttBaseUrl === opts.baseUrl ? opts.fallbackUrls : undefined),
     model: requireTranscribeModel(opts, sttBaseUrl),
     wav: opts.wav,
+    audioCompressionEnabled: opts.audioCompressionEnabled,
     signal: opts.signal,
   }));
   checkAborted(opts.signal);
@@ -827,30 +832,60 @@ export interface TranscribeOptions {
   fallbackUrls?: readonly string[];
   model: string;
   wav: Uint8Array;
+  /** OpenAI/Groq support FLAC; custom servers retry WAV on explicit rejection. */
+  audioCompressionEnabled?: boolean;
   signal?: AbortSignal;
+}
+
+// OpenAI and Groq document FLAC support for /audio/transcriptions. Custom
+// implementations vary: remember explicit rejections per server/model for
+// this app run. Never infer incompatibility from network/auth/server errors.
+const wavOnlyTranscriptionModels = new Set<string>();
+
+function rejectsFlac(status: number, message: string): boolean {
+  return status === 415 || ((status === 400 || status === 422)
+    && /flac|file (?:format|type)|audio (?:format|type)|media type|codec/i.test(message)
+    && /unsupported|not supported|invalid|unrecognized|unknown|not allowed|only .+allowed|supported formats/i.test(message));
 }
 
 export async function transcribeAudio(opts: TranscribeOptions): Promise<string> {
   opts = { ...opts, baseUrl: normalizeOpenAiBaseUrl(opts.baseUrl) };
   if (!opts.model.trim()) throw new Error('Enter a transcription model ID.');
-  const form = new FormData();
-  form.append('file', new Blob([opts.wav as BlobPart], { type: 'audio/wav' }), 'audio.wav');
-  form.append('model', opts.model);
-  form.append('response_format', 'json');
+  checkAborted(opts.signal);
+  // Format support can differ by model even on one custom server. Alternate
+  // addresses are configured as aliases of that server, so share its verdict.
+  const compatibilityKey = JSON.stringify([opts.baseUrl, opts.model]);
+  const audio = await prepareAudioUpload(opts.wav,
+    opts.audioCompressionEnabled === true && !wavOnlyTranscriptionModels.has(compatibilityKey), opts.signal);
+  const formFor = (bytes: Uint8Array, format: 'flac' | 'wav'): FormData => {
+    const form = new FormData();
+    form.append('file', new Blob([bytes as BlobPart], { type: `audio/${format}` }), `audio.${format}`);
+    form.append('model', opts.model);
+    form.append('response_format', 'json');
+    return form;
+  };
   // STT_TIMEOUT_MS bounds the upload + Whisper inference. Without it, a
   // stalled connection on a 5-minute WAV (≈ 9.6 MB) sits forever — the bug
   // that prompted item-A in the v0.12.0 plan.
   const attemptCtl = withFetchTimeout(opts.signal, STT_TIMEOUT_MS);
   try {
-    const response = await fetchWithEndpointFallback({
+    const upload = (bytes: Uint8Array, format: 'flac' | 'wav') => fetchWithEndpointFallback({
       baseUrl: opts.baseUrl,
       fallbackUrls: opts.fallbackUrls,
       apiKey: opts.apiKey,
       path: '/audio/transcriptions',
-      init: { method: 'POST', body: form, signal: attemptCtl.signal },
+      init: { method: 'POST', body: formFor(bytes, format), signal: attemptCtl.signal },
     });
+    let response = await upload(audio.bytes, audio.format);
+    let errText = response.ok ? '' : await response.text();
+    if (audio.format === 'flac' && !response.ok && rejectsFlac(response.status, errText)) {
+      checkAborted(attemptCtl.signal);
+      wavOnlyTranscriptionModels.add(compatibilityKey);
+      pushDebugEvent({ label: 'audio-upload', detail: 'STT server rejected FLAC; retrying WAV and remembering this server/model for this app run.' });
+      response = await upload(opts.wav, 'wav');
+      errText = response.ok ? '' : await response.text();
+    }
     if (!response.ok) {
-      const errText = await response.text();
       throw new Error(
         `${openaiHostLabel(opts.baseUrl)} transcription HTTP ${response.status} (model "${opts.model}"): ${truncate(errText, 2000)}`,
       );
@@ -931,6 +966,7 @@ export async function runSelfTest(
   transcribeModel?: string,
   /** Cross-host STT overrides for chat-only hosts (DeepSeek, Perplexity). */
   cross?: {
+    audioCompressionEnabled?: boolean;
     transcribeBaseUrl?: OpenAiBaseUrl;
     transcribeApiKey?: string;
     fallbackUrls?: readonly string[];
@@ -957,6 +993,7 @@ export async function runSelfTest(
       model: transcribeModel || OPENAI_TRANSCRIBE_MODELS[sttBaseUrl] || '',
       fallbackUrls: cross?.transcribeFallbackUrls,
       wav,
+      audioCompressionEnabled: cross?.audioCompressionEnabled,
     });
     transcript = Promise.resolve(text || '[Self-test silence]');
   }

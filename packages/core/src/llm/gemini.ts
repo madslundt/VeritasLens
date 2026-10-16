@@ -1,5 +1,6 @@
 // src/llm/gemini.ts
 import { uint8ToBase64, encodePcmToWav } from '@/runtime/audioBuffer';
+import { prepareAudioUpload } from '@/runtime/audioUpload';
 import {
   DEFAULT_GEMINI_MODEL,
   GEMINI_MODEL_PATTERN,
@@ -64,6 +65,8 @@ export interface CallLensOptions {
   apiKey: string;
   /** WAV-encoded audio bytes. */
   wav: Uint8Array;
+  /** Gemini accepts audio/flac. Disabled callers keep the original WAV. */
+  audioCompressionEnabled?: boolean;
   /** Fully-built, language-aware system prompt. */
   prompt: string;
   /** Gemini responseSchema object. Opaque — forwarded as-is to the API. */
@@ -110,6 +113,9 @@ const TRANSIENT_STATUSES = new Set([429, 500, 502, 503, 504]);
 export async function callLens(opts: CallLensOptions): Promise<string> {
   if (!opts.apiKey) throw new Error('Missing Gemini API key.');
 
+  const audio = opts.audioCompressionEnabled
+    ? await prepareAudioUpload(opts.wav, true, opts.signal) : { bytes: opts.wav, format: 'wav' };
+
   const baseSchema = opts.schema as Record<string, unknown>;
   const augmentedSchema = {
     ...baseSchema,
@@ -130,7 +136,7 @@ export async function callLens(opts: CallLensOptions): Promise<string> {
           role: 'user',
           parts: [
             { text: opts.prompt },
-            { inlineData: { mimeType: 'audio/wav', data: uint8ToBase64(opts.wav) } },
+            { inlineData: { mimeType: `audio/${audio.format}`, data: uint8ToBase64(audio.bytes) } },
             ...(opts.imageData ? [{ inlineData: { mimeType: 'image/jpeg', data: opts.imageData } }] : []),
           ],
         },
@@ -291,6 +297,9 @@ export interface CallLensStreamOptions extends CallLensOptions {
 export async function callLensStream(opts: CallLensStreamOptions): Promise<string> {
   if (!opts.apiKey) throw new Error('Missing Gemini API key.');
 
+  const audio = opts.audioCompressionEnabled
+    ? await prepareAudioUpload(opts.wav, true, opts.signal) : { bytes: opts.wav, format: 'wav' };
+
   const baseSchema = opts.schema as Record<string, unknown>;
   const augmentedSchema = {
     ...baseSchema,
@@ -307,7 +316,7 @@ export async function callLensStream(opts: CallLensStreamOptions): Promise<strin
           role: 'user',
           parts: [
             { text: opts.prompt },
-            { inlineData: { mimeType: 'audio/wav', data: uint8ToBase64(opts.wav) } },
+            { inlineData: { mimeType: `audio/${audio.format}`, data: uint8ToBase64(audio.bytes) } },
             ...(opts.imageData ? [{ inlineData: { mimeType: 'image/jpeg', data: opts.imageData } }] : []),
           ],
         },
@@ -507,6 +516,7 @@ function safeJsonParse(s: string): GenerateContentResponse | null {
 }
 
 export interface RunSelfTestOptions {
+  audioCompressionEnabled?: boolean;
   /** Skip the inline-audio payload — sends a text-only generateContent
    *  request. Used for the classifier probe after the main probe (which
    *  already validates the audio path against the same key/API). */
@@ -571,7 +581,7 @@ export async function runSelfTest(
   const silentPcm = new Uint8Array(16_000 * 2);
   const wav = encodePcmToWav(silentPcm, { sampleRate: 16_000, bitsPerSample: 16, channels: 1 });
   const t0 = performance.now();
-  await callLens({ apiKey, wav, prompt, schema, model });
+  await callLens({ apiKey, wav, prompt, schema, model, audioCompressionEnabled: opts?.audioCompressionEnabled });
   return { latencyMs: Math.round(performance.now() - t0) };
 }
 

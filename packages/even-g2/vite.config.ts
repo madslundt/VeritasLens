@@ -50,6 +50,8 @@ const VAD_ASSETS: Array<{ from: string; to: string }> = [
   { from: '../core/assets/vad/RUST-LICENSE', to: 'RUST-LICENSE' },
   { from: '../../node_modules/@fluidinference/fluidvad/SILERO_LICENSE', to: 'SILERO-LICENSE' },
   { from: '../../node_modules/@fluidinference/fluidvad/LICENSE', to: 'FLUIDVAD-LICENSE' },
+  { from: '../../node_modules/@audio/encode-flac/LICENSE', to: 'FLAC-ENCODER-LICENSE' },
+  { from: '../../node_modules/@audio/encode-flac/LICENSE.libflac', to: 'LIBFLAC-LICENSE' },
 ];
 
 function copyVadAssets(): Plugin {
@@ -106,7 +108,7 @@ export default defineConfig(({ command }) => ({
     strictPort: true,
     // The runtime and candidate asset live outside even-g2/src.
     fs: {
-      allow: ['.', '../core', '../../node_modules/@fluidinference/fluidvad'],
+      allow: ['.', '../core', '../../node_modules/@fluidinference/fluidvad', '../../node_modules/@audio/encode-flac'],
     },
   },
   build: {

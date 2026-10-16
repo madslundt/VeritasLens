@@ -1,0 +1,9 @@
+VeritasLens 0.18.1
+
+Reduce uploads on slow connections with new 10- and 15-second audio windows and optional lossless FLAC compression on G2. Audio upload compression is enabled by default in Settings and preserves the captured samples. Turning it off sends WAV.
+
+FLAC is used for Gemini inline audio and OpenAI/Groq transcription, including the transcription servers selected for chat-only providers. Custom transcription servers that explicitly reject FLAC retry with WAV and remember compatibility per server/model for the app run. Slow or unavailable encoding also falls back to WAV. OpenRouter inline audio and native Ray-Ban uploads remain WAV.
+
+The preference also applies to live captions, transcript sidecars, shared Auto transcription, and the Settings connection test. Upload size and encoding time are available in debug events.
+
+Permissions: no new hosts or permission categories. Requires Even App 2.2.10 and SDK 0.0.16.

@@ -21,7 +21,7 @@ beforeEach(() => {
     claudeApiKey: 'claude-key', claudeModel: DEFAULT_CLAUDE_MODEL,
     responseLanguage: 'en', bufferDuration: 30, micSource: 'glasses', autoSummaryEnabled: false,
     crossSessionRecallEnabled: false, transcriptMode: 'off', discreet: false,
-    voiceGateRmsFloor: 200, voiceTrimEnabled: true, autoDisabledLenses: [],
+    voiceGateRmsFloor: 200, voiceTrimEnabled: true, audioCompressionEnabled: true, autoDisabledLenses: [],
     autoModeEnabled: false, autoModeStartMs: 1000, autoModeSilenceMs: 1000, autoModeIntervalMs: 30000,
     translationSourceLanguages: 'auto', translationMode: 'converse', romanizeForeignScript: false,
     locationEnabled: false, cachedLocation: null,

@@ -2,6 +2,14 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.18.1] — 2026-10-16
+
+- Add 10- and 15-second audio windows on G2 and Ray-Ban for shorter uploads and less captured context.
+- Add a saved Audio upload compression switch on G2, enabled by default. Lossless FLAC reduces Gemini inline audio and OpenAI/Groq transcription uploads without changing the captured samples; turning it off sends WAV.
+- Fall back to WAV when encoding is unavailable, too slow, or larger than the original. Custom transcription servers that explicitly reject FLAC get one WAV retry, remembered per server/model for the app run. OpenRouter inline audio and native Ray-Ban uploads retain WAV.
+- Apply the compression preference to analysis, shared Auto transcription, live captions, transcript sidecars, and draft connection tests. Include encoder licenses and upload-size/timing diagnostics.
+- Update Ray-Ban settings tests to match the current model dropdowns and retain coverage of optional search settings.
+
 ## [0.18.0] — 2026-10-14
 
 - Add Everyday, Work, and Understand conversation profiles, with optional goals, constraints, selected background notes, and reusable saved setups.

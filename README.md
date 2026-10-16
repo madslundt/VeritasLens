@@ -138,7 +138,8 @@ The **Test** button in Settings runs `runSelfTest()` against the active draft, s
 - **Glanceable HUD layout.** Lens-specific result on the 576×288 4-bit greyscale G2 display. Result persists until the next action.
 - **Searchable session history.** Every analysis is persisted (KV store on G2, encrypted SecureStore for keys on Rayban). Search matches quote / question / verdict / lens name **and auto-derived tags** from each entry's content.
 - **End-of-session Summary.** Leaving a session — manually or by changing provider, model, key, or buffer length — writes a final 5-minute interval summary plus an overall synthesis. Silent intervals are skipped.
-- **Configurable buffer.** 30 s, 1 min, 2 min, or 5 min of rolling PCM (capped at 5 min to match the Summary cadence).
+- **Configurable buffer.** 10 s, 15 s, 30 s, 1 min, 2 min, 3 min, or 5 min of rolling PCM (capped at 5 min to match the Summary cadence). Shorter windows can reduce response time, but include less context.
+- **Optional smaller audio uploads on G2.** Settings → Audio upload compression (on by default) uses lossless FLAC for Gemini inline audio and OpenAI/Groq transcription. Turn it off to skip encoding and upload WAV. Custom transcription servers try FLAC and get one WAV retry on an explicit format rejection, remembered per server/model for the app run. WAV is also retained if encoding is unavailable, takes too long, or does not shrink the file. Debug events show upload bytes and compression time. OpenRouter inline audio remains WAV because supported formats vary by routed model; native Ray-Ban uploads remain WAV until a native encoder is available. Anthropic, DeepSeek, Perplexity, and local chat models receive text; compression applies to their chosen transcription server. Format references: [OpenAI](https://developers.openai.com/api/reference/resources/audio/subresources/transcriptions/methods/create), [Groq](https://console.groq.com/docs/speech-to-text), [Gemini](https://ai.google.dev/gemini-api/docs/audio), [OpenRouter](https://openrouter.ai/docs/guides/overview/multimodal/audio).
 - **Continuous recording.** The PCM ring buffer keeps filling during compute / display / menu so the next analysis covers anything said in between. A `●` indicator shows when the mic is hot.
 - **Hide / re-reveal via swipe.** Swipe down past the last answer hides the result; swipe up brings it back.
 - **Session-wide swipe scroll.** Swipe up/down walks every answer in the session, not just the latest. `X/Y` indicator counts session entries.
@@ -393,7 +394,7 @@ Add `--check` after `pack` to verify `package_id` availability on the store befo
 
 ## Privacy
 
-- Audio is held in a configurable rolling **in-memory** PCM ring buffer (30 s – 5 min). Eviction is FIFO; the buffer is released when the session ends.
+- Audio is held in a configurable rolling **in-memory** PCM ring buffer (10 s – 5 min). Eviction is FIFO; the buffer is released when the session ends.
 - Raw audio is not written to disk or a persistent audio store. Captured speech is sent to the selected provider for analysis or opt-in transcription.
 - Voice-activity detection (Silero v6 + Earshot WASM) runs **locally** in the G2 WebView before analysis uploads. FFT is the fallback when model assets cannot load; native consumers use the FFT adapter without browser WASM.
 - Session history (analysis results, not audio) is persisted on-device — Even App KV on G2, `AsyncStorage` on Rayban — and never sent to any server.

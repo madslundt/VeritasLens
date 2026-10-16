@@ -10,6 +10,7 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "@audio/encode-flac": "1.4.3",
     "@fluidinference/fluidvad": "0.2.0"
   },
   "devDependencies": {

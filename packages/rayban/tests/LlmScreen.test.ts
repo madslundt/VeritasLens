@@ -42,7 +42,7 @@ vi.mock('@veritaslens/core', async (importOriginal) => ({
 
 import { LlmScreen } from '../src/screens/LlmScreen';
 
-type Element = ReactElement<{ children?: unknown; onPress?: () => void }>;
+type Element = ReactElement<{ children?: unknown; onPress?: () => void; accessibilityLabel?: string }>;
 function elements(tree: unknown): Element[] {
   if (Array.isArray(tree)) return tree.flatMap(elements);
   if (!tree || typeof tree !== 'object' || !('props' in tree)) return [];
@@ -51,15 +51,29 @@ function elements(tree: unknown): Element[] {
 }
 function press(text: string): void {
   const node = elements(LlmScreen()).find((element) => element.type === 'TouchableOpacity'
-    && elements(element.props.children).some((child) =>
-      (Array.isArray(child.props.children) ? child.props.children.join('') : child.props.children) === text));
+    && (element.props.accessibilityLabel === text || elements(element.props.children).some((child) =>
+      (Array.isArray(child.props.children) ? child.props.children.join('') : child.props.children) === text)));
   expect(node).toBeDefined();
   node!.props.onPress!();
 }
+// Keep the draft slots aligned with LlmScreen, including its separate chat
+// and transcription model pickers before the optional Tavily controls.
+const hook = {
+  sttModel: 6,
+  sttModels: 12,
+  sttModelsMessage: 14,
+  sttModelPickerOpen: 15,
+  tavilyEnabled: 20,
+  tavilyKey: 21,
+} as const;
 function draft(provider = 'openai-compatible', speechUrl = 'https://whisper.example/v1', speechKey = '') {
   testState.hooks = [provider, 'https://chat.example/v1/', 'chat-model', 'chat-key',
     'https://chat-backup.example/v1/\nhttp://localhost:1234/v1', speechUrl, 'whisper-model', speechKey,
-    'https://whisper-backup.example/v1/'];
+    'https://whisper-backup.example/v1/',
+    false, false, null,
+    [], false, null, false,
+    [], false, null, false,
+    false, '', false, null];
 }
 
 beforeEach(() => {
@@ -75,7 +89,8 @@ beforeEach(() => {
 describe('LLM settings draft actions', () => {
   it.each([true, false])('saves the optional Tavily key separately with search enabled=%s', async (enabled) => {
     draft();
-    testState.hooks.push(false, false, null, [], false, null, false, enabled, 'tvly-only-search');
+    testState.hooks[hook.tavilyEnabled] = enabled;
+    testState.hooks[hook.tavilyKey] = 'tvly-only-search';
     press('Save settings');
     await vi.waitFor(() => expect(testState.patchFullSettings).toHaveBeenCalled());
     expect(testState.setLocalStorage).toHaveBeenCalledWith('veritaslens.tavilyApiKey', 'tvly-only-search');
@@ -88,19 +103,21 @@ describe('LLM settings draft actions', () => {
 
   it('changes only the enabled preference when toggling Tavily', () => {
     draft();
-    testState.hooks.push(false, false, null, [], false, null, false, true, 'tvly-retained');
+    testState.hooks[hook.tavilyEnabled] = true;
+    testState.hooks[hook.tavilyKey] = 'tvly-retained';
     const toggle = elements(LlmScreen()).find((element) => element.type === 'Switch')! as ReactElement<{ onValueChange: (enabled: boolean) => void }>;
     toggle.props.onValueChange(false);
     toggle.props.onValueChange(true);
-    expect(testState.setters[16]).toHaveBeenNthCalledWith(1, false);
-    expect(testState.setters[16]).toHaveBeenNthCalledWith(2, true);
-    expect(testState.setters[17]).not.toHaveBeenCalled();
+    expect(testState.setters[hook.tavilyEnabled]).toHaveBeenNthCalledWith(1, false);
+    expect(testState.setters[hook.tavilyEnabled]).toHaveBeenNthCalledWith(2, true);
+    expect(testState.setters[hook.tavilyKey]).not.toHaveBeenCalled();
     expect(testState.setLocalStorage).not.toHaveBeenCalled();
   });
 
   it('tests the unsaved Tavily key without saving credentials', async () => {
     draft();
-    testState.hooks.push(false, false, null, [], false, null, false, true, 'tvly-unsaved');
+    testState.hooks[hook.tavilyEnabled] = true;
+    testState.hooks[hook.tavilyKey] = 'tvly-unsaved';
     press('Test Tavily search');
     await vi.waitFor(() => expect(testState.runTavilySelfTest).toHaveBeenCalledWith('tvly-unsaved', expect.any(AbortSignal)));
     expect(testState.setLocalStorage).not.toHaveBeenCalled();
@@ -108,37 +125,42 @@ describe('LLM settings draft actions', () => {
 
   it('requires a key only when optional Tavily is enabled', async () => {
     draft();
-    testState.hooks.push(false, false, null, [], false, null, false, true, '');
+    testState.hooks[hook.tavilyEnabled] = true;
     press('Save settings');
     await vi.waitFor(() => expect(testState.setters[11]).toHaveBeenCalledWith(expect.stringContaining('Add a Tavily API key')));
     expect(testState.setLocalStorage).not.toHaveBeenCalled();
   });
 
-  it('loads custom Whisper models using the unsaved key and ordered alternatives', async () => {
+  it('loads custom Whisper models when opening the dropdown using the unsaved key and ordered alternatives', async () => {
     draft('openai-compatible', 'https://whisper.example/v1/', 'whisper-key');
-    press('Load Whisper models');
+    press('Transcription model: whisper-model');
     await vi.waitFor(() => expect(testState.fetchTranscriptionModels).toHaveBeenCalledWith(
       'whisper-key', 'https://whisper.example/v1', expect.any(AbortSignal), ['https://whisper-backup.example/v1'],
     ));
-    expect(testState.setters[12]).toHaveBeenCalledWith(['local-whisper', 'distil-large-v3']);
-    expect(testState.setters[15]).toHaveBeenCalledWith(true);
+    expect(testState.setters[hook.sttModels]).toHaveBeenCalledWith(['local-whisper', 'distil-large-v3']);
+    expect(testState.setters[hook.sttModelPickerOpen]).toHaveBeenCalledWith(true);
     expect(testState.setLocalStorage).not.toHaveBeenCalled();
   });
 
-  it('selects a discovered model without discarding manual model entry', () => {
+  it('keeps the saved model as an option and selects a discovered model from the dropdown', () => {
     draft();
-    testState.hooks.push(false, false, null, ['local-whisper'], false, null, true);
+    testState.hooks[hook.sttModels] = ['local-whisper'];
+    testState.hooks[hook.sttModelPickerOpen] = true;
+    const tree = elements(LlmScreen());
+    expect(tree.some((element) => element.type === 'TouchableOpacity'
+      && elements(element.props.children).some((child) => child.props.children === 'whisper-model'))).toBe(true);
+    testState.setters = [];
     press('local-whisper');
-    expect(testState.setters[6]).toHaveBeenCalledWith('local-whisper');
-    expect(testState.setters[15]).toHaveBeenCalledWith(false);
+    expect(testState.setters[hook.sttModel]).toHaveBeenCalledWith('local-whisper');
+    expect(testState.setters[hook.sttModelPickerOpen]).toHaveBeenCalledWith(false);
   });
 
-  it('keeps the entered model when the server cannot list models', async () => {
+  it('keeps the saved model when the server does not return any models', async () => {
     draft();
     testState.fetchTranscriptionModels.mockResolvedValueOnce([]);
-    press('Load Whisper models');
-    await vi.waitFor(() => expect(testState.setters[14]).toHaveBeenCalledWith(expect.stringContaining('Enter the model ID manually')));
-    expect(testState.setters[6]).not.toHaveBeenCalled();
+    press('Transcription model: whisper-model');
+    await vi.waitFor(() => expect(testState.setters[hook.sttModelsMessage]).toHaveBeenCalledWith('This server did not return any models.'));
+    expect(testState.setters[hook.sttModel]).not.toHaveBeenCalled();
   });
 
   it('tests draft custom Whisper and ordered alternate addresses without saving', async () => {

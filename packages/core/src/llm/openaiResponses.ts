@@ -50,6 +50,8 @@ export interface CallOpenAiResponsesLensOptions {
   transcribeBaseUrl?: OpenAiBaseUrl;
   transcribeApiKey?: string;
   wav: Uint8Array;
+  /** Lossless compression for the transcription upload preceding Responses. */
+  audioCompressionEnabled?: boolean;
   prompt: string;
   schema: unknown;
   signal?: AbortSignal;

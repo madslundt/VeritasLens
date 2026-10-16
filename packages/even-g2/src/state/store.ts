@@ -113,6 +113,7 @@ const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
 const SETTINGS_KEY_VOICE_GATE_LEGACY = 'veritaslens.voiceGateEnabled';
 const SETTINGS_KEY_VOICE_TRIM = 'veritaslens.voiceTrimEnabled';
+const SETTINGS_KEY_AUDIO_COMPRESSION = 'veritaslens.audioCompressionEnabled';
 const SETTINGS_KEY_AUTO_DISABLED_LENSES = 'veritaslens.autoDisabledLenses';
 const SETTINGS_KEY_AUTO_MODE_ENABLED = 'veritaslens.autoModeEnabled';
 const SETTINGS_KEY_AUTO_MODE_START_MS = 'veritaslens.autoModeStartMs';
@@ -254,6 +255,7 @@ const [settings, setSettings] = createSignal<Settings>({
   // VAD-based payload trimming defaults ON: shrinks the WAV to just the
   // detected speech, cutting upload + ingest time on sparse buffers.
   voiceTrimEnabled: true,
+  audioCompressionEnabled: true,
   autoDisabledLenses: [],
   // Auto-mode VAD: off by default; user opts in from Settings. Thresholds
   // default to a snappy-but-not-twitchy 1.5 s arm / 2 s silence trigger.
@@ -331,6 +333,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_VOICE_GATE_RMS),
       safeGet(SETTINGS_KEY_VOICE_GATE_LEGACY),
       safeGet(SETTINGS_KEY_VOICE_TRIM),
+      safeGet(SETTINGS_KEY_AUDIO_COMPRESSION),
       safeGet(SETTINGS_KEY_AUTO_DISABLED_LENSES),
       Promise.resolve(rawActiveSttUrl),
       safeGet(SETTINGS_KEY_STT_MODEL),
@@ -370,6 +373,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawVoiceGateRms,
     rawVoiceGateLegacy,
     rawVoiceTrim,
+    rawAudioCompression,
     rawAutoDisabledLenses,
     rawSttHost,
     rawSttModel,
@@ -437,6 +441,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
+    audioCompressionEnabled: rawAudioCompression !== 'false',
     autoDisabledLenses: coerceAutoDisabledLenses(rawAutoDisabledLenses),
     autoModeEnabled: rawAutoModeEnabled === 'true',
     autoModeStartMs: coerceAutoModeMs(
@@ -710,6 +715,8 @@ export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promis
 
 export const saveVoiceTrimEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_VOICE_TRIM, 'voiceTrimEnabled', enabled);
+export const saveAudioCompressionEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_AUDIO_COMPRESSION, 'audioCompressionEnabled', enabled);
 
 export const saveRomanizeForeignScript = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_ROMANIZE, 'romanizeForeignScript', enabled);
@@ -976,7 +983,7 @@ function coerceLanguage(raw: string | null | undefined): LanguageCode {
 
 function coerceBufferDuration(raw: string | null | undefined): BufferDuration {
   const n = Number(raw);
-  if (n === 30 || n === 60 || n === 120 || n === 180 || n === 300) return n;
+  if (n === 10 || n === 15 || n === 30 || n === 60 || n === 120 || n === 180 || n === 300) return n;
   // Back-compat: 0.6.x persisted 600 (10 min); clamp to the new 5-min cap.
   if (n === 600) return 300;
   return DEFAULT_BUFFER_DURATION;

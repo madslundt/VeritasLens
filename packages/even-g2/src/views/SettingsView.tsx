@@ -27,6 +27,7 @@ import {
   saveAutoModeIntervalMs,
   saveVoiceGateRmsFloor,
   saveVoiceTrimEnabled,
+  saveAudioCompressionEnabled,
   AUTO_MODE_INTERVAL_MS_MAX,
   AUTO_MODE_INTERVAL_MS_MIN,
   AUTO_MODE_INTERVAL_STEP_MS,
@@ -124,6 +125,8 @@ type ModelTestStatus = { state: 'idle' | 'running' | 'ok' | 'fail' | 'skipped'; 
 const IDLE_TEST: ModelTestStatus = { state: 'idle', message: '' };
 
 const BUFFER_OPTIONS: { value: BufferDuration; label: string }[] = [
+  { value: 10, label: '10 seconds' },
+  { value: 15, label: '15 seconds' },
   { value: 30, label: '30 seconds' },
   { value: 60, label: '1 minute' },
   { value: 120, label: '2 minutes' },
@@ -596,6 +599,7 @@ export const SettingsView: Component = () => {
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
   const [draftVoiceTrim, setDraftVoiceTrim] = createSignal(settings().voiceTrimEnabled);
+  const [draftAudioCompression, setDraftAudioCompression] = createSignal(settings().audioCompressionEnabled);
   const [draftAutoMode, setDraftAutoMode] = createSignal(settings().autoModeEnabled);
   const [draftAutoModeStart, setDraftAutoModeStart] = createSignal(settings().autoModeStartMs);
   const [draftAutoModeSilence, setDraftAutoModeSilence] = createSignal(settings().autoModeSilenceMs);
@@ -1245,6 +1249,7 @@ export const SettingsView: Component = () => {
         discreet,
         voiceGate,
         voiceTrim,
+        audioCompression,
         autoMode,
         autoModeStart,
         autoModeSilence,
@@ -1286,6 +1291,7 @@ export const SettingsView: Component = () => {
         saveDiscreet(setLs, draftDiscreet()),
         saveVoiceGateRmsFloor(setLs, draftVoiceGate()),
         saveVoiceTrimEnabled(setLs, draftVoiceTrim()),
+        saveAudioCompressionEnabled(setLs, draftAudioCompression()),
         saveAutoModeEnabled(setLs, draftAutoMode()),
         saveAutoModeStartMs(setLs, draftAutoModeStart()),
         saveAutoModeSilenceMs(setLs, draftAutoModeSilence()),
@@ -1303,7 +1309,7 @@ export const SettingsView: Component = () => {
       const allOk = [
         provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, tavilyEnabled, tavilyKey, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel, chatFallbacks, sttFallbacks,
-        language, buffer, micSource, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim,
+        language, buffer, micSource, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim, audioCompression,
         autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
         romanize, translationSourceLangs, transcriptMode, prepWebGrounding,
       ].every(Boolean) && prepResult.ok;
@@ -1313,6 +1319,7 @@ export const SettingsView: Component = () => {
         // MEETING_PREP_LABEL_MAX); without this re-seed the draft would
         // retain the un-normalized value and lensDirty would stay true.
         setDraftAutoDisabledLenses(settings().autoDisabledLenses);
+        setDraftAudioCompression(settings().audioCompressionEnabled);
         // Auto-mode threshold saves snap+clamp before persisting, so re-seed
         // from the store value to avoid keeping the un-normalized draft (e.g.
         // 1234 → 1250) and letting appDirty stay true.
@@ -1406,6 +1413,7 @@ export const SettingsView: Component = () => {
       || draftDiscreet() !== s.discreet
       || draftVoiceGate() !== s.voiceGateRmsFloor
       || draftVoiceTrim() !== s.voiceTrimEnabled
+      || draftAudioCompression() !== s.audioCompressionEnabled
       || draftAutoMode() !== s.autoModeEnabled
       || draftAutoModeStart() !== s.autoModeStartMs
       || draftAutoModeSilence() !== s.autoModeSilenceMs
@@ -1531,6 +1539,7 @@ export const SettingsView: Component = () => {
           provider,
           baseUrl,
           transcribeModel: draftTranscribe,
+          audioCompressionEnabled: draftAudioCompression(),
           sttHost: testStt ? sttDraftHost : undefined,
           sttModel: testStt ? sttDraftModel : undefined,
           sttApiKey: testStt ? sttDraftApiKey : undefined,
@@ -2811,7 +2820,7 @@ export const SettingsView: Component = () => {
                 <For each={BUFFER_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
               </select>
               <span class="field-hint">
-                The recent conversation included in each analysis.
+                The recent conversation included in each analysis. Shorter windows can reduce response time, but include less context.
               </span>
             </label>
 
@@ -2825,6 +2834,20 @@ export const SettingsView: Component = () => {
                 <For each={MIC_SOURCE_OPTIONS}>{(opt) => <option value={opt.value}>{opt.label}</option>}</For>
               </select>
             </label>
+
+            <div class="field preference-field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
+                  checked={draftAudioCompression()}
+                  onChange={(e) => { setDraftAudioCompression(e.currentTarget.checked); clearStatuses(); }}
+                />
+                <span>Audio upload compression</span>
+              </label>
+              <span class="field-hint">
+                Reduces supported audio uploads without changing sound quality. Uses WAV when unavailable or incompatible.
+              </span>
+            </div>
 
             <h2 class="config-section-divider">Listening &amp; display</h2>
 
