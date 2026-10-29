@@ -494,6 +494,7 @@ let lastAutoWinnerInSession: string | null = null;
 let wearerSpeakActive = false;
 let wearerSpeakStartByte = 0;
 let wearerSpeakTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+let wearerSpeakPageRequest: { cancelled: boolean } | null = null;
 
 export function isHudRunning(): boolean { return running; }
 
@@ -1376,7 +1377,6 @@ async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise
     // Same reason as in stopHudRuntime: drop the wearer-speak timer/flag so
     // it can't fire into a torn-down session or bleed into the next one.
     cancelWearerSpeak();
-    await stopSpinner();
     // Abort any auto-summary tick already in flight, then stop the periodic
     // timer. Aborting first ensures a tick mid-await (e.g. inside callLens or
     // base64 encoding) terminates immediately and frees its WAV/base64 closures
@@ -1390,6 +1390,9 @@ async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise
     midSummaryController = null;
     midSummaryResult = null;
     midSummaryLoading = false;
+    // Stop background work before a slow SDK write can yield to its voice
+    // checks or network callbacks.
+    await stopSpinner();
     try { await getBridge().audioControl(false); } catch { /* ignore */ }
     // Snapshot the inputs for the stop-time summaries (last-tick + final
     // synthesis) while the buffer and session id are still live. Both calls
@@ -2642,7 +2645,7 @@ async function handleTranslationWearerSpeakGesture(g: Gesture): Promise<void> {
  *  off, noisy room). The actual fire happens via the autoMode trigger
  *  branch above OR via manual double-tap on the recording page. */
 async function startWearerSpeak(): Promise<void> {
-  if (!buffer) return;
+  if (!running || !buffer || recordingPaused() || leavingActiveSession) return;
   // Resolve target language up-front so we fail fast if the wearer somehow
   // got to this entry without a cached translation result (defensive — the
   // menu item gates on this too, but a race could let it slip).
@@ -2651,6 +2654,8 @@ async function startWearerSpeak(): Promise<void> {
     await flashMenuHint('Translate one phrase first', 3000);
     return;
   }
+  const pageRequest = { cancelled: false };
+  wearerSpeakPageRequest = pageRequest;
   wearerSpeakActive = true;
   wearerSpeakStartByte = buffer.bytesProduced;
   if (wearerSpeakTimeoutTimer) clearTimeout(wearerSpeakTimeoutTimer);
@@ -2661,7 +2666,17 @@ async function startWearerSpeak(): Promise<void> {
       );
     }
   }, 12_000);
-  await showTranslationWearerSpeakPage();
+  try {
+    await showTranslationWearerSpeakPage();
+    // Pause can cancel recording before this SDK rebuild finishes, even if
+    // the microphone has already resumed. A newer Speak owns its own request.
+    if (pageRequest.cancelled && wearerSpeakPageRequest === pageRequest
+      && running && buffer && !leavingActiveSession && currentHudPage() === 'translation-wearer-speak') {
+      await restoreActivePage();
+    }
+  } finally {
+    if (wearerSpeakPageRequest === pageRequest) wearerSpeakPageRequest = null;
+  }
 }
 
 /** Fire the wearer-direction Gemini call. Reads the audio captured since
@@ -2773,6 +2788,7 @@ async function runWearerSpeakAnalyze(): Promise<void> {
  *  Idempotent. Sync because there's nothing to await — kept callable from
  *  both async gesture handlers and the teardown paths. */
 function cancelWearerSpeak(): void {
+  if (wearerSpeakPageRequest) wearerSpeakPageRequest.cancelled = true;
   wearerSpeakActive = false;
   if (wearerSpeakTimeoutTimer) {
     clearTimeout(wearerSpeakTimeoutTimer);
@@ -2947,7 +2963,7 @@ function buildMidSummaryMenuItems(): MenuItem[] {
 }
 
 async function runAutoSummary(): Promise<void> {
-  if (!running || recordingPaused()) return;
+  if (!running || recordingPaused() || leavingActiveSession) return;
   if (!buffer || buffer.bytesBuffered === 0) return;
   // Skip when the active provider is not configured — the facade would throw
   // and we'd just be burning Silero inference time before discovering that.

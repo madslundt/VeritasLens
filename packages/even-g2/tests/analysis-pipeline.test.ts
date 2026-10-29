@@ -191,6 +191,29 @@ describe('analysis through the gesture/audio pipeline', () => {
     expect(mocks.call).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])('discards a delayed Speak page canceled by Pause (resumed before rebuild: %s)', async resumeBeforeRebuild => {
+    vi.useFakeTimers();
+    await startConversation('translation');
+    await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Hola', translatedText: 'Hello', replyStarters: [] });
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = mocks.listItems.indexOf('Speak →');
+    expect(index).toBeGreaterThanOrEqual(0);
+    const page = deferred<void>(); mocks.hudRebuildBarrier = page.promise;
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    await pauseConversation();
+    if (resumeBeforeRebuild) await pauseConversation();
+    page.resolve(); await drain(); mocks.hudRebuildBarrier = null;
+    expect(currentHudPage()).toBe('active');
+    expect(recordingPaused()).toBe(!resumeBeforeRebuild);
+    expect([...mocks.visible.values()].join(' ')).not.toContain('Speak now');
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(mocks.call).not.toHaveBeenCalled();
+    if (!resumeBeforeRebuild) await pauseConversation();
+    mocks.stream.mockResolvedValueOnce(JSON.stringify({ sourceLanguage: 'es', sourceText: 'Gracias', translatedText: 'Thank you', replyStarters: [] }));
+    audio(1000); tap(); await drain();
+    expect(mocks.stream).toHaveBeenCalledTimes(1);
+  });
+
   it.each(['double-tap', 'tap'] as const)('cancels an in-flight Speak request with %s and ignores its late response', async gesture => {
     vi.useFakeTimers();
     await startConversation('translation');
@@ -422,6 +445,34 @@ describe('analysis through the gesture/audio pipeline', () => {
     mocks.hudWriteBarrier = null;
     expect(callsDuringShutdown).toBe(0);
     expect(mocks.call).not.toHaveBeenCalled();
+  });
+
+  it.each(['exit', 'exit-no-summary'] as const)('cancels periodic audio before %s waits for a slow HUD write', async exitAction => {
+    vi.useFakeTimers();
+    await stopHudRuntime();
+    await saveAutoSummaryEnabled(async () => true, true);
+    await startConversation('fact-checker');
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    mocks.call.mockResolvedValueOnce(summary);
+    await vi.advanceTimersByTimeAsync(60000);
+    const gate = deferred<VoiceBufferAnalysis>();
+    mocks.gate.mockReturnValueOnce(gate.promise); mocks.call.mockClear();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(mocks.gate).toHaveBeenCalledTimes(3);
+    mocks.stream.mockReturnValueOnce(deferred<string>().promise);
+    audio(1000); void requestConversationHelp('fact-checker', undefined, false); await drain();
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const exitIndex = mocks.listItems.findIndex((_, i) => menuOptionAtIndex(i) === exitAction);
+    expect(exitIndex).toBeGreaterThanOrEqual(0);
+    const hud = deferred<void>(); mocks.hudWriteBarrier = hud.promise;
+    await vi.advanceTimersByTimeAsync(200);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: exitIndex } } as EvenHubEvent); await drain();
+    gate.resolve(voice); await drain();
+    const callsDuringExit = mocks.call.mock.calls.length;
+    hud.resolve(); await drain(); mocks.hudWriteBarrier = null;
+    expect(callsDuringExit).toBe(0);
+    expect(currentHudPage()).toBe('picker');
+    if (exitAction === 'exit-no-summary') expect(mocks.call).not.toHaveBeenCalled();
   });
 
   it('keeps the microphone paused when switching lenses', async () => {
