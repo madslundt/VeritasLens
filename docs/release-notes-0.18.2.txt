@@ -8,4 +8,6 @@ Optional Reduce background noise on G2 uses local RNNoise cleanup for snapshots 
 
 Also improves VAD responsiveness, preserves History notes saved while Settings has unsaved edits, and adds a local audio lab for reference testing. Lens changes now cancel pending translation work and restore listening controls. Deleted History is removed from lists, active swipe recall, queued answers, and translation actions. Overlapping preference saves preserve both Settings edits and notes saved from History. Pause also cancels pending Speak and mid-session summary work; canceled Prepared assistance cannot publish a late result. Summary voice checks and requests are canceled when pausing, stopping, or starting a new session, as appropriate.
 
+Native display updates are ordered so delayed results and page transitions cannot overwrite newer screens. Stopping invalidates pending display and microphone startup work. Delayed History reads cannot restore deleted moments or discard newer analyses; failed deletions restore the entries and show a retry message.
+
 Permissions: no new hosts or permission categories. Requires Even App 2.2.10 and SDK 0.0.16.

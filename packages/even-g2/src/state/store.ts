@@ -773,9 +773,19 @@ export async function saveAutoDisabledLenses(setLs: SetLs, ids: string[]): Promi
 export const saveDiscreet = (setLs: SetLs, discreet: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_DISCREET, 'discreet', discreet);
 
+let historyLoadGeneration = 0;
 export async function loadHistory(getLocalStorage: (k: string) => Promise<string>): Promise<void> {
+  const generation = ++historyLoadGeneration;
+  const expectedHistory = sessionHistory();
+  const isCurrent = () => generation === historyLoadGeneration && sessionHistory() === expectedHistory;
   try {
+    // A reload must observe writes already queued by local edits. A later
+    // mutation or reload owns the current state, even if this SDK read was
+    // started first and resolves after it.
+    await historyWriteChain;
+    if (!isCurrent()) return;
     const raw = await getLocalStorage(HISTORY_KEY);
+    if (!isCurrent()) return;
     if (!raw) return;
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return;
@@ -914,6 +924,21 @@ async function persistHistory(
   await write;
 }
 
+async function replaceHistory(
+  next: HistoryEntry[],
+  setLs?: (k: string, v: string) => Promise<boolean>,
+): Promise<void> {
+  const previous = sessionHistory();
+  setSessionHistory(next);
+  if (!setLs) return;
+  try { await persistHistory(setLs, next); }
+  catch (error) {
+    // Do not roll back over an analysis or edit that arrived during the write.
+    if (sessionHistory() === next) setSessionHistory(previous);
+    throw error;
+  }
+}
+
 /**
  * Push a completed analysis result into session history and persist it.
  * Returns a promise that resolves once persistence is done, so callers that
@@ -957,8 +982,7 @@ export async function pushHistoryEntries(
 }
 
 export async function clearSessionHistory(setLs?: (k: string, v: string) => Promise<boolean>): Promise<void> {
-  setSessionHistory([]);
-  if (setLs) await persistHistory(setLs, []);
+  await replaceHistory([], setLs);
 }
 
 /**
@@ -971,8 +995,7 @@ export async function deleteHistorySession(
   setLs?: (k: string, v: string) => Promise<boolean>,
 ): Promise<void> {
   const next = sessionHistory().filter((e) => e.sessionId !== sessionId);
-  setSessionHistory(next);
-  if (setLs) await persistHistory(setLs, next);
+  await replaceHistory(next, setLs);
 }
 
 function coerceModel(raw: string | null | undefined): GeminiModel {
@@ -1321,9 +1344,6 @@ export async function saveConversationPreferences(setLs: SetLs, value: Conversat
   return write;
 }
 export async function updateHistoryEntry(id: string, patch: Partial<Pick<HistoryEntry, 'result' | 'pinned' | 'feedback'>>, setLs: SetLs): Promise<void> {
-  const previous = sessionHistory();
-  const next = previous.map(e => e.id === id ? { ...e, ...patch } : e);
-  setSessionHistory(next);
-  try { await persistHistory(setLs, next); }
-  catch (error) { if (sessionHistory() === next) setSessionHistory(previous); throw error; }
+  const next = sessionHistory().map(e => e.id === id ? { ...e, ...patch } : e);
+  await replaceHistory(next, setLs);
 }

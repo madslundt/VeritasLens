@@ -72,7 +72,10 @@ import {
   scrollActiveReason,
   scrollHistoryDetail,
   setActiveLayout,
+  setAutoModeIndicator,
   setLensResult,
+  setLensStreamingHeading,
+  suspendHud,
   setMenuSpinner,
   setSummaryBadgeState,
   showActivePage,
@@ -2902,4 +2905,94 @@ describe('splitResultByClaim parity (lifecycle ↔ hud synthesis)', () => {
     };
     expect(splitResultByClaim(result)).toEqual([result]);
   });
+});
+
+
+describe('native display ordering', () => {
+  it.each(['false', 'reject'] as const)('keeps the committed page usable after native navigation returns %s', async failure => {
+    await bootstrapHud();
+    if (failure === 'false') bridge.rebuildPageContainer.mockResolvedValueOnce(false);
+    else bridge.rebuildPageContainer.mockRejectedValueOnce(new Error('Native rebuild failed'));
+    await expect(showMenuPage()).rejects.toThrow();
+    expect(currentHudPage()).toBe('picker');
+    await showActivePage(getPersona('fact-checker')!);
+    expect(currentHudPage()).toBe('active');
+  });
+
+  it('orders native page writes and commits only the newest requested page', async () => {
+    await bootstrapHud();
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    bridge.rebuildPageContainer.mockImplementationOnce(async () => { await pending; return true; });
+    const old = showMidSummaryPage(true, null).catch((error: Error) => error.name);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const latest = showPickerPage();
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledTimes(1);
+    release();
+    expect(await old).toBe('AbortError');
+    await latest;
+    expect(currentHudPage()).toBe('picker');
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledTimes(2);
+  });
+});
+
+
+describe('display cancellation preserves valid content', () => {
+  it('replays a valid final result when the menu supersedes a pending partial write', async () => {
+    await bootstrapHud(); await showActivePage(getPersona('fact-checker')!);
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    bridge.textContainerUpgrade.mockImplementationOnce(async () => { await pending; return true; });
+    setLensStreamingHeading('Partial');
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    const final = setLensResult({ type: 'fact-check', claims: [{ quote: '', verdict: 'TRUE', claim: 'Stable final answer', reason: 'Final evidence' }] });
+    const menu = showMenuPage();
+    release(); await final; await menu;
+    expect(hasPendingActiveResult()).toBe(true);
+    await restoreActivePage();
+    expect(visibleHudText('vl-reason')).toContain('Final evidence');
+  });
+
+  it('routes the actual native page when a superseding navigation fails', async () => {
+    await bootstrapHud();
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    bridge.rebuildPageContainer.mockImplementationOnce(async () => { await pending; return true; });
+    const older = showMenuPage().catch((error: Error) => error.name);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    bridge.rebuildPageContainer.mockResolvedValueOnce(false);
+    const latest = showHistoryListPage([]).catch((error: Error) => error.message);
+    release(); await older; await latest;
+    expect(currentHudPage()).toBe('menu');
+  });
+
+  it('reuses a native startup container whose initial response arrived after stop/restart', async () => {
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    bridge.createStartUpPageContainer.mockImplementationOnce(async () => { await pending; return 0; });
+    const initial = bootstrapHud().catch((error: Error) => error.name);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    suspendHud();
+    const restart = bootstrapHud();
+    release(); await initial; await restart;
+    expect(currentHudPage()).toBe('picker');
+    expect(bridge.createStartUpPageContainer).toHaveBeenCalledTimes(1);
+    expect(bridge.rebuildPageContainer).toHaveBeenCalledTimes(1);
+  });
+});
+
+
+it('treats superseded indicator content as a no-op rather than an unhandled rejection', async () => {
+  await bootstrapHud(); await showActivePage(getPersona('fact-checker')!);
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  bridge.rebuildPageContainer.mockImplementationOnce(async () => { await pending; return true; });
+  const indicator = setAutoModeIndicator(true);
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  const menu = showMenuPage();
+  release();
+  await expect(indicator).resolves.toBeUndefined();
+  await menu;
+  expect(currentHudPage()).toBe('menu');
 });

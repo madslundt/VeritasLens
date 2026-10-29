@@ -75,6 +75,7 @@ import type {
 import {
   ACTIVE_HINT_DEFAULT,
   bootstrapHud,
+  suspendHud,
   clearMenuSpinnerFrame,
   clearStatusFrame,
   currentHudPage,
@@ -229,6 +230,7 @@ function syncCaptionCapture(): void {
 }
 export async function startConversation(personaId?: string): Promise<void> {
   if (!running) await startHudRuntime();
+  if (!running || leavingActiveSession) return;
   const error = providerConfigurationError(settings());
   if (error) { setErrorMessage(error); return; }
   if (buffer) {
@@ -266,7 +268,7 @@ export async function pauseConversation(): Promise<void> {
     if (noVoiceStatusTimer) clearTimeout(noVoiceStatusTimer); noVoiceStatusTimer = null;
     if (errClearTimer) clearTimeout(errClearTimer); errClearTimer = null;
   }
-  const ok = await getBridge().audioControl(!paused, settings().micSource === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses);
+  const ok = await controlMicrophone(!paused, settings().micSource === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses);
   if (!ok) { setErrorMessage('Microphone state could not be changed.'); return; }
   setRecordingPaused(paused); syncAutoModeWatcher(); syncCaptionCapture();
   if (paused && (currentHudPage() === 'mid-summary' || currentHudPage() === 'translation-wearer-speak')) await restoreActivePage();
@@ -402,6 +404,22 @@ function isProviderConfigured(s: Settings = settings()): boolean {
 }
 
 let running = false;
+let runtimeGeneration = 0;
+let sessionGeneration = 0;
+let runtimeStart: Promise<void> | null = null;
+let runtimeStop: Promise<void> | null = null;
+let microphoneWrite: Promise<void> = Promise.resolve();
+
+/** Keep native mic transitions ordered even when an open finishes after Exit. */
+function controlMicrophone(enabled: boolean, source?: AudioInputSource): Promise<boolean> {
+  const generation = sessionGeneration;
+  const write = microphoneWrite.then(() => {
+    if (enabled && (!running || leavingActiveSession || generation !== sessionGeneration)) return false;
+    return getBridge().audioControl(enabled, source);
+  });
+  microphoneWrite = write.then(() => {}, () => {});
+  return write;
+}
 let buffer: PcmRingBuffer | null = null;
 let unsubscribeEvents: (() => void) | null = null;
 let inflight: AbortController | null = null;
@@ -511,7 +529,17 @@ async function reloadHistoryFromStorage(): Promise<void> {
   } catch { /* best-effort */ }
 }
 
-export async function startHudRuntime(): Promise<void> {
+export function startHudRuntime(): Promise<void> {
+  if (runtimeStart) return runtimeStart;
+  const start = startHudRuntimeImpl();
+  runtimeStart = start;
+  const clear = () => { if (runtimeStart === start) runtimeStart = null; };
+  void start.then(clear, clear);
+  return start;
+}
+
+async function startHudRuntimeImpl(): Promise<void> {
+  if (runtimeStop) await runtimeStop;
   const configured = isProviderConfigured();
   if (running) {
     gameLocationController?.abort();
@@ -521,10 +549,12 @@ export async function startHudRuntime(): Promise<void> {
     return;
   }
   running = true;
+  const generation = ++runtimeGeneration;
   resetNoiseReduction();
   try {
     setAppPhase('booting');
     await bootstrapHud(configured ? 'picker' : 'unconfigured');
+    if (!running || generation !== runtimeGeneration) return;
     // Kick off Silero VAD warmup in the background so the first user tap
     // pays no cold-start latency. Fire-and-forget — failures fall back to
     // the FFT heuristic inside `analyzeBufferForVoice`.
@@ -533,6 +563,7 @@ export async function startHudRuntime(): Promise<void> {
     unsubscribeEvents = getBridge().onEvenHubEvent(handleEvent);
     startSettingsWatcher();
   } catch (err) {
+    if (!running || generation !== runtimeGeneration || (err as Error)?.name === 'AbortError') return;
     running = false;
     setAppPhase('error');
     setErrorMessage(err instanceof Error ? err.message : String(err));
@@ -565,10 +596,24 @@ export async function refreshHudPage(): Promise<void> {
   await showPickerPage();
 }
 
-export async function stopHudRuntime(): Promise<void> {
+export function stopHudRuntime(): Promise<void> {
+  if (runtimeStop) return runtimeStop;
+  const stop = stopHudRuntimeImpl();
+  runtimeStop = stop;
+  const clear = () => { if (runtimeStop === stop) runtimeStop = null; };
+  void stop.then(clear, clear);
+  return stop;
+}
+
+async function stopHudRuntimeImpl(): Promise<void> {
   stopConversationCapture();
   if (!running) return;
   running = false;
+  runtimeStart = null;
+  runtimeGeneration++;
+  sessionGeneration++;
+  suspendHud();
+  resetHudSessionState();
   // Cancel the detached chain before any asynchronous teardown can yield.
   finalSummaryInflight?.abort();
   finalSummaryInflight = null;
@@ -597,7 +642,7 @@ export async function stopHudRuntime(): Promise<void> {
   analyzing = false;
   resetNoiseReduction();
   stopAutoModeWatcher();
-  void setAutoModeIndicator(false);
+  void setAutoModeIndicator(false).catch(err => logDispatchError('auto-indicator-fail', err));
   // Clear wearer-speak state so its 12 s safety timer can't fire after
   // teardown and so a stale `wearerSpeakActive = true` doesn't mis-route
   // the first auto-mode trigger of the next session into the wearer
@@ -625,7 +670,7 @@ export async function stopHudRuntime(): Promise<void> {
   // after the underlying network / fetch issue clears.
   getSileroVAD().dispose();
   resetVADAvailability();
-  try { await getBridge().audioControl(false); } catch { /* ignore */ }
+  try { await controlMicrophone(false); } catch { /* ignore */ }
   setAppPhase('idle');
 }
 
@@ -675,6 +720,7 @@ function isHandledLifecycleSysEvent(et: OsEventTypeList | undefined): boolean {
  *  which is a hard crash on strict platforms. Logged to the debug ring so the
  *  failure stays observable in the settings view. */
 function logDispatchError(label: string, err: unknown): void {
+  if ((err as Error)?.name === 'AbortError') return;
   pushDebugEvent({
     label,
     detail: err instanceof Error ? err.message : String(err),
@@ -1242,6 +1288,7 @@ async function handleMidSummaryGesture(g: Gesture): Promise<void> {
 }
 
 async function enterActiveSession(personaId: PersonaId): Promise<void> {
+  const generation = ++sessionGeneration;
   resetNoiseReduction();
   const persona = getPersona(personaId);
   if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
@@ -1274,12 +1321,17 @@ async function enterActiveSession(personaId: PersonaId): Promise<void> {
   lastAutoWinnerInSession = null;
   lastMenuIndex = 0;
   setActiveLayout(settings().discreet ? 'discreet-minimal' : 'baseline');
-  await showActivePage(persona);
+  try { await showActivePage(persona); } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return;
+    throw err;
+  }
+  if (!running || generation !== sessionGeneration || leavingActiveSession) return;
   buffer = new PcmRingBuffer({ durationSec: settings().bufferDuration, sampleRate: 16_000 });
-  const micOk = await getBridge().audioControl(
+  const micOk = await controlMicrophone(
     true,
     settings().micSource === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses,
   );
+  if (!running || generation !== sessionGeneration || leavingActiveSession) return;
   if (!micOk) {
     await setStatus('error');
     setErrorMessage('Microphone could not be opened.');
@@ -1336,10 +1388,10 @@ function syncAutoModeWatcher(): void {
         }
       },
     });
-    void setAutoModeIndicator(true);
+    void setAutoModeIndicator(true).catch(err => logDispatchError('auto-indicator-fail', err));
   } else if (!wantOn && isAutoModeWatcherRunning()) {
     stopAutoModeWatcher();
-    void setAutoModeIndicator(false);
+    void setAutoModeIndicator(false).catch(err => logDispatchError('auto-indicator-fail', err));
   }
 }
 
@@ -1350,6 +1402,7 @@ let leavingActiveSession = false;
 async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise<void> {
   if (leavingActiveSession) return;
   leavingActiveSession = true;
+  sessionGeneration++;
   // Wearer-driven opt-out from the stop-time summary chain (menu's
   // "Exit - no summary" row). Forced teardowns (settings change, runtime
   // stop) keep the default false so a summary still lands when possible.
@@ -1373,7 +1426,7 @@ async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise
       errClearTimer = null;
     }
     stopAutoModeWatcher();
-    void setAutoModeIndicator(false);
+    void setAutoModeIndicator(false).catch(err => logDispatchError('auto-indicator-fail', err));
     // Same reason as in stopHudRuntime: drop the wearer-speak timer/flag so
     // it can't fire into a torn-down session or bleed into the next one.
     cancelWearerSpeak();
@@ -1393,7 +1446,7 @@ async function leaveActiveSession(opts: { skipSummary?: boolean } = {}): Promise
     // Stop background work before a slow SDK write can yield to its voice
     // checks or network callbacks.
     await stopSpinner();
-    try { await getBridge().audioControl(false); } catch { /* ignore */ }
+    try { await controlMicrophone(false); } catch { /* ignore */ }
     // Snapshot the inputs for the stop-time summaries (last-tick + final
     // synthesis) while the buffer and session id are still live. Both calls
     // run in the background so the user is returned to the picker immediately.
@@ -1601,7 +1654,7 @@ function clearErrorState(): void {
   }
   if (appPhase() !== 'error') return;
   setErrorMessage(null);
-  void setStatus('listening');
+  void setStatus('listening').catch(err => logDispatchError('status-fail', err));
   setAppPhase('listening');
 }
 
@@ -1769,7 +1822,7 @@ async function showNoVoiceFeedback(message: string): Promise<void> {
   if (noVoiceStatusTimer) clearTimeout(noVoiceStatusTimer);
   noVoiceStatusTimer = setTimeout(() => {
     noVoiceStatusTimer = null;
-    void setStatus('listening');
+    void setStatus('listening').catch(err => logDispatchError('status-fail', err));
   }, 2500);
 }
 
@@ -2055,8 +2108,8 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
           if (!headingStarted) {
             headingStarted = true;
             firstDisplayMs = performance.now() - analysisStartedAt;
-            void stopSpinner();
-            void setStatus('');
+            void stopSpinner().catch(err => logDispatchError('spinner-stop-fail', err));
+            void setStatus('').catch(err => logDispatchError('status-fail', err));
           }
           setLensStreamingHeading(partial);
         },
@@ -2122,7 +2175,7 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
       // direct-call path in setLensResult would replace sessionEntries with a
       // synthetic one-entry list, breaking cross-question swipe-up navigation.
       const sessionEntriesNext = sessionHistory().filter((e) => e.sessionId === currentSessionId);
-      await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set([newEntryId]) });
+      await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set([newEntryId]), signal: controller.signal });
       assertCurrentAnalysis();
       firstDisplayMs ??= performance.now() - analysisStartedAt;
       await setStatus('displaying');
@@ -2313,8 +2366,8 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
             if (!headingStarted) {
               headingStarted = true;
               firstDisplayMs = performance.now() - analysisStartedAt;
-              void stopSpinner();
-              void setStatus('');
+              void stopSpinner().catch(err => logDispatchError('spinner-stop-fail', err));
+              void setStatus('').catch(err => logDispatchError('status-fail', err));
             }
             setLensStreamingHeading(partial);
           }
@@ -2414,7 +2467,7 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
     await reloadHistoryFromStorage();
     assertCurrentAnalysis();
     const sessionEntriesNext = sessionHistory().filter((e) => e.sessionId === currentSessionId);
-    await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set(freshIds) });
+    await setLensResult(result, { sessionEntries: sessionEntriesNext, newEntryIds: new Set(freshIds), signal: controller.signal });
     assertCurrentAnalysis();
     firstDisplayMs ??= performance.now() - analysisStartedAt;
     await setStatus('displaying');
@@ -2862,7 +2915,7 @@ function startSettingsWatcher(): void {
       // No active session ⇒ nothing to tear down. Also guard against the
       // re-entry flag inside leaveActiveSession itself.
       if (!buffer || leavingActiveSession) return;
-      void leaveActiveSession();
+      void leaveActiveSession().catch(err => logDispatchError('leave-session-fail', err));
     }));
     // Toggle the auto-mode VAD watcher live whenever the user flips the
     // Settings switch — no session restart required. Threshold changes

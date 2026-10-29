@@ -140,6 +140,82 @@ export type HudPage =
   | 'captions'
   | 'none';
 
+
+// Native writes can resolve in a different order from user actions. Keep them
+// ordered, and let only the latest requested page own subsequent text writes.
+let displayRevision = 0;
+let hudSessionRevision = 0;
+let displayEnabled = true;
+let committedPage: HudPage = 'none';
+let displayWrite: Promise<void> = Promise.resolve();
+
+function logHudWriteError(error: unknown): void {
+  if ((error as Error)?.name === 'AbortError') return;
+  pushDebugEvent({ label: 'hud-write-fail', detail: error instanceof Error ? error.message : String(error) });
+}
+
+function isHudRevisionCurrent(revision: number): boolean {
+  return displayEnabled && revision === displayRevision;
+}
+
+function assertHudRevision(revision: number): void {
+  if (!isHudRevisionCurrent(revision)) {
+    throw new DOMException('HUD view superseded', 'AbortError');
+  }
+}
+
+function queueDisplayWrite<T>(revision: number, write: () => Promise<T>, superseded?: () => T): Promise<T> {
+  const next = displayWrite.then(async () => {
+    if (!isHudRevisionCurrent(revision) && superseded) return superseded();
+    assertHudRevision(revision);
+    const result = await write();
+    if (!isHudRevisionCurrent(revision) && superseded) return superseded();
+    assertHudRevision(revision);
+    return result;
+  });
+  // A failed or canceled write must not poison the next navigation.
+  displayWrite = next.then(() => {}, () => {});
+  return next;
+}
+
+function rebuildHudContents(page: RebuildPageContainer, revision = displayRevision): Promise<boolean> {
+  return queueDisplayWrite(revision, () => getBridge().rebuildPageContainer(page), () => true);
+}
+
+async function navigateHudPage(target: HudPage, page: RebuildPageContainer): Promise<boolean> {
+  const revision = ++displayRevision;
+  // Do not route gestures or container upgrades against the page being replaced.
+  currentPage = 'none';
+  try {
+    const ok = await queueDisplayWrite(revision, async () => {
+      const result = await getBridge().rebuildPageContainer(page);
+      // Track what native actually rendered even when another request became
+      // newer while it was in flight. A failed successor must route this page.
+      if (result && displayEnabled) committedPage = target;
+      return result;
+    });
+    assertHudRevision(revision);
+    currentPage = committedPage;
+    return ok;
+  } catch (error) {
+    // Failed native navigation leaves the previous page on the glasses.
+    // A superseded request must never restore that page over its successor.
+    if (displayEnabled && revision === displayRevision) currentPage = committedPage;
+    throw error;
+  }
+}
+
+/** Host exit already hides the native page. Prevent its pending writes from
+ * committing or issuing follow-up updates after that lifecycle boundary. */
+export function suspendHud(): void {
+  displayEnabled = false;
+  displayRevision++;
+  hudSessionRevision++;
+  committedPage = 'none';
+  currentPage = 'none';
+  clearLensStreamingHeading();
+}
+
 /** Cached starter the wearer most recently picked on the translation-picker
  *  page. Read by buildTranslationTeleprompterPage so a Say-more retry can
  *  identify which starter to extend. Replaced atomically when a new picker
@@ -293,18 +369,19 @@ function statusBrightness(): number {
   return recordingDotEligible ? (recordingPaused() || pendingStatusFrame ? 3 : 1) : 0;
 }
 
-async function upgradeStatus(): Promise<void> {
+async function upgradeStatus(revision = displayRevision): Promise<void> {
+  if (!isHudRevisionCurrent(revision)) return;
   const content = statusDisplayText();
   const width = cornerStatusGeometry(content).width;
   // The SDK only upgrades text/brightness in place. Move the tight box when
   // its measured width changes; same-width animation frames stay flicker-free.
   // Never rebuild a visible answer just to reposition an empty indicator.
   if (recordingDotEligible && width !== cornerStatusWidth) {
-    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    const ok = await rebuildHudContents(buildActivePage(), revision);
     if (!ok) throw new Error('rebuildPageContainer (corner status) failed.');
     return;
   }
-  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText(), statusBrightness());
+  await upgradeText(CONTAINER.status, NAME.status, statusDisplayText(), statusBrightness(), revision);
 }
 
 /** Toggle the resting "AUTO" indicator in the corner status slot. Called by
@@ -358,25 +435,42 @@ export function menuOptionAtIndex(idx: number | undefined | null): string {
 }
 
 export async function bootstrapHud(initialPage: 'unconfigured' | 'picker' = 'picker'): Promise<void> {
+  displayEnabled = true;
   if (bootstrapped) {
     if (initialPage === 'unconfigured') await showUnconfiguredPage();
     else await showPickerPage();
     return;
   }
   const page = initialPage === 'unconfigured' ? buildUnconfiguredPage('create') : buildPickerPage('create');
-  const result = await getBridge().createStartUpPageContainer(page as CreateStartUpPageContainer);
+  const revision = ++displayRevision;
+  currentPage = 'none';
+  const result = await queueDisplayWrite(revision, async () => {
+    // A prior startup may have created the native container before its late
+    // response was invalidated by stop/restart. Create that container only once.
+    if (bootstrapped) {
+      const replacement = initialPage === 'unconfigured' ? buildUnconfiguredPage('rebuild') : buildPickerPage('rebuild');
+      if (!await getBridge().rebuildPageContainer(replacement as RebuildPageContainer)) throw new Error('Startup page could not be rebuilt.');
+      if (displayEnabled) committedPage = initialPage;
+      return StartUpPageCreateResult.success;
+    }
+    const created = await getBridge().createStartUpPageContainer(page as CreateStartUpPageContainer);
+    if (created === StartUpPageCreateResult.success) {
+      bootstrapped = true;
+      if (displayEnabled) committedPage = initialPage;
+    }
+    return created;
+  });
+  assertHudRevision(revision);
   if (result !== StartUpPageCreateResult.success) {
     throw new Error(`createStartUpPageContainer failed (code ${result}).`);
   }
-  bootstrapped = true;
   currentPage = initialPage;
 }
 
 export async function showUnconfiguredPage(): Promise<void> {
   if (!bootstrapped) { await bootstrapHud('unconfigured'); return; }
-  const ok = await getBridge().rebuildPageContainer(buildUnconfiguredPage('rebuild') as RebuildPageContainer);
+  const ok = await navigateHudPage('unconfigured', buildUnconfiguredPage('rebuild') as RebuildPageContainer);
   if (!ok) throw new Error('rebuildPageContainer (unconfigured) failed.');
-  currentPage = 'unconfigured';
 }
 
 let conversationOptionItems: MenuItem[] = [];
@@ -386,9 +480,8 @@ export async function showConversationOptions(title: string, items: MenuItem[]):
   const textObject = [new TextContainerProperty({ containerID: 60, containerName: 'vl-conv-title', xPosition: 16, yPosition: 8, width: 544, height: 36, content: title, isEventCapture: 0 })];
   const listObject = [new ListContainerProperty({ containerID: 61, containerName: 'vl-conv-list', xPosition: 16, yPosition: 48, width: 544, height: 224, isEventCapture: 1,
     itemContainer: new ListItemContainerProperty({ itemCount: conversationOptionItems.length, itemWidth: 528, isItemSelectBorderEn: 1, itemName: conversationOptionItems.map(i => i.disabled ? `${i.label} (unavailable)` : i.label) }) })];
-  const ok = await getBridge().rebuildPageContainer(new RebuildPageContainer({ containerTotalNum: 2, listObject, textObject }));
+  const ok = await navigateHudPage('conversation-options', new RebuildPageContainer({ containerTotalNum: 2, listObject, textObject }));
   if (!ok) throw new Error('Conversation menu could not be displayed.');
-  currentPage = 'conversation-options';
 }
 export async function showCaptionsPage(text: string, status = 'Captured speech · speaker unknown'): Promise<void> {
   const textObject = [
@@ -397,20 +490,19 @@ export async function showCaptionsPage(text: string, status = 'Captured speech �
   ];
   const listObject = [new ListContainerProperty({ containerID: 64, containerName: 'vl-cap-input', xPosition: 16, yPosition: 264, width: 544, height: 24, isEventCapture: 1,
     itemContainer: new ListItemContainerProperty({ itemCount: 1, itemWidth: 528, isItemSelectBorderEn: 0, itemName: ['Tap: menu · Double-tap: help'] }) })];
-  if (!await getBridge().rebuildPageContainer(new RebuildPageContainer({ containerTotalNum: 3, listObject, textObject }))) throw new Error('Captions page could not be displayed.');
-  currentPage = 'captions';
+  if (!await navigateHudPage('captions', new RebuildPageContainer({ containerTotalNum: 3, listObject, textObject }))) throw new Error('Captions page could not be displayed.');
 }
 export async function updateCaptionsPage(text: string, status = 'Captured speech · speaker unknown'): Promise<void> {
+  const revision = displayRevision;
   if (currentPage !== 'captions') return;
-  await upgradeText(62, 'vl-cap-title', status.slice(0, 100));
-  if (currentPage === 'captions') await upgradeText(63, 'vl-cap-body', text.slice(-700) || 'Waiting for speech…');
+  await upgradeText(62, 'vl-cap-title', status.slice(0, 100), undefined, revision);
+  if (currentPage === 'captions') await upgradeText(63, 'vl-cap-body', text.slice(-700) || 'Waiting for speech…', undefined, revision);
 }
 
 export async function showPickerPage(): Promise<void> {
   if (!bootstrapped) { await bootstrapHud('picker'); return; }
-  const ok = await getBridge().rebuildPageContainer(buildPickerPage('rebuild') as RebuildPageContainer);
+  const ok = await navigateHudPage('picker', buildPickerPage('rebuild') as RebuildPageContainer);
   if (!ok) throw new Error('rebuildPageContainer (picker) failed.');
-  currentPage = 'picker';
 }
 
 export async function showActivePage(persona: Persona): Promise<void> {
@@ -423,9 +515,10 @@ export async function showActivePage(persona: Persona): Promise<void> {
   if (pendingActiveResult && activeLayout === 'discreet-minimal') {
     activeLayout = 'discreet-result';
   }
-  const ok = await getBridge().rebuildPageContainer(buildActivePage());
+  const revision = displayRevision + 1;
+  const ok = await navigateHudPage('active', buildActivePage());
+  assertHudRevision(revision);
   if (!ok) throw new Error('rebuildPageContainer (active) failed.');
-  currentPage = 'active';
   if (pendingActiveResult) {
     const replay = pendingActiveResult;
     pendingActiveResult = null;
@@ -461,17 +554,15 @@ export async function showMenuPage(opts: { exitGeneratesSummary?: boolean; dynam
     ...dyn,
     ...staticItems.slice(historyIdx),
   ];
-  const ok = await getBridge().rebuildPageContainer(buildMenuPage());
+  const ok = await navigateHudPage('menu', buildMenuPage());
   if (!ok) throw new Error('rebuildPageContainer (menu) failed.');
-  currentPage = 'menu';
 }
 
 export async function showHistoryListPage(entries: HistoryEntry[]): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showHistoryListPage().');
   cachedHistoryEntries = entries;
-  const ok = await getBridge().rebuildPageContainer(buildHistoryListPage(entries));
+  const ok = await navigateHudPage('history-list', buildHistoryListPage(entries));
   if (!ok) throw new Error('rebuildPageContainer (history-list) failed.');
-  currentPage = 'history-list';
 }
 
 export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> {
@@ -504,9 +595,8 @@ export async function showHistoryDetailPage(entry: HistoryEntry): Promise<void> 
     question: entry.question,
   });
   detailPageIndex = 0;
-  const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
+  const ok = await navigateHudPage('history-detail', buildHistoryDetailPage(entry, detailPages[0]!));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
-  currentPage = 'history-detail';
 }
 
 export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
@@ -536,7 +626,7 @@ export async function scrollHistoryDetail(dir: 1 | -1): Promise<void> {
     question: entry.question,
   });
   detailPageIndex = 0;
-  const ok = await getBridge().rebuildPageContainer(buildHistoryDetailPage(entry, detailPages[0]!));
+  const ok = await rebuildHudContents(buildHistoryDetailPage(entry, detailPages[0]!));
   if (!ok) throw new Error('rebuildPageContainer (history-detail) failed.');
 }
 
@@ -556,7 +646,7 @@ async function reconcileActiveHistory(entries: HistoryEntry[]): Promise<boolean>
     if (newEntryIds.size === 0) {
       pendingActiveResult = null;
       deleted = true;
-    } else pendingActiveResult.context = { sessionEntries: entries, newEntryIds };
+    } else pendingActiveResult.context = { ...pendingActiveResult.context, sessionEntries: entries, newEntryIds };
   }
   if (deleted) {
     sessionEntries = retained;
@@ -584,8 +674,11 @@ async function reconcileActiveHistory(entries: HistoryEntry[]): Promise<boolean>
 
 /** Reconcile phone History edits without leaving the wearer's live session. */
 export async function refreshHistoryPages(entries: HistoryEntry[]): Promise<boolean> {
+  const revision = displayRevision;
   await streamingWrite;
+  if (!isHudRevisionCurrent(revision)) return false;
   const deleted = await reconcileActiveHistory(entries);
+  if (!isHudRevisionCurrent(revision)) return false;
   const shown = cachedHistoryEntries[historyDetailIndex];
   cachedHistoryEntries = entries;
   if (currentPage === 'history-list') await showHistoryListPage(entries);
@@ -680,28 +773,30 @@ function flushStreamingHeading(): Promise<void> {
   streamingLast = next;
   streamingPending = null;
   const generation = streamingGeneration;
+  const revision = displayRevision;
   // A BLE rebuild can outlast the throttle interval. Queue partials and let
   // the final result drain this queue so it cannot write into a missing body.
   streamingWrite = streamingWrite.then(async () => {
-    if (generation !== streamingGeneration || currentPage !== 'active') return;
+    if (revision !== displayRevision || generation !== streamingGeneration || currentPage !== 'active') return;
     const wasDotEligible = recordingDotEligible;
     const hadQuestionBox = activeAnswerCaption !== undefined;
     activeAnswerCaption = undefined;
     streamingPreviewVisible = true;
     recordingDotEligible = false;
     await setActiveHint('');
-    if (generation !== streamingGeneration || currentPage !== 'active') return;
+    if (revision !== displayRevision || generation !== streamingGeneration || currentPage !== 'active') return;
     if (activeLayout === 'discreet-minimal' || hadQuestionBox) {
       if (activeLayout === 'discreet-minimal') activeLayout = 'discreet-result';
-      const ok = await getBridge().rebuildPageContainer(buildActivePage());
+      const ok = await rebuildHudContents(buildActivePage(), revision);
       if (!ok) throw new Error('rebuildPageContainer (streaming answer) failed.');
     } else if (wasDotEligible) {
-      await upgradeStatus();
+      await upgradeStatus(revision);
     }
-    if (generation !== streamingGeneration || currentPage !== 'active') return;
+    if (revision !== displayRevision || generation !== streamingGeneration || currentPage !== 'active') return;
     const preview = paginateText(next, BODY_INNER_W, ANSWER_PAGE_LINES, ANSWER_PAGE_LINES)[0]!;
-    await upgradeText(CONTAINER.reason, NAME.reason, preview, 4);
+    await upgradeText(CONTAINER.reason, NAME.reason, preview, 4, revision);
   }).catch((error: unknown) => {
+    if ((error as Error)?.name === 'AbortError') return;
     pushDebugEvent({ label: 'hud-stream-fail', detail: error instanceof Error ? error.message : String(error) });
   });
   return streamingWrite;
@@ -727,13 +822,14 @@ export function clearLensStreamingHeading(): void {
 export async function discardLensStreamingHeading(isCurrent: () => boolean = () => true): Promise<void> {
   clearLensStreamingHeading();
   const generation = streamingGeneration;
+  const revision = displayRevision;
   await streamingWrite;
-  if (generation !== streamingGeneration || !isCurrent() || !streamingPreviewVisible) return;
+  if (revision !== displayRevision || generation !== streamingGeneration || !isCurrent() || !streamingPreviewVisible) return;
   streamingPreviewVisible = false;
   activeHidden = true;
   recordingDotEligible = true;
   if (currentPage === 'active') {
-    await hideActiveResultInPlace();
+    await hideActiveResultInPlace(revision);
   } else if (isDiscreetLayout(activeLayout)) {
     setActiveLayout('discreet-minimal');
   }
@@ -750,6 +846,7 @@ export function getLensStreamingState(): { active: boolean; last: string } {
 export interface SetLensResultContext {
   sessionEntries: HistoryEntry[];
   newEntryIds: ReadonlySet<string>;
+  signal?: AbortSignal;
 }
 
 /** Synthetic id prefix used when `setLensResult(result)` is called without a
@@ -842,7 +939,10 @@ function splitForSynthesis(result: LensResult): LensResult[] {
 }
 
 export async function setLensResult(result: LensResult | null, context?: SetLensResultContext): Promise<void> {
+  const session = hudSessionRevision;
   await streamingWrite;
+  if (!displayEnabled || session !== hudSessionRevision || context?.signal?.aborted) return;
+  const revision = displayRevision;
   // Cache the latest Translate result regardless of which page we're on so
   // the menu's "Reply…" item can resolve a picker even when the result
   // landed while the wearer was off the active page. NOT cleared on null —
@@ -877,19 +977,19 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
     if (currentPage !== 'active') return;
     if (activeLayout === 'discreet-minimal') {
       if (wasSuppressed) {
-        await upgradeStatus();
+        await upgradeStatus(revision);
       }
       return;
     }
     if (isDiscreetLayout(activeLayout) || hadQuestionBox) {
       if (isDiscreetLayout(activeLayout)) setActiveLayout('discreet-minimal');
-      const ok = await getBridge().rebuildPageContainer(buildActivePage());
+      const ok = await rebuildHudContents(buildActivePage(), revision);
       if (!ok) throw new Error('rebuildPageContainer (discreet-minimal) failed.');
       return;
     }
-    await upgradeText(CONTAINER.reason, NAME.reason, '', 0);
+    await upgradeText(CONTAINER.reason, NAME.reason, '', 0, revision);
     if (wasSuppressed) {
-      await upgradeStatus();
+      await upgradeStatus(revision);
     }
     return;
   }
@@ -924,7 +1024,7 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
   }
 
   if (currentPage === 'active' && !activeHidden) {
-    await renderActivePage();
+    await renderActivePage(revision);
   }
 }
 
@@ -1013,7 +1113,8 @@ export async function dismissActiveAnswer(): Promise<void> {
  * while keeping `sessionPages` and `sessionPageIndex` intact, so a swipe-up
  * can reveal the last session page again. Shared by swipe-down dismiss and
  * tap-back from the menu. */
-async function hideActiveResultInPlace(): Promise<void> {
+async function hideActiveResultInPlace(revision = displayRevision): Promise<void> {
+  if (!isHudRevisionCurrent(revision)) return;
   streamingPreviewVisible = false;
   activeHidden = true;
   // Re-enable the recording dot — the wearer is back to a listening view.
@@ -1023,15 +1124,15 @@ async function hideActiveResultInPlace(): Promise<void> {
   const targetIdle: ActiveLayout = isDiscreetLayout(activeLayout) ? 'discreet-minimal' : 'baseline';
   if (activeLayout !== targetIdle || hadQuestionBox) {
     setActiveLayout(targetIdle);
-    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    const ok = await rebuildHudContents(buildActivePage(), revision);
     if (!ok) throw new Error('rebuildPageContainer (hide) failed.');
     return;
   }
   // Already on the idle layout (e.g., single-page baseline). Wipe the unified
   // body so the wearer sees a blank screen between answers and restore the
   // corner recording dot suppressed while the answer was visible.
-  await upgradeText(CONTAINER.reason, NAME.reason, '', 0);
-  await upgradeStatus();
+  await upgradeText(CONTAINER.reason, NAME.reason, '', 0, revision);
+  await upgradeStatus(revision);
 }
 
 /** Mark the active result as hidden without clearing it. Used by the menu's
@@ -1099,6 +1200,7 @@ let pickerHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
  * handlers without checking page state.
  */
 export async function flashPickerHint(message: string, ms = 2500): Promise<void> {
+  const revision = displayRevision;
   if (currentPage !== 'picker') return;
   if (pickerHintFlashTimer) clearTimeout(pickerHintFlashTimer);
   // Capture the baseline hint at flash time rather than recomputing it from
@@ -1107,13 +1209,14 @@ export async function flashPickerHint(message: string, ms = 2500): Promise<void>
   // persona list during the 2.5 s flash window.
   const list = getPickerPersonas();
   const baseline = list.length > 1
-    ? 'Swipe ⇅ · Tap: start · Double-tap: exit'
+    ? 'Swipe up/down · Tap: start · Double-tap: exit'
     : 'Tap: start · Double-tap: exit';
-  await upgradeText(CONTAINER.pickerHint, NAME.pickerHint, message);
+  await upgradeText(CONTAINER.pickerHint, NAME.pickerHint, message, undefined, revision);
+  if (!isHudRevisionCurrent(revision)) return;
   pickerHintFlashTimer = setTimeout(() => {
     pickerHintFlashTimer = null;
-    if (currentPage !== 'picker') return;
-    void upgradeText(CONTAINER.pickerHint, NAME.pickerHint, baseline);
+    if (revision !== displayRevision || currentPage !== 'picker') return;
+    void upgradeText(CONTAINER.pickerHint, NAME.pickerHint, baseline, undefined, revision).catch(logHudWriteError);
   }, ms);
 }
 
@@ -1124,16 +1227,18 @@ let activeHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
  * Never place a message over a visible answer.
  */
 export async function flashActiveHint(message: string, ms = 2500): Promise<void> {
+  const revision = displayRevision;
   if (currentPage !== 'active') return;
   if (activeLayout !== 'baseline') return;
   if (!recordingDotEligible) return;
   if (activeHintFlashTimer) clearTimeout(activeHintFlashTimer);
-  await upgradeText(CONTAINER.activeHint, NAME.activeHint, message);
+  await upgradeText(CONTAINER.activeHint, NAME.activeHint, message, undefined, revision);
+  if (!isHudRevisionCurrent(revision)) return;
   activeHintFlashTimer = setTimeout(() => {
     activeHintFlashTimer = null;
-    if (currentPage !== 'active') return;
+    if (revision !== displayRevision || currentPage !== 'active') return;
     if (activeLayout !== 'baseline') return;
-    void upgradeText(CONTAINER.activeHint, NAME.activeHint, '');
+    void upgradeText(CONTAINER.activeHint, NAME.activeHint, '', undefined, revision).catch(logHudWriteError);
   }, ms);
 }
 
@@ -1146,13 +1251,15 @@ let menuHintFlashTimer: ReturnType<typeof setTimeout> | null = null;
  * No-op when the menu isn't on screen.
  */
 export async function flashMenuHint(message: string, ms = 5000): Promise<void> {
+  const revision = displayRevision;
   if (currentPage !== 'menu') return;
   if (menuHintFlashTimer) clearTimeout(menuHintFlashTimer);
-  await upgradeText(CONTAINER.menuHint, NAME.menuHint, message);
+  await upgradeText(CONTAINER.menuHint, NAME.menuHint, message, undefined, revision);
+  if (!isHudRevisionCurrent(revision)) return;
   menuHintFlashTimer = setTimeout(() => {
     menuHintFlashTimer = null;
-    if (currentPage !== 'menu') return;
-    void upgradeText(CONTAINER.menuHint, NAME.menuHint, MENU_HINT_DEFAULT);
+    if (revision !== displayRevision || currentPage !== 'menu') return;
+    void upgradeText(CONTAINER.menuHint, NAME.menuHint, MENU_HINT_DEFAULT, undefined, revision).catch(logHudWriteError);
   }, ms);
 }
 
@@ -1178,33 +1285,35 @@ function summaryBadgeBaseline(): string {
  * the feature isn't surfaced to the wearer so progress shouldn't be either.
  */
 export async function setSummaryBadgeState(state: SummaryBadgeState): Promise<void> {
+  const revision = displayRevision;
   if (currentPage !== 'picker') return;
   if (summaryBadgeReadyTimer) {
     clearTimeout(summaryBadgeReadyTimer);
     summaryBadgeReadyTimer = null;
   }
   if (!settings().autoSummaryEnabled) {
-    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, '');
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, '', undefined, revision);
     return;
   }
   if (state === 'generating') {
-    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'Generating…');
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'Generating…', undefined, revision);
     return;
   }
   if (state === 'ready') {
-    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'Summary ready!');
+    await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, 'Summary ready!', undefined, revision);
+    if (!isHudRevisionCurrent(revision)) return;
     summaryBadgeReadyTimer = setTimeout(() => {
       summaryBadgeReadyTimer = null;
-      if (currentPage !== 'picker') return;
-      void upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, summaryBadgeBaseline());
+      if (revision !== displayRevision || currentPage !== 'picker') return;
+      void upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, summaryBadgeBaseline(), undefined, revision).catch(logHudWriteError);
     }, 2500);
     return;
   }
-  await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, summaryBadgeBaseline());
+  await upgradeText(CONTAINER.summaryBadge, NAME.summaryBadge, summaryBadgeBaseline(), undefined, revision);
 }
 
 
-async function upgradeText(containerID: number, containerName: string, content: string, textColor?: number): Promise<void> {
+async function upgradeText(containerID: number, containerName: string, content: string, textColor?: number, revision = displayRevision): Promise<void> {
   const upgrade = new TextContainerUpgrade({
     containerID,
     containerName,
@@ -1213,7 +1322,7 @@ async function upgradeText(containerID: number, containerName: string, content: 
     content,
     textColor,
   });
-  await getBridge().textContainerUpgrade(upgrade);
+  await queueDisplayWrite(revision, () => getBridge().textContainerUpgrade(upgrade), () => true);
 }
 
 /** Number of claims renderable per result. 1 for answer-shaped lenses. */
@@ -1739,11 +1848,11 @@ function captionLanguageText(metadata: AnswerMetadata): string {
   return pxTruncate(metadata.language ?? '', width);
 }
 
-async function upgradeAnswerCaption(caption: AnswerCaption): Promise<void> {
-  await upgradeText(CONTAINER.claim, NAME.claim, caption.question, 2);
-  if (caption.position) await upgradeText(CONTAINER.answerPosition, NAME.answerPosition, caption.position, 1);
-  if (caption.language) await upgradeText(CONTAINER.answerLanguage, NAME.answerLanguage, captionLanguageText(caption), 2);
-  if (caption.pageIndicator) await upgradeText(CONTAINER.answerPageIndicator, NAME.answerPageIndicator, caption.pageIndicator, 1);
+async function upgradeAnswerCaption(caption: AnswerCaption, revision = displayRevision): Promise<void> {
+  await upgradeText(CONTAINER.claim, NAME.claim, caption.question, 2, revision);
+  if (caption.position) await upgradeText(CONTAINER.answerPosition, NAME.answerPosition, caption.position, 1, revision);
+  if (caption.language) await upgradeText(CONTAINER.answerLanguage, NAME.answerLanguage, captionLanguageText(caption), 2, revision);
+  if (caption.pageIndicator) await upgradeText(CONTAINER.answerPageIndicator, NAME.answerPageIndicator, caption.pageIndicator, 1, revision);
 }
 
 /** The entry the active-page cursor is currently pointing at. */
@@ -1811,7 +1920,8 @@ function recomputeSessionPages(): void {
 }
 
 /** Rebuild only when the mode or question-caption dimensions change. */
-async function renderActivePage(): Promise<void> {
+async function renderActivePage(revision = displayRevision): Promise<void> {
+  if (!isHudRevisionCurrent(revision)) return;
   if (currentPage !== 'active') return;
   // Clamp the index in case a result that arrived mid-scroll shortened the
   // page list while a queued scroll event still references the old position.
@@ -1829,12 +1939,13 @@ async function renderActivePage(): Promise<void> {
   const wasDotEligible = recordingDotEligible;
   recordingDotEligible = false;
   await setActiveHint('');
+  if (!isHudRevisionCurrent(revision)) return;
   const caption = page.question === undefined ? undefined : { question: page.question, position: page.position, language: page.language, pageIndicator: page.pageIndicator };
   const layoutChanged = target !== activeLayout || captionGeometryKey(activeAnswerCaption) !== captionGeometryKey(caption);
   activeAnswerCaption = caption;
   if (layoutChanged) {
     setActiveLayout(target);
-    const ok = await getBridge().rebuildPageContainer(buildActivePage());
+    const ok = await rebuildHudContents(buildActivePage(), revision);
     if (!ok) throw new Error('rebuildPageContainer (active) failed.');
   } else if (wasDotEligible && (activeLayout === 'baseline' || activeLayout === 'discreet-minimal')) {
     // First render of an answer with no layout change, on a layout where the
@@ -1842,20 +1953,21 @@ async function renderActivePage(): Promise<void> {
     // the dot gives way to a clean answer view. Subsequent scrolls within
     // the same answer already have wasDotEligible=false and skip this write.
     // Discreet-result has no '•' fallback so no clear write is needed.
-    await upgradeStatus();
+    await upgradeStatus(revision);
   }
-  if (caption) await upgradeAnswerCaption(caption);
-  await upgradeText(CONTAINER.reason, NAME.reason, page.text, 4);
+  if (caption) await upgradeAnswerCaption(caption, revision);
+  await upgradeText(CONTAINER.reason, NAME.reason, page.text, 4, revision);
 }
 
 /** Keep the context caption fixed while upgrading history answer pages. */
 async function renderHistoryDetailPage(): Promise<void> {
+  const revision = displayRevision;
   if (currentPage !== 'history-detail') return;
   const page = detailPages[detailPageIndex];
   const entry = cachedHistoryEntries[historyDetailIndex];
   if (!page || !entry) return;
-  if (page.question !== undefined) await upgradeAnswerCaption({ question: page.question, position: page.position, language: page.language, pageIndicator: page.pageIndicator });
-  await upgradeText(CONTAINER.reason, NAME.reason, page.text);
+  if (page.question !== undefined) await upgradeAnswerCaption({ question: page.question, position: page.position, language: page.language, pageIndicator: page.pageIndicator }, revision);
+  await upgradeText(CONTAINER.reason, NAME.reason, page.text, undefined, revision);
 }
 
 // ------- mid-summary page helpers -----------------------------------------
@@ -1934,7 +2046,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   const hint = new TextContainerProperty({
     containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
     width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
-    content: itemNames.length > 1 ? 'Swipe ⇅ · Tap: start · Double-tap: exit' : 'Tap: start · Double-tap: exit',
+    content: itemNames.length > 1 ? 'Swipe up/down · Tap: start · Double-tap: exit' : 'Tap: start · Double-tap: exit',
     isEventCapture: 0,
   });
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
@@ -2212,7 +2324,7 @@ function buildHistoryListPage(entries: HistoryEntry[]): RebuildPageContainer {
   const hint = new TextContainerProperty({
     containerID: CONTAINER.historyHint, containerName: NAME.historyHint, xPosition: 16, yPosition: 252,
     width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
-    content: 'Swipe ⇅ · Tap: detail · Tap ← : back',
+    content: 'Swipe up/down · Tap: detail · Tap ← : back',
     isEventCapture: 0,
   });
   const listObject = [list];
@@ -2264,16 +2376,16 @@ export async function showMidSummaryPage(
   // Refresh in place when already on the page so the firmware scroll position
   // is preserved across content updates (e.g. spinner → final summary).
   if (currentPage === 'mid-summary' && !heightChanged) {
-    await upgradeText(CONTAINER.claim, NAME.claim, midSummaryQuestion, 2);
-    await upgradeText(CONTAINER.reason, NAME.reason, capContent(body, MID_SUMMARY_UPGRADE_CAP));
+    const revision = displayRevision;
+    await upgradeText(CONTAINER.claim, NAME.claim, midSummaryQuestion, 2, revision);
+    await upgradeText(CONTAINER.reason, NAME.reason, capContent(body, MID_SUMMARY_UPGRADE_CAP), undefined, revision);
     return;
   }
 
-  const ok = await getBridge().rebuildPageContainer(
+  const ok = await navigateHudPage('mid-summary',
     buildMidSummaryPage(capContent(body, MID_SUMMARY_REBUILD_CAP)),
   );
   if (!ok) throw new Error('rebuildPageContainer (mid-summary) failed.');
-  currentPage = 'mid-summary';
 }
 
 /**
@@ -2320,9 +2432,8 @@ export async function showGamesPickerPage(
     { kind: GAMES_PICKER_RANDOM_LOCATION_KIND },
     ...presets.map((p) => ({ kind: 'preset' as const, preset: p })),
   ];
-  const ok = await getBridge().rebuildPageContainer(buildGamesPickerPage(presets, opts));
+  const ok = await navigateHudPage('games-picker', buildGamesPickerPage(presets, opts));
   if (!ok) throw new Error('rebuildPageContainer (games-picker) failed.');
-  currentPage = 'games-picker';
 }
 
 function buildGamesPickerPage(presets: GamePreset[], opts: ShowGamesPickerOpts): RebuildPageContainer {
@@ -2391,9 +2502,8 @@ export async function showSpecializedPickerPage(): Promise<void> {
     { kind: 'back' },
     ...specialized.map((p) => ({ kind: 'persona' as const, persona: p })),
   ];
-  const ok = await getBridge().rebuildPageContainer(buildSpecializedPickerPage(specialized));
+  const ok = await navigateHudPage('specialized-picker', buildSpecializedPickerPage(specialized));
   if (!ok) throw new Error('rebuildPageContainer (specialized-picker) failed.');
-  currentPage = 'specialized-picker';
 }
 
 function buildSpecializedPickerPage(specialized: Persona[]): RebuildPageContainer {
@@ -2431,9 +2541,8 @@ function buildSpecializedPickerPage(specialized: Persona[]): RebuildPageContaine
 /** A null preset is the location stage, before a nearby topic is known. */
 export async function showGameLoadingPage(preset: GamePreset | null, retryLabel: string): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameLoadingPage().');
-  const ok = await getBridge().rebuildPageContainer(buildGameLoadingPage(preset, retryLabel));
+  const ok = await navigateHudPage('game-loading', buildGameLoadingPage(preset, retryLabel));
   if (!ok) throw new Error('rebuildPageContainer (game-loading) failed.');
-  currentPage = 'game-loading';
 }
 
 function buildGameLoadingPage(preset: GamePreset | null, retryLabel: string): RebuildPageContainer {
@@ -2484,9 +2593,8 @@ function formatGameProgress(index: number, total: number): string {
 
 export async function showGameQuestionPage(session: GameSession): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameQuestionPage().');
-  const ok = await getBridge().rebuildPageContainer(buildGameQuestionPage(session));
+  const ok = await navigateHudPage('game-question', buildGameQuestionPage(session));
   if (!ok) throw new Error('rebuildPageContainer (game-question) failed.');
-  currentPage = 'game-question';
 }
 
 function buildGameQuestionPage(session: GameSession): RebuildPageContainer {
@@ -2532,9 +2640,8 @@ function buildGameQuestionPage(session: GameSession): RebuildPageContainer {
 
 export async function showGameFeedbackPage(session: GameSession): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameFeedbackPage().');
-  const ok = await getBridge().rebuildPageContainer(buildGameFeedbackPage(session));
+  const ok = await navigateHudPage('game-feedback', buildGameFeedbackPage(session));
   if (!ok) throw new Error('rebuildPageContainer (game-feedback) failed.');
-  currentPage = 'game-feedback';
 }
 
 function buildGameFeedbackPage(session: GameSession): RebuildPageContainer {
@@ -2566,9 +2673,8 @@ function buildGameFeedbackPage(session: GameSession): RebuildPageContainer {
 
 export async function showGameEndPage(session: GameSession): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showGameEndPage().');
-  const ok = await getBridge().rebuildPageContainer(buildGameEndPage(session));
+  const ok = await navigateHudPage('game-end', buildGameEndPage(session));
   if (!ok) throw new Error('rebuildPageContainer (game-end) failed.');
-  currentPage = 'game-end';
 }
 
 // ---------- Random-game save prompt ----------
@@ -2595,9 +2701,8 @@ export async function showGameSavePromptPage(session: GameSession): Promise<void
     { kind: SAVE_PROMPT_BACK_KIND },
     { kind: SAVE_PROMPT_SAVE_KIND },
   ];
-  const ok = await getBridge().rebuildPageContainer(buildGameSavePromptPage(session));
+  const ok = await navigateHudPage('game-save-prompt', buildGameSavePromptPage(session));
   if (!ok) throw new Error('rebuildPageContainer (game-save-prompt) failed.');
-  currentPage = 'game-save-prompt';
 }
 
 function buildGameSavePromptPage(session: GameSession): RebuildPageContainer {
@@ -2660,6 +2765,8 @@ function buildGameEndPage(session: GameSession): RebuildPageContainer {
 
 /** Clear per-session HUD state so a fresh session doesn't inherit stale buffers. */
 export function resetHudSessionState(): void {
+  displayRevision++;
+  hudSessionRevision++;
   midSummaryQuestion = '';
   teleprompterQuestion = '';
   activeAnswerCaption = undefined;
@@ -2779,7 +2886,7 @@ function buildTranslationPickerPage(
   const hint = new TextContainerProperty({
     containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
     width: SCREEN_W - 32, height: 28, borderWidth: 0, paddingLength: 4,
-    content: 'Swipe ⇅ · Tap: pick · Double-tap: cancel',
+    content: 'Swipe up/down · Tap: pick · Double-tap: cancel',
     isEventCapture: 0,
   });
   const listObject = [list];
@@ -2808,9 +2915,8 @@ export async function showTranslationPickerPage(
   // Leaving the active page suppresses the recording dot the next active-page
   // rebuild would otherwise re-introduce. Same pattern as showMenuPage.
   recordingDotEligible = true;
-  const ok = await getBridge().rebuildPageContainer(buildTranslationPickerPage(result));
+  const ok = await navigateHudPage('translation-picker', buildTranslationPickerPage(result));
   if (!ok) throw new Error('rebuildPageContainer (translation-picker) failed.');
-  currentPage = 'translation-picker';
 }
 
 /** Pick the line to show for a foreign-language field: the romanization when
@@ -2855,9 +2961,8 @@ export async function showTranslationTeleprompterPage(
   activeTranslationStarter = starter;
   teleprompterQuestion = questionCaption(flowProse(starter.translated) || 'Reply');
   recordingDotEligible = true;
-  const ok = await getBridge().rebuildPageContainer(buildTranslationTeleprompterPage(starter, null));
+  const ok = await navigateHudPage('translation-teleprompter', buildTranslationTeleprompterPage(starter, null));
   if (!ok) throw new Error('rebuildPageContainer (translation-teleprompter) failed.');
-  currentPage = 'translation-teleprompter';
 }
 
 /** Push extended Say-more text onto the teleprompter in place — no full
@@ -2867,18 +2972,20 @@ export async function updateTranslationTeleprompterExtended(
   extendedTranslated: string,
   extendedSourceRomanized?: string,
 ): Promise<void> {
+  const revision = displayRevision;
   if (currentPage !== 'translation-teleprompter') return;
   if (!activeTranslationStarter) return;
   const question = questionCaption(flowProse(extendedTranslated) || 'Reply');
   if (questionAnswerGeometry(question).height !== questionAnswerGeometry(teleprompterQuestion).height) {
-    const ok = await getBridge().rebuildPageContainer(buildTranslationTeleprompterPage(activeTranslationStarter, {
+    const ok = await rebuildHudContents(buildTranslationTeleprompterPage(activeTranslationStarter, {
       source: extendedSource, translated: extendedTranslated, sourceRomanized: extendedSourceRomanized,
-    }));
+    }), revision);
     if (!ok) throw new Error('rebuildPageContainer (extended translation) failed.');
   } else {
-    await upgradeText(CONTAINER.claim, NAME.claim, question, 2);
-    await upgradeText(CONTAINER.reason, NAME.reason, flowProse(withRomanized(extendedSource, extendedSourceRomanized)));
+    await upgradeText(CONTAINER.claim, NAME.claim, question, 2, revision);
+    await upgradeText(CONTAINER.reason, NAME.reason, flowProse(withRomanized(extendedSource, extendedSourceRomanized)), undefined, revision);
   }
+  if (!isHudRevisionCurrent(revision)) return;
   teleprompterQuestion = question;
 }
 
@@ -2953,9 +3060,8 @@ export async function showTranslationWearerSpeakPage(): Promise<void> {
   if (!bootstrapped) throw new Error('bootstrapHud() must run before showTranslationWearerSpeakPage().');
   wearerSpeakState = 'recording';
   recordingDotEligible = true;
-  const ok = await getBridge().rebuildPageContainer(buildTranslationWearerSpeakPage('recording', null));
+  const ok = await navigateHudPage('translation-wearer-speak', buildTranslationWearerSpeakPage('recording', null));
   if (!ok) throw new Error('rebuildPageContainer (translation-wearer-speak) failed.');
-  currentPage = 'translation-wearer-speak';
 }
 
 /** Swap the wearer-speak page from recording state to result state via
@@ -2971,7 +3077,7 @@ export async function updateTranslationWearerSpeakResult(
     questionCaption(flowProse(spoken) || 'Translate'),
     capContent(flowProse(withRomanized(translated || '(no speech detected)', translatedRomanized)), PAGE_CONTENT_CAP),
   );
-  const ok = await getBridge().rebuildPageContainer(new RebuildPageContainer({
+  const ok = await rebuildHudContents(new RebuildPageContainer({
     containerTotalNum: totalContainers([], textObject), listObject: [], textObject,
   }));
   if (!ok) throw new Error('rebuildPageContainer (spoken translation) failed.');
@@ -2979,6 +3085,7 @@ export async function updateTranslationWearerSpeakResult(
 
 export function _resetHudBootstrapForTesting(): void {
   bootstrapped = false;
+  committedPage = 'none';
   currentPage = 'none';
   resetHudSessionState();
 }

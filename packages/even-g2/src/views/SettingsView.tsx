@@ -921,6 +921,7 @@ export const SettingsView: Component = () => {
   const [selectedSessionId, setSelectedSessionId] = createSignal<string | null>(null);
   const [expandedEntryId, setExpandedEntryId] = createSignal<string | null>(null);
   const [searchQuery, setSearchQuery] = createSignal('');
+  const [historyDeleteError, setHistoryDeleteError] = createSignal('');
   // Two-tap inline confirm for destructive history actions. The first tap on
   // a row's × stages that row's sessionId; a second tap on the same row's
   // confirm button calls deleteHistorySession. Same shape for clear-all
@@ -929,6 +930,7 @@ export const SettingsView: Component = () => {
   const [pendingDeleteId, setPendingDeleteId] = createSignal<string | null>(null);
   let pendingDeleteTimer: ReturnType<typeof setTimeout> | null = null;
   const armDelete = (id: string): void => {
+    setHistoryDeleteError('');
     setPendingDeleteId(id);
     if (pendingDeleteTimer) clearTimeout(pendingDeleteTimer);
     // Auto-cancel after 4s if the user walks away without confirming.
@@ -946,16 +948,26 @@ export const SettingsView: Component = () => {
     (k, v) => getBridge().setLocalStorage(k, v);
   const confirmDeleteSession = async (sessionId: string): Promise<void> => {
     cancelDelete();
-    if (selectedSessionId() === sessionId) setSelectedSessionId(null);
-    await deleteHistorySession(sessionId, getSetLs());
-    await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+    setHistoryDeleteError('');
+    try {
+      await deleteHistorySession(sessionId, getSetLs());
+      if (selectedSessionId() === sessionId) setSelectedSessionId(null);
+      await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+    } catch {
+      setHistoryDeleteError('Could not delete this session. Please try again.');
+    }
   };
   const confirmClearAll = async (): Promise<void> => {
     cancelDelete();
-    setSelectedSessionId(null);
-    setExpandedEntryId(null);
-    await clearSessionHistory(getSetLs());
-    await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+    setHistoryDeleteError('');
+    try {
+      await clearSessionHistory(getSetLs());
+      setSelectedSessionId(null);
+      setExpandedEntryId(null);
+      await refreshHudPage().catch(() => { /* HUD may not be running yet */ });
+    } catch {
+      setHistoryDeleteError('Could not clear history. Please try again.');
+    }
   };
 
   // Provider/host change → clear the previously-fetched list immediately so
@@ -1706,6 +1718,7 @@ export const SettingsView: Component = () => {
   // Session list view
   const SessionListView = () => (
     <div class="session-list">
+      <Show when={historyDeleteError()}><p class="field-error" role="alert">{historyDeleteError()}</p></Show>
       <Show
         when={sessionGroups().length > 0}
         fallback={

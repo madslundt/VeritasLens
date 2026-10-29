@@ -7,6 +7,9 @@ const mocks = vi.hoisted(() => ({
   call: vi.fn(),
   stream: vi.fn(),
   noise: vi.fn(),
+  audioCalls: [] as boolean[],
+  audioOpenBarrier: null as Promise<void> | null,
+  micEnabled: false,
   listener: null as ((event: EvenHubEvent) => void) | null,
   storage: new Map<string, string>(),
   upgrades: [] as Array<{ containerName: string; content: string }>,
@@ -46,7 +49,12 @@ vi.mock('../src/runtime/bridge', () => ({
       mocks.visible.set(upgrade.containerName, upgrade.content);
       return true;
     }),
-    audioControl: vi.fn(async () => true),
+    audioControl: vi.fn(async (enabled: boolean) => {
+      mocks.audioCalls.push(enabled);
+      if (enabled && mocks.audioOpenBarrier) await mocks.audioOpenBarrier;
+      mocks.micEnabled = enabled;
+      return true;
+    }),
     setLocalStorage: async (key: string, value: string) => { mocks.storage.set(key, value); return true; },
     getLocalStorage: async (key: string) => mocks.storage.get(key) ?? '',
     onEvenHubEvent: (listener: (event: EvenHubEvent) => void) => {
@@ -63,7 +71,7 @@ vi.mock('../src/runtime/noiseReduction', () => ({
 
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { DEFAULT_CONVERSATION, AUTO_LENS_CANDIDATES, configureSettings, getPersona } from '@veritaslens/core';
-import { requestConversationHelp, pauseConversation, startConversation, refreshHudPage, startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
+import { endConversation, requestConversationHelp, pauseConversation, startConversation, refreshHudPage, startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
 import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState, menuOptionAtIndex, setActiveLayout, showActivePage, isActiveHidden, setLensResult, showHistoryListPage, showHistoryDetailPage, getHistoryListEntries, scrollActiveReason, hasPendingActiveResult } from '../src/runtime/hud';
 import {
   saveMeetingPrepSections, lensResult, deleteHistorySession, activePersona, setActivePersona, appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
@@ -108,6 +116,9 @@ describe('analysis through the gesture/audio pipeline', () => {
     vi.clearAllMocks();
     vi.spyOn(console, 'info').mockImplementation(() => {});
     mocks.storage.clear();
+    mocks.audioCalls.length = 0;
+    mocks.audioOpenBarrier = null;
+    mocks.micEnabled = false;
     mocks.upgrades.length = 0;
     mocks.visible.clear();
     mocks.listItems = [];
@@ -146,6 +157,116 @@ describe('analysis through the gesture/audio pipeline', () => {
   });
 
   afterEach(async () => { await stopHudRuntime(); await drain(); await saveDiscreet(async () => true, false); vi.useRealTimers(); });
+
+
+  it.each(['speak', 'summary'] as const)('keeps Exit authoritative over a delayed %s page', async kind => {
+    vi.useFakeTimers();
+    if (kind === 'speak') {
+      await startConversation('translation');
+      await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Hola', translatedText: 'Hello', replyStarters: [] });
+    } else {
+      audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+      vi.setSystemTime(Date.now() + 61000);
+    }
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = kind === 'speak' ? mocks.listItems.indexOf('Speak →')
+      : mocks.listItems.findIndex((_, i) => menuOptionAtIndex(i) === 'mid-summary');
+    expect(index).toBeGreaterThanOrEqual(0);
+    const page = deferred<void>(); mocks.hudRebuildBarrier = page.promise;
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    mocks.hudRebuildBarrier = null;
+    const ending = endConversation(); await drain();
+    page.resolve(); await ending; await drain();
+    expect(currentHudPage()).toBe('picker');
+    expect(appPhase()).toBe('idle');
+    expect([...mocks.visible.values()].join(' ')).not.toMatch(/Speak now|Generating summary/);
+  });
+
+  it.each(['speak', 'summary'] as const)('invalidates a delayed %s page across runtime stop and restart', async kind => {
+    vi.useFakeTimers();
+    if (kind === 'speak') {
+      await startConversation('translation');
+      await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Hola', translatedText: 'Hello', replyStarters: [] });
+    } else {
+      audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+      vi.setSystemTime(Date.now() + 61000);
+    }
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = kind === 'speak' ? mocks.listItems.indexOf('Speak →')
+      : mocks.listItems.findIndex((_, i) => menuOptionAtIndex(i) === 'mid-summary');
+    expect(index).toBeGreaterThanOrEqual(0);
+    const page = deferred<void>(); mocks.hudRebuildBarrier = page.promise;
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    mocks.hudRebuildBarrier = null;
+    await stopHudRuntime();
+    expect(currentHudPage()).toBe('none');
+    const restart = startHudRuntime(); await drain();
+    page.resolve(); await restart; await drain();
+    expect(currentHudPage()).toBe('picker');
+    expect(appPhase()).toBe('idle');
+    expect([...mocks.visible.values()].join(' ')).not.toMatch(/Speak now|Generating summary/);
+  });
+
+  it('keeps Exit authoritative over a delayed answer render', async () => {
+    const page = deferred<void>();
+    mocks.stream.mockImplementationOnce(async () => { mocks.hudRebuildBarrier = page.promise; return answer; });
+    audio(1000); const analysis = requestConversationHelp('fact-checker', undefined, false); await drain();
+    mocks.hudRebuildBarrier = null;
+    const ending = endConversation(); await drain();
+    page.resolve(); await analysis; await ending; await drain();
+    expect(currentHudPage()).toBe('picker');
+    expect(appPhase()).toBe('idle');
+    expect([...mocks.visible.values()].join(' ')).not.toContain('Paris');
+  });
+
+  it('does not reopen the microphone when session startup finishes after runtime stop', async () => {
+    await stopHudRuntime(); await startHudRuntime();
+    mocks.audioCalls.length = 0;
+    const page = deferred<void>(); mocks.hudRebuildBarrier = page.promise;
+    const start = startConversation('fact-checker'); await drain();
+    mocks.hudRebuildBarrier = null;
+    await stopHudRuntime();
+    page.resolve(); await start; await drain();
+    expect(currentHudPage()).toBe('none');
+    expect(appPhase()).toBe('idle');
+    expect(mocks.audioCalls).not.toContain(true);
+  });
+
+
+  it.each([false, true])('orders a pending native mic open before shutdown and optional restart (%s)', async restart => {
+    await stopHudRuntime(); await startHudRuntime();
+    mocks.audioCalls.length = 0;
+    const mic = deferred<void>(); mocks.audioOpenBarrier = mic.promise;
+    const start = startConversation('fact-checker'); await drain();
+    expect(mocks.audioCalls).toEqual([true]);
+    const stop = stopHudRuntime(); await drain();
+    const next = restart ? startConversation('eli5') : Promise.resolve(); await drain();
+    expect(mocks.audioCalls.filter(Boolean)).toHaveLength(1);
+    mocks.audioOpenBarrier = null; mic.resolve();
+    await start; await stop; await next; await drain();
+    expect(mocks.micEnabled).toBe(restart);
+    expect(mocks.audioCalls).toEqual(restart ? [true, false, true] : [true, false]);
+    expect(appPhase()).toBe(restart ? 'listening' : 'idle');
+    expect(currentHudPage()).toBe(restart ? 'active' : 'none');
+    if (restart) expect(activePersona()).toBe('eli5');
+  });
+
+
+  it('retains a successful analysis when opening the menu during spinner cleanup', async () => {
+    const response = deferred<string>(); mocks.stream.mockReturnValueOnce(response.promise);
+    audio(1000); tap(); await drain();
+    const hud = deferred<void>(); mocks.hudWriteBarrier = hud.promise;
+    response.resolve(answer); await drain();
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    hud.resolve(); await drain(); mocks.hudWriteBarrier = null;
+    expect(currentHudPage()).toBe('menu');
+    expect(sessionHistory()).toHaveLength(1);
+    expect(hasPendingActiveResult()).toBe(true);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 0 } } as EvenHubEvent); await drain();
+    expect(currentHudPage()).toBe('active');
+    expect(await scrollActiveReason(-1)).toBe('revealed');
+    expect([...mocks.visible.values()].join(' ')).toContain('Paris');
+  });
 
   it('removes deleted answers from visible and hidden active recall', async () => {
     audio(1000); await requestConversationHelp('fact-checker', undefined, false);

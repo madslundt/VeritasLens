@@ -216,6 +216,38 @@ describe('deleteHistorySession', () => {
   });
 });
 
+describe('history deletion failures', () => {
+  it.each(['clear', 'session'] as const)('rolls back a failed %s deletion and allows a retry', async action => {
+    const ls = fakeLocalStorage();
+    await pushHistoryEntry(fatEntry(0), ls.set);
+    await pushHistoryEntry(fatEntry(1), ls.set);
+    const previous = sessionHistory();
+    const remove = (write: (key: string, value: string) => Promise<boolean>) => action === 'clear'
+      ? clearSessionHistory(write) : deleteHistorySession('session-0', write);
+    await expect(remove(async () => false)).rejects.toThrow('Could not save');
+    expect(sessionHistory()).toBe(previous);
+    await expect(remove(async () => { throw new Error('Storage unavailable'); })).rejects.toThrow('Storage unavailable');
+    expect(sessionHistory()).toBe(previous);
+    await remove(ls.set);
+    expect(sessionHistory().map(entry => entry.sessionId)).toEqual(action === 'clear' ? [] : ['session-1']);
+    expect(JSON.parse(ls.data.get('veritaslens.history')!)).toEqual(sessionHistory());
+  });
+
+  it.each(['clear', 'session'] as const)('does not erase newer analysis during failed %s rollback', async action => {
+    const ls = fakeLocalStorage();
+    await pushHistoryEntry(fatEntry(0), ls.set);
+    let release!: (ok: boolean) => void;
+    const write = () => new Promise<boolean>(resolve => { release = resolve; });
+    const deleting = action === 'clear' ? clearSessionHistory(write) : deleteHistorySession('session-0', write);
+    const rejected = expect(deleting).rejects.toThrow('Could not save');
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const appending = pushHistoryEntry(fatEntry(1), ls.set);
+    release(false); await Promise.all([rejected, appending]);
+    expect(sessionHistory().map(entry => entry.sessionId)).toEqual(['session-1']);
+    expect(JSON.parse(ls.data.get('veritaslens.history')!)).toEqual(sessionHistory());
+  });
+});
+
 describe('loadSettings', () => {
   it('round-trips every persisted setting', async () => {
     const ls = fakeLocalStorage();
@@ -344,6 +376,75 @@ describe('loadSettings', () => {
 });
 
 describe('loadHistory', () => {
+  it('does not restore entries deleted while a storage read was pending', async () => {
+    const ls = fakeLocalStorage();
+    await pushHistoryEntry(fatEntry(0), ls.set);
+    const snapshot = ls.data.get('veritaslens.history')!;
+    let release!: (raw: string) => void;
+    const loading = loadHistory(() => new Promise<string>(resolve => { release = resolve; }));
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    await clearSessionHistory(ls.set);
+    release(snapshot); await loading;
+    expect(sessionHistory()).toEqual([]);
+  });
+
+  it('preserves a newer analysis when an older storage read completes', async () => {
+    const ls = fakeLocalStorage();
+    await pushHistoryEntry(fatEntry(0), ls.set);
+    const snapshot = ls.data.get('veritaslens.history')!;
+    let release!: (raw: string) => void;
+    const loading = loadHistory(() => new Promise<string>(resolve => { release = resolve; }));
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    await pushHistoryEntry(fatEntry(1), ls.set);
+    release(snapshot); await loading;
+    await pushHistoryEntry(fatEntry(2), ls.set);
+    expect((JSON.parse(ls.data.get('veritaslens.history')!) as HistoryEntry[]).map(entry => entry.sessionId))
+      .toEqual(['session-0', 'session-1', 'session-2']);
+  });
+
+  it('ignores an older read that completes after a newer read', async () => {
+    let release!: (raw: string) => void;
+    const older = loadHistory(() => new Promise<string>(resolve => { release = resolve; }));
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const newest = { ...fatEntry(1), id: 'newest', timestamp: 1 };
+    await loadHistory(async () => JSON.stringify([newest]));
+    release(JSON.stringify([{ ...fatEntry(0), id: 'older', timestamp: 0 }])); await older;
+    expect(sessionHistory().map(entry => entry.id)).toEqual(['newest']);
+  });
+
+  it('waits for pending history writes before reading their persisted snapshot', async () => {
+    const ls = fakeLocalStorage();
+    await pushHistoryEntry(fatEntry(0), ls.set);
+    let release!: () => void;
+    const writing = pushHistoryEntry(fatEntry(1), async (key, value) => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return ls.set(key, value);
+    });
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const read = vi.fn(ls.get);
+    const loading = loadHistory(read);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const readWhileWriting = read.mock.calls.length;
+    release(); await Promise.all([writing, loading]);
+    expect(readWhileWriting).toBe(0);
+    expect(sessionHistory().map(entry => entry.sessionId)).toEqual(['session-0', 'session-1']);
+  });
+
+  it('preserves rollback and continues loading after a pending write fails', async () => {
+    const ls = fakeLocalStorage();
+    const id = await pushHistoryEntry(fatEntry(0), ls.set);
+    let release!: (ok: boolean) => void;
+    const updating = updateHistoryEntry(id, { pinned: true }, () => new Promise<boolean>(resolve => { release = resolve; }));
+    const rejected = expect(updating).rejects.toThrow('Could not save');
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const loading = loadHistory(ls.get);
+    release(false); await Promise.all([rejected, loading]);
+    expect(sessionHistory()[0]!.pinned).toBeUndefined();
+    await pushHistoryEntry(fatEntry(1), ls.set);
+    await loadHistory(ls.get);
+    expect(sessionHistory().map(entry => entry.sessionId)).toEqual(['session-0', 'session-1']);
+  });
+
   it('populates the signal from valid JSON', async () => {
     const ls = fakeLocalStorage();
     const entry: HistoryEntry = {

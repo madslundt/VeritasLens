@@ -21,6 +21,9 @@ All notable changes to VeritasLens are recorded here. Format loosely follows [Ke
 - Remove deleted moments from active swipe recall, queued result replays, and translation actions as well as the History list.
 - Serialize and rebase overlapping preference writes at commit time so History notes and Settings edits survive each other, including edits made while a save is pending.
 - Cancel pending Speak timers and mid-session summaries on Pause, reconcile late SDK summary-page rebuilds, and reject canceled Prepared assistance before publishing results.
+- Order native HUD writes and discard superseded page updates so slow results and page transitions cannot overwrite a newer session or menu. Invalidate pending display and microphone startup work when stopping.
+- Prevent delayed History reads from restoring deleted entries or losing newer analyses. Restore History after failed deletion and show a retry message on the phone.
+- Update the SolidJS serialization dependency to a patched compatible version.
 
 
 ## [0.18.1] — 2026-10-16
