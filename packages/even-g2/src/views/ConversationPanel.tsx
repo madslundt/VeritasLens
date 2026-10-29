@@ -1,22 +1,22 @@
-import { SettingsIcon } from './SettingsUi';
-import { createEffect, on, createMemo, createSignal, For, Show } from 'solid-js';
-import { CONVERSATION_PROFILES, DEFAULT_CONVERSATION, collectConversationRecords, exportConversation, resultText } from '@veritaslens/core';
+import { SettingsIcon, lensDescription } from '@/views/SettingsUi';
+import { createEffect, on, createMemo, createSignal, For, Show, type Setter } from 'solid-js';
+import { CONVERSATION_PROFILES, DEFAULT_CONVERSATION, getPersona, getPickerPersonas, getSpecializedPersonas, profileCandidates, AUTO_LENS_CANDIDATES, collectConversationRecords, exportConversation, resultText } from '@veritaslens/core';
 import type { ConversationPreferences, ConversationRecord, HistoryEntry } from '@veritaslens/core';
-import { appPhase, settings, saveConversationPreferences, saveAutoModeEnabled, sessionHistory, recordingPaused, liveCaptionText, liveCaptionStatus, updateHistoryEntry } from '@/state/store';
+import { appPhase, settings, saveConversationPreferences, activePersona, sessionHistory, recordingPaused, liveCaptionText, liveCaptionStatus, updateHistoryEntry } from '@/state/store';
 import { getBridge } from '@/runtime/bridge';
 import { startConversation, requestConversationHelp, pauseConversation, endConversation, providerConfigurationError } from '@/runtime/lifecycle';
 
 const write = (key: string, value: string) => getBridge().setLocalStorage(key, value);
 const newId = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-export function ConversationPanel() {
-  const [draft, setDraft] = createSignal<ConversationPreferences>(structuredClone(settings().conversation ?? DEFAULT_CONVERSATION));
-  createEffect(on(() => settings().conversation, value => setDraft(structuredClone(value ?? DEFAULT_CONVERSATION)), { defer: true }));
-  const [presetName, setPresetName] = createSignal('');
-  const [contextName, setContextName] = createSignal('');
-  const [contextBody, setContextBody] = createSignal('');
+export function ConversationPanel(props: { onOpenSettings: () => void }) {
+  const lenses = () => [...getPickerPersonas(), ...getSpecializedPersonas()];
+  const [selectedLens, setSelectedLens] = createSignal(activePersona());
+  createEffect(on(activePersona, id => setSelectedLens(id), { defer: true }));
   const [message, setMessage] = createSignal('');
   const [busy, setBusy] = createSignal(false);
   const [request, setRequest] = createSignal('');
+  const profile = () => CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile)
+    ?? CONVERSATION_PROFILES.find(p => p.id === DEFAULT_CONVERSATION.profile)!;
   const sessionActive = () => ['listening', 'thinking', 'displaying', 'error'].includes(appPhase());
   const run = async (action: () => Promise<unknown>) => {
     if (busy()) return;
@@ -24,26 +24,73 @@ export function ConversationPanel() {
     try { await action(); } catch (error) { setMessage(error instanceof Error ? error.message : 'Could not complete this action.'); }
     finally { setBusy(false); }
   };
-  const save = async () => {
-    if (!await saveConversationPreferences(write, draft())) throw new Error('Could not save session setup.');
-    setDraft(structuredClone(settings().conversation!)); setMessage('Session setup saved.');
-  };
-  const help = (id: string, instruction?: string) => run(async () => { await save(); await requestConversationHelp(id, instruction); });
-  return <section class="conversation-card" aria-label="Conversation setup">
-    <div class="field-header"><h2>What kind of conversation?</h2></div>
+  const help = (id: string, instruction?: string) => run(() => requestConversationHelp(id, instruction));
+  return <section class="conversation-card" aria-label="Session">
+    <h2>{sessionActive() ? 'Current session' : 'Start a session'}</h2>
+    <p class="field-hint">A session keeps your captured moments together. Choose a lens for the help you need.</p>
+    <p role="status">Profile: {profile().name} · Lens: {getPersona(sessionActive() ? activePersona() : selectedLens())?.name}</p>
+    <p class="field-hint">Audio sent per analysis: up to {settings().bufferDuration} seconds. Change audio and conversation preferences in Settings on your phone.</p>
+    <label class="conversation-field">Lens<select aria-label="Lens" value={selectedLens()} onChange={e => setSelectedLens(e.currentTarget.value)}>
+      <For each={lenses()}>{lens => <option value={lens.id}>{lens.name}</option>}</For>
+    </select></label>
+    <p class="field-hint">{lensDescription(selectedLens(), getPersona(selectedLens())?.description ?? '')}</p>
+    <div class="conversation-buttons">
+      <button type="button" class="primary" disabled={busy() || providerConfigurationError(settings()) !== null}
+        onClick={() => void run(() => startConversation(selectedLens()))}>
+        {sessionActive() ? 'Use selected lens' : `Start ${getPersona(selectedLens())?.name}`}
+      </button>
+      <button type="button" class="secondary" onClick={props.onOpenSettings}>Conversation settings</button>
+    </div>
+    <Show when={sessionActive()}><div class="conversation-live">
+      <h3>Help during the conversation</h3><p class="field-hint">Actions reuse the latest captured exchange. Double-tap on glasses captures a new exchange.</p>
+      <div class="conversation-buttons"><For each={[
+        'respond', 'eli5', 'fact-checker', 'key-questions', 'commitments', 'repair', 'catch-up', 'translation',
+      ]}>{id => <button type="button" class="secondary" disabled={busy() || appPhase() === 'thinking' || !sessionActive()} onClick={() => void help(id)}>{getPersona(id)!.name}</button>}</For></div>
+      <details><summary>Ask, refine, or correct</summary>
+      <label class="conversation-field">Ask about captured speech or correct a result<input value={request()} maxLength={1000} onInput={e => setRequest(e.currentTarget.value)} placeholder="What did we decide? / The name was Alex." /></label>
+      <div class="conversation-buttons">
+        <button type="button" class="secondary" disabled={!request().trim() || busy() || !sessionActive()} onClick={() => void help('catch-up', request())}>Ask about session</button>
+        <button type="button" class="secondary" disabled={!request().trim() || busy() || !sessionActive()} onClick={() => void help('refine', request())}>Correct / refine</button>
+        <button type="button" class="secondary" disabled={busy() || !sessionActive()} onClick={() => void help('refine', 'Make the previous answer shorter.')}>Shorter</button>
+        <button type="button" class="secondary" disabled={busy() || !sessionActive()} onClick={() => void help('refine', 'Make the suggested response more natural.')}>More natural</button>
+      </div>
+      </details>
+      <Show when={settings().conversation?.captionsEnabled}><div class="conversation-caption" role="status"><small>{liveCaptionStatus() || 'Start a session to see captions.'}</small><p>{liveCaptionText()}</p></div></Show>
+      <Show when={sessionActive()}><div class="conversation-buttons">
+        <button type="button" class="secondary" disabled={busy()} onClick={() => void run(pauseConversation)}>{recordingPaused() ? 'Resume microphone' : 'Pause microphone'}</button>
+        <button type="button" class="secondary" disabled={busy()} onClick={() => void run(endConversation)}>End session</button>
+      </div></Show>
+    </div></Show>
+    <p class="field-hint" role="status">{message()}</p>
+  </section>;
+}
+
+export function ConversationSettings(props: {
+  preferences: ConversationPreferences;
+  onChange: Setter<ConversationPreferences>;
+  disabledAutoLenses: string[];
+}) {
+  const draft = () => props.preferences;
+  const setDraft = props.onChange;
+  const [presetName, setPresetName] = createSignal('');
+  const [contextName, setContextName] = createSignal('');
+  const [contextBody, setContextBody] = createSignal('');
+  const autoCandidates = () => profileCandidates(draft().profile, AUTO_LENS_CANDIDATES)
+    .filter(id => !props.disabledAutoLenses.includes(id));
+  return <section class="conversation-card" aria-label="Conversation settings">
+    <h2>Conversation profile</h2>
+    <p class="field-hint">Optional context for your lens. Changing a profile keeps your selected lens. Best next help chooses only from the enabled lenses listed below.</p>
     <div class="conversation-profiles">
       <For each={CONVERSATION_PROFILES}>{profile => <button type="button" class="conversation-profile" aria-pressed={draft().profile === profile.id}
         onClick={() => setDraft(c => ({ ...c, profile: profile.id, tone: profile.id === 'work' ? 'professional' : 'natural' }))}>
         <strong>{profile.name}</strong><span>{profile.description}</span>
       </button>}</For>
     </div>
-    <div class="conversation-buttons">
-      <button type="button" class="primary" disabled={busy() || providerConfigurationError(settings()) !== null}
-        onClick={() => void run(async () => { await save(); await startConversation(CONVERSATION_PROFILES.find(p => p.id === draft().profile)!.defaultLens); })}>
-        {sessionActive() ? 'Use this setup' : `Start ${CONVERSATION_PROFILES.find(p => p.id === draft().profile)!.name}`}
-      </button>
-      <button type="button" class="secondary" onClick={() => void run(save)} disabled={busy()}>Save setup</button>
-    </div>
+    <p class="field-hint">Best next help can choose: {autoCandidates().map(id => getPersona(id)?.name ?? id).join(', ') || 'No lenses enabled'}. Configure enabled lenses in Lenses → Best next help.</p>
+    <label class="toggle-row"><input type="checkbox" checked={draft().captionsEnabled} onChange={e => setDraft(c => ({ ...c, captionsEnabled: e.currentTarget.checked }))} /><span>Live captions — sends speech to your configured speech-to-text host while listening</span></label>
+    <label class="conversation-field">Hide answers after<select aria-label="Hide answers after" value={draft().cueDurationSec} onChange={e => setDraft(c => ({ ...c, cueDurationSec: Number(e.currentTarget.value) }))}>
+        <option value={10}>10 seconds</option><option value={20}>20 seconds</option><option value={60}>60 seconds</option><option value={120}>2 minutes</option>
+    </select><span class="field-hint">How long an answer stays on the glasses. Audio sent per analysis is configured separately below. Pinned answers stay visible.</span></label>
     <details class="conversation-disclosure"><summary>Goals, notes &amp; saved setups<SettingsIcon name="chevron" /></summary><div class="conversation-preparation">
     <label class="conversation-field">My goal <span class="field-hint">Optional — you can start without preparation.</span>
       <input value={draft().goal} maxLength={1000} placeholder={CONVERSATION_PROFILES.find(p => p.id === draft().profile)!.goal}
@@ -52,13 +99,12 @@ export function ConversationPanel() {
 
       <label class="conversation-field">Boundaries and constraints<textarea maxLength={1000} value={draft().constraints} placeholder="For example: clarify scope before agreeing to a deadline."
         onInput={e => setDraft(c => ({ ...c, constraints: e.currentTarget.value }))} /></label>
-      <label class="conversation-field">Response style<select value={draft().tone} onChange={e => setDraft(c => ({ ...c, tone: e.currentTarget.value as ConversationPreferences['tone'] }))}>
+      <label class="conversation-field">Response style<select aria-label="Response style" value={draft().tone} onChange={e => setDraft(c => ({ ...c, tone: e.currentTarget.value as ConversationPreferences['tone'] }))}>
         <option value="natural">Natural</option><option value="brief">Brief</option><option value="professional">Professional</option>
       </select></label>
-      <label class="conversation-field">Cue duration<select value={draft().cueDurationSec} onChange={e => setDraft(c => ({ ...c, cueDurationSec: Number(e.currentTarget.value) }))}>
-        <option value={10}>10 seconds</option><option value={20}>20 seconds</option><option value={60}>60 seconds</option><option value={120}>2 minutes</option>
-      </select><span class="field-hint">Pin a cue to keep it visible. Dismissed cues remain in history.</span></label>
+
       <h3>Selected background</h3><p class="field-hint">Choose only the person or project notes relevant to this session. Selected notes are included in assistance requests.</p>
+      <Show when={draft().contexts.length > 20}><p role="alert">Keep at most 20 background notes before saving. Remove a note to make room for the notes saved from History.</p></Show>
       <For each={draft().contexts}>{context => <div class="conversation-context">
         <label><input type="checkbox" checked={draft().selectedContextIds.includes(context.id)} onChange={e => {
           const checked = e.currentTarget.checked; setDraft(c => ({ ...c, selectedContextIds: checked ? [...c.selectedContextIds, context.id] : c.selectedContextIds.filter(id => id !== context.id) }));
@@ -76,32 +122,9 @@ export function ConversationPanel() {
       </div>}</For>
       <label class="conversation-field">Save this setup as<input value={presetName()} maxLength={60} placeholder="Project review, interview, dinner…" onInput={e => setPresetName(e.currentTarget.value)} /></label>
       <button type="button" class="secondary" disabled={!presetName().trim() || draft().presets.length >= 12} onClick={() => {
-        const c = draft(); setDraft({ ...c, presets: [...c.presets, { id: newId(), name: presetName().trim(), profile: c.profile, goal: c.goal, constraints: c.constraints, selectedContextIds: [...c.selectedContextIds] }] }); setPresetName(''); void run(save);
-      }}>Save named setup</button>
+        const c = draft(); setDraft({ ...c, presets: [...c.presets, { id: newId(), name: presetName().trim(), profile: c.profile, goal: c.goal, constraints: c.constraints, selectedContextIds: [...c.selectedContextIds] }] }); setPresetName('');
+      }}>Add named setup</button>
     </div></details>
-    <Show when={sessionActive()}><div class="conversation-live">
-      <h3>Help during the conversation</h3><p class="field-hint">Actions reuse the latest captured exchange. Double-tap on glasses captures a new exchange.</p>
-      <div class="conversation-buttons"><For each={[
-        ['respond', 'Reply'], ['eli5', 'Explain'], ['fact-checker', 'Check'], ['key-questions', 'Ask'], ['commitments', 'Remember'], ['repair', 'Clarify / disagree'], ['catch-up', 'Catch me up'], ['translation', 'Translate'],
-      ]}>{([id, label]) => <button type="button" class="secondary" disabled={busy() || appPhase() === 'thinking' || !sessionActive()} onClick={() => void help(id)}>{label}</button>}</For></div>
-      <details><summary>Ask, refine, or correct</summary>
-      <label class="conversation-field">Ask about captured speech or correct a result<input value={request()} maxLength={1000} onInput={e => setRequest(e.currentTarget.value)} placeholder="What did we decide? / The name was Alex." /></label>
-      <div class="conversation-buttons">
-        <button type="button" class="secondary" disabled={!request().trim() || busy() || !sessionActive()} onClick={() => void help('catch-up', request())}>Ask about session</button>
-        <button type="button" class="secondary" disabled={!request().trim() || busy() || !sessionActive()} onClick={() => void help('refine', request())}>Correct / refine</button>
-        <button type="button" class="secondary" disabled={busy() || !sessionActive()} onClick={() => void help('refine', 'Make the previous answer shorter.')}>Shorter</button>
-        <button type="button" class="secondary" disabled={busy() || !sessionActive()} onClick={() => void help('refine', 'Make the suggested response more natural.')}>More natural</button>
-      </div>
-      </details>
-      <label class="toggle-row"><input type="checkbox" checked={settings().autoModeEnabled} onChange={e => { const on = e.currentTarget.checked; void run(() => saveAutoModeEnabled(write, on)); }} /><span>Hands-free assistance</span></label>
-      <label class="toggle-row"><input type="checkbox" checked={draft().captionsEnabled} onChange={e => { const on = e.currentTarget.checked; setDraft(c => ({ ...c, captionsEnabled: on })); void run(save); }} /><span>Live captions — sends speech to your configured speech-to-text host while listening</span></label>
-      <Show when={draft().captionsEnabled}><div class="conversation-caption" role="status"><small>{liveCaptionStatus() || 'Start a session to see captions.'}</small><p>{liveCaptionText()}</p></div></Show>
-      <Show when={sessionActive()}><div class="conversation-buttons">
-        <button type="button" class="secondary" disabled={busy()} onClick={() => void run(pauseConversation)}>{recordingPaused() ? 'Resume microphone' : 'Pause microphone'}</button>
-        <button type="button" class="secondary" disabled={busy()} onClick={() => void run(endConversation)}>End session</button>
-      </div></Show>
-    </div></Show>
-    <p class="field-hint" role="status">{message()}</p>
   </section>;
 }
 
@@ -122,7 +145,7 @@ export function ConversationReview(props: { entries: HistoryEntry[] }) {
   };
   return <section class="conversation-card" aria-label="Conversation review">
     <h2>Decisions, commitments & open questions</h2><p class="field-hint">Captured moments only. Check the evidence and correct details before relying on them.</p>
-    <Show when={records().length > 0} fallback={<p class="field-hint">No structured items captured. Use Remember during the session.</p>}>
+    <Show when={records().length > 0} fallback={<p class="field-hint">No structured items captured. Use Decisions &amp; commitments during the session.</p>}>
       <For each={['decision', 'my-commitment', 'other-commitment', 'unassigned-commitment', 'question'] as const}>{kind => <div><h3>{kind === 'decision' ? 'Decisions' : kind === 'my-commitment' ? 'My commitments' : kind === 'other-commitment' ? 'Other commitments' : kind === 'unassigned-commitment' ? 'Unassigned commitments' : 'Open questions'}</h3>
         <For each={records().filter(r => kind === 'decision' || kind === 'question' ? r.kind === kind : r.kind === 'commitment' && (kind === 'my-commitment' ? r.ownerRole === 'wearer' : kind === 'other-commitment' ? r.ownerRole === 'other' : !r.ownerRole || r.ownerRole === 'unknown'))}>{record => <div class="conversation-context">
           <label class="conversation-field">Item<input value={record.text} onBlur={e => correct(record, 'text', e.currentTarget.value)} /></label>

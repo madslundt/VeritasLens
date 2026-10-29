@@ -113,6 +113,7 @@ const SETTINGS_KEY_VOICE_GATE_RMS = 'veritaslens.voiceGateRmsFloor';
 /** Legacy boolean key read only for one-time migration of pre-slider installs. */
 const SETTINGS_KEY_VOICE_GATE_LEGACY = 'veritaslens.voiceGateEnabled';
 const SETTINGS_KEY_VOICE_TRIM = 'veritaslens.voiceTrimEnabled';
+const SETTINGS_KEY_NOISE_REDUCTION = 'veritaslens.noiseReductionEnabled';
 const SETTINGS_KEY_AUDIO_COMPRESSION = 'veritaslens.audioCompressionEnabled';
 const SETTINGS_KEY_AUTO_DISABLED_LENSES = 'veritaslens.autoDisabledLenses';
 const SETTINGS_KEY_AUTO_MODE_ENABLED = 'veritaslens.autoModeEnabled';
@@ -255,6 +256,7 @@ const [settings, setSettings] = createSignal<Settings>({
   // VAD-based payload trimming defaults ON: shrinks the WAV to just the
   // detected speech, cutting upload + ingest time on sparse buffers.
   voiceTrimEnabled: true,
+  noiseReductionEnabled: false,
   audioCompressionEnabled: true,
   autoDisabledLenses: [],
   // Auto-mode VAD: off by default; user opts in from Settings. Thresholds
@@ -333,6 +335,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
       safeGet(SETTINGS_KEY_VOICE_GATE_RMS),
       safeGet(SETTINGS_KEY_VOICE_GATE_LEGACY),
       safeGet(SETTINGS_KEY_VOICE_TRIM),
+      safeGet(SETTINGS_KEY_NOISE_REDUCTION),
       safeGet(SETTINGS_KEY_AUDIO_COMPRESSION),
       safeGet(SETTINGS_KEY_AUTO_DISABLED_LENSES),
       Promise.resolve(rawActiveSttUrl),
@@ -373,6 +376,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     rawVoiceGateRms,
     rawVoiceGateLegacy,
     rawVoiceTrim,
+    rawNoiseReduction,
     rawAudioCompression,
     rawAutoDisabledLenses,
     rawSttHost,
@@ -441,6 +445,7 @@ export async function loadSettings(getLocalStorage: (k: string) => Promise<strin
     discreet: rawDiscreet === 'true',
     voiceGateRmsFloor: coerceVoiceGateRmsFloor(rawVoiceGateRms, rawVoiceGateLegacy),
     voiceTrimEnabled: rawVoiceTrim === '' ? true : rawVoiceTrim !== 'false',
+    noiseReductionEnabled: rawNoiseReduction === 'true',
     audioCompressionEnabled: rawAudioCompression !== 'false',
     autoDisabledLenses: coerceAutoDisabledLenses(rawAutoDisabledLenses),
     autoModeEnabled: rawAutoModeEnabled === 'true',
@@ -715,6 +720,10 @@ export async function saveVoiceGateRmsFloor(setLs: SetLs, floor: number): Promis
 
 export const saveVoiceTrimEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_VOICE_TRIM, 'voiceTrimEnabled', enabled);
+
+export const saveNoiseReductionEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
+  saveSetting(setLs, SETTINGS_KEY_NOISE_REDUCTION, 'noiseReductionEnabled', enabled);
+
 export const saveAudioCompressionEnabled = (setLs: SetLs, enabled: boolean): Promise<boolean> =>
   saveSetting(setLs, SETTINGS_KEY_AUDIO_COMPRESSION, 'audioCompressionEnabled', enabled);
 
@@ -1294,6 +1303,9 @@ export function clearDebugEvents(): void {
 }
 
 export async function saveConversationPreferences(setLs: SetLs, value: ConversationPreferences): Promise<boolean> {
+  // An external History save may add notes while Settings has a draft. Do
+  // not silently truncate either set when the merged draft exceeds capacity.
+  if (value.contexts.length > 20 || value.presets.length > 12) return false;
   const conversation = normalizeConversationPreferences(value);
   const ok = await setLs(CONVERSATION_KEY, JSON.stringify(conversation));
   if (ok) setSettings(s => ({ ...s, conversation }));

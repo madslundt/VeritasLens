@@ -120,6 +120,7 @@ let cachedFullSettings: Settings = {
   voiceTrimEnabled: true,
   // Hermes currently uses the WAV-only native encoder adapter.
   audioCompressionEnabled: false,
+  noiseReductionEnabled: false,
   autoDisabledLenses: [],
   autoModeEnabled: false,
   autoModeStartMs: DEFAULT_AUTO_MODE_START_MS,

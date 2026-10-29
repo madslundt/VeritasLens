@@ -50,4 +50,19 @@ describe('packaged candidate and Silero v6 WASM', () => {
     expect(init).not.toHaveBeenCalled();
     fresh.dispose();
   });
+
+  it('lets a pending gesture timer run during a short scan on a slow device', async () => {
+    // A three-second capture never reached the old 16-block yield point.
+    // Simulate slow inference with a deterministic wall clock, while keeping
+    // the actual WASM models and real event-loop scheduling.
+    let clock = 0;
+    const now = vi.spyOn(performance, 'now').mockImplementation(() => clock += 50);
+    let gestureHandled = false;
+    const timer = setTimeout(() => { gestureHandled = true; }, 0);
+    try {
+      const pcm = signal((i) => 1200 * Math.sin(2 * Math.PI * 220 * i / 16_000));
+      expect(await session.extractSpeechSegments(pcm, 16_000)).toEqual([]);
+      expect(gestureHandled).toBe(true);
+    } finally { clearTimeout(timer); now.mockRestore(); }
+  });
 });

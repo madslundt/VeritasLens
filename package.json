@@ -1,11 +1,15 @@
 {
   "name": "veritaslens-monorepo",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
     "build": "npm run build --workspaces --if-present",
-    "lint": "npm run lint --workspaces --if-present"
+    "lint": "npm run lint --workspaces --if-present",
+    "test:audio": "node --test scripts/audio-lab/*.test.mjs && node scripts/test-audio-real.mjs",
+    "audio:lab": "node scripts/audio-lab/server.mjs"
   },
   "overrides": {
     "@expo/metro-config": {

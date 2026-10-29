@@ -2,6 +2,19 @@
 
 All notable changes to VeritasLens are recorded here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project uses semantic versioning.
 
+## [0.18.2] — 2026-10-29
+
+- Separate session controls from conversation setup: select a lens explicitly in Session; configure profiles, saved setups, captions, and answer display time in phone Settings using Save changes.
+- Default new users to no profile while preserving saved profile choices, goals, and notes.
+- Preserve the selected lens when changing profiles. Offer None to opt out of profile filtering and show the enabled lenses available to Best next help.
+- Keep audio duration configurable only in phone Settings, labeled Audio sent per analysis. Label answer expiry Hide answers after and show audio duration read-only in Session.
+- Match phone and glasses lens names. Show Lens and Profile separately on the HUD, remove profile/setup controls and persistent setting toggles from glasses menus, and retain quick session actions.
+
+- Add optional, off-by-default local RNNoise cleanup for G2 snapshots up to 30 seconds. Preserve raw audio and fall back after at most one second; longer snapshots skip cleanup to bound memory. Include model licenses and worker/PCM regression coverage.
+- Improve VAD responsiveness with elapsed-time inference yielding and a fast path for native 16 kHz PCM.
+- Add an audio lab with real WASM inference, reference fixtures, resampling and fidelity checks, timing reports, and cancellation-safe browser workers.
+- Merge unsaved conversation edits with newly saved History notes, and reject over-capacity merges without silently dropping notes.
+
 ## [0.18.1] — 2026-10-16
 
 - Add 10- and 15-second audio windows on G2 and Ray-Ban for shorter uploads and less captured context.

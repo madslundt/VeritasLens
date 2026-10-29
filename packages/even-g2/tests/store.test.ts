@@ -17,6 +17,7 @@ import {
   pushDebugEvent,
   pushHistoryEntry,
   updateHistoryEntry,
+  saveConversationPreferences,
   saveAutoSummaryEnabled,
   saveAudioCompressionEnabled,
   saveBufferDuration,
@@ -473,6 +474,15 @@ describe('pushHistoryEntry — in-memory cap', () => {
 });
 
 describe('conversation review persistence', () => {
+  it('rejects over-capacity merged notes without silently truncating or writing them', async () => {
+    const previous = settings().conversation!;
+    const set = vi.fn(async () => true);
+    const contexts = Array.from({ length: 21 }, (_, i) => ({ id: String(i), label: `Note ${i}`, body: 'Saved context' }));
+    expect(await saveConversationPreferences(set, { ...previous, contexts })).toBe(false);
+    expect(set).not.toHaveBeenCalled();
+    expect(settings().conversation).toBe(previous);
+  });
+
   it('does not drop an analysis appended while a pin is being persisted', async () => {
     const ls = fakeLocalStorage();
     const id = await pushHistoryEntry(fatEntry(1), ls.set);

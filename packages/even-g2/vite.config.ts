@@ -50,6 +50,8 @@ const VAD_ASSETS: Array<{ from: string; to: string }> = [
   { from: '../core/assets/vad/RUST-LICENSE', to: 'RUST-LICENSE' },
   { from: '../../node_modules/@fluidinference/fluidvad/SILERO_LICENSE', to: 'SILERO-LICENSE' },
   { from: '../../node_modules/@fluidinference/fluidvad/LICENSE', to: 'FLUIDVAD-LICENSE' },
+  { from: '../../node_modules/@jitsi/rnnoise-wasm/LICENSE', to: 'JITSI-RNNOISE-LICENSE' },
+  { from: './assets/RNNOISE-LICENSE', to: 'RNNOISE-LICENSE' },
   { from: '../../node_modules/@audio/encode-flac/LICENSE', to: 'FLAC-ENCODER-LICENSE' },
   { from: '../../node_modules/@audio/encode-flac/LICENSE.libflac', to: 'LIBFLAC-LICENSE' },
 ];
@@ -108,7 +110,7 @@ export default defineConfig(({ command }) => ({
     strictPort: true,
     // The runtime and candidate asset live outside even-g2/src.
     fs: {
-      allow: ['.', '../core', '../../node_modules/@fluidinference/fluidvad', '../../node_modules/@audio/encode-flac'],
+      allow: ['.', '../core', '../../node_modules/@fluidinference/fluidvad', '../../node_modules/@jitsi/rnnoise-wasm', '../../node_modules/@audio/encode-flac'],
     },
   },
   build: {
@@ -131,7 +133,8 @@ export default defineConfig(({ command }) => ({
   },
   // Pre-bundling would relocate the WASM glue's import.meta.url away from
   // its model asset. Keep the ESM package at its original location in dev.
-  optimizeDeps: { exclude: ['@fluidinference/fluidvad'] },
+  optimizeDeps: { exclude: ['@fluidinference/fluidvad', '@jitsi/rnnoise-wasm'] },
+  worker: { plugins: () => [coreAtAlias()] },
   test: {
     globals: true,
     environment: 'node',

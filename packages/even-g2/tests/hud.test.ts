@@ -81,8 +81,8 @@ import {
   showPickerPage,
   showUnconfiguredPage,
 } from '../src/runtime/hud';
-import { saveAutoSummaryEnabled, saveDiscreet, setLensResult as setStateLensResult, settings } from '../src/state/store';
-import { getPersona, getPickerPersonas, getSpecializedPersonas } from '@veritaslens/core';
+import { saveAutoSummaryEnabled, saveConversationPreferences, setActivePersona, saveDiscreet, setLensResult as setStateLensResult, settings } from '../src/state/store';
+import { CONVERSATION_PROFILES, DEFAULT_CONVERSATION, getPersona, getPickerPersonas, getSpecializedPersonas } from '@veritaslens/core';
 import type { HistoryEntry, LensResult } from '@veritaslens/core';
 
 const fakeSetLs = (_k: string, _v: string): Promise<boolean> => Promise.resolve(true);
@@ -160,6 +160,33 @@ describe('menuOptionAtIndex', () => {
   });
 });
 
+describe('lens identity and profile status', () => {
+  it('uses canonical phone lens names for every profile and keeps setup out of the picker', async () => {
+    await bootstrapHud();
+    for (const profile of CONVERSATION_PROFILES) {
+      await saveConversationPreferences(fakeSetLs, { ...DEFAULT_CONVERSATION, profile: profile.id });
+      await showPickerPage();
+      const page = (bridge.rebuildPageContainer.mock.calls as unknown as Array<[unknown]>).at(-1)![0] as {
+        payload: { listObject: Array<{ payload: { itemContainer: { payload: { itemName: string[] } } } }> };
+      };
+      const names = page.payload.listObject[0]!.payload.itemContainer.payload.itemName;
+      expect(names).toEqual([...getPickerPersonas().map(p => p.name), 'Games ›', 'More lenses ›']);
+      expect(visibleHudText('vl-profile')).toContain(`Profile: ${profile.name}`);
+    }
+    await saveConversationPreferences(fakeSetLs, DEFAULT_CONVERSATION);
+  });
+
+  it('shows the selected lens and profile separately in the session menu', async () => {
+    await saveConversationPreferences(fakeSetLs, { ...DEFAULT_CONVERSATION, profile: 'work' });
+    setActivePersona('fact-checker');
+    await bootstrapHud();
+    await showMenuPage();
+    expect(visibleHudText('vl-title')).toBe(`Lens: ${getPersona('fact-checker')!.name}`);
+    expect(visibleHudText('vl-profile')).toBe('Profile: Work');
+    await saveConversationPreferences(fakeSetLs, DEFAULT_CONVERSATION);
+  });
+});
+
 describe('pickerEntryAtIndex', () => {
   const core = getPickerPersonas();
 
@@ -171,10 +198,9 @@ describe('pickerEntryAtIndex', () => {
     });
   });
 
-  it('maps the trailing entries to Profiles, Games, and Specialized', () => {
-    expect(pickerEntryAtIndex(core.length)).toEqual({ kind: 'profiles' });
-    expect(pickerEntryAtIndex(core.length + 1)).toEqual({ kind: 'games' });
-    expect(pickerEntryAtIndex(core.length + 2)).toEqual({ kind: 'specialized' });
+  it('maps the trailing entries to Games and More lenses without phone settings', () => {
+    expect(pickerEntryAtIndex(core.length)).toEqual({ kind: 'games' });
+    expect(pickerEntryAtIndex(core.length + 1)).toEqual({ kind: 'specialized' });
   });
 
   it('falls back to the first core persona for out-of-range / invalid indices', () => {

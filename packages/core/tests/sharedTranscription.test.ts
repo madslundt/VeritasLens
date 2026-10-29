@@ -22,7 +22,7 @@ const defaultSettings: Settings = {
   openaiApiKeys: {}, openaiTranscribeModels: {}, sttHost: 'https://api.groq.com/openai/v1', sttModel: 'whisper-large-v3',
   responseLanguage: 'en', bufferDuration: 30, micSource: 'glasses',
   autoSummaryEnabled: false, crossSessionRecallEnabled: false, transcriptMode: 'off', discreet: false,
-  voiceGateRmsFloor: 200, voiceTrimEnabled: true, audioCompressionEnabled: true, autoDisabledLenses: [],
+  voiceGateRmsFloor: 200, voiceTrimEnabled: true, noiseReductionEnabled: false, audioCompressionEnabled: true, autoDisabledLenses: [],
   autoModeEnabled: false, autoModeStartMs: 1000, autoModeSilenceMs: 1000, autoModeIntervalMs: 30000,
   translationSourceLanguages: 'auto', translationMode: 'converse', romanizeForeignScript: false,
   locationEnabled: false, cachedLocation: null,

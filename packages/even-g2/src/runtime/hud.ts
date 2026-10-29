@@ -56,6 +56,7 @@ export const CONTAINER = {
   activeHint: 26,
   clock: 27,
   menuSpinner: 28,
+  profile: 37,
   // compact header (used on scroll layouts: page 2+ of a claim)
   compactHeader: 29,
   answerPosition: 34,
@@ -90,6 +91,7 @@ const NAME = {
   activeHint: 'vl-act-hint',
   clock: 'vl-clock',
   menuSpinner: 'vl-menu-spin',
+  profile: 'vl-profile',
   compactHeader: 'vl-compact',
   answerPosition: 'vl-position',
   answerLanguage: 'vl-language',
@@ -1848,7 +1850,7 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   const title = new TextContainerProperty({
     containerID: CONTAINER.title, containerName: NAME.title, xPosition: 16, yPosition: 8,
     width: 240, height: 36, borderWidth: 0, paddingLength: 4,
-    content: 'Start a conversation', isEventCapture: 0,
+    content: 'Choose a lens', isEventCapture: 0,
   });
   const summaryBadge = new TextContainerProperty({
     containerID: CONTAINER.summaryBadge, containerName: NAME.summaryBadge,
@@ -1859,12 +1861,17 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   });
   const list = new ListContainerProperty({
     containerID: CONTAINER.pickerList, containerName: NAME.pickerList, xPosition: 16, yPosition: 48,
-    width: SCREEN_W - 32, height: 200, borderWidth: 0, paddingLength: 4,
+    width: SCREEN_W - 32, height: 168, borderWidth: 0, paddingLength: 4,
     itemContainer: new ListItemContainerProperty({
       itemCount: itemNames.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: itemNames,
     }),
     isEventCapture: 1,
+  });
+  const profile = new TextContainerProperty({
+    containerID: CONTAINER.profile, containerName: NAME.profile, xPosition: 16, yPosition: 220,
+    width: SCREEN_W - 32, height: 28, paddingLength: 4,
+    content: `Profile: ${conversationProfileName()} · Setup on phone`, isEventCapture: 0,
   });
   const hint = new TextContainerProperty({
     containerID: CONTAINER.pickerHint, containerName: NAME.pickerHint, xPosition: 16, yPosition: 252,
@@ -1874,13 +1881,13 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
   });
   const Ctor = mode === 'create' ? CreateStartUpPageContainer : RebuildPageContainer;
   const listObject = [list];
-  const textObject = [title, hint, summaryBadge];
+  const textObject = [title, profile, hint, summaryBadge];
   return new Ctor({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
 /**
- * Build the picker item labels. The three core lenses come first, then the
- * two sub-picker entries pinned at the BOTTOM — Games, then Specialized — so
+ * Build the picker item labels. The core lenses come first, then the
+ * two sub-picker entries pinned at the BOTTOM — Games, then More lenses — so
  * the wearer lands on a core lens (the common case) without scrolling. The
  * lifecycle's `pickerEntryAtIndex` keeps these offsets in sync — if you
  * reorder here, update that too.
@@ -1889,14 +1896,16 @@ function buildPickerPage(mode: 'create' | 'rebuild'): CreateStartUpPageContainer
 // rather than starting a session — mirrors the platform UI convention
 // for "this leads elsewhere".
 const PICKER_GAMES_LABEL = 'Games ›';
-const PICKER_SPECIALIZED_LABEL = 'Specialized ›';
+const PICKER_SPECIALIZED_LABEL = 'More lenses ›';
+function conversationProfileName(): string {
+  return CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile)?.name ?? 'None';
+}
+
 function buildPickerItemNames(): string[] {
-  const profile = CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile) ?? CONVERSATION_PROFILES[0];
-  return [...getPickerPersonas().map((p) => p.id === 'auto' ? `Start ${profile.name}` : p.name), 'Profiles & saved setups ›', PICKER_GAMES_LABEL, PICKER_SPECIALIZED_LABEL];
+  return [...getPickerPersonas().map(p => p.name), PICKER_GAMES_LABEL, PICKER_SPECIALIZED_LABEL];
 }
 
 export type PickerEntry =
-  | { kind: 'profiles' }
   | { kind: 'games' }
   | { kind: 'specialized' }
   | { kind: 'persona'; persona: Persona };
@@ -1905,7 +1914,7 @@ export type PickerEntry =
  * Resolve a picker list index to the entry it represents. With
  * `C = getPickerPersonas().length` (the core lenses), indices `0..C-1` map to
  * those personas; index `C` is the Games sub-picker and index `C+1` is the
- * Specialized sub-picker, both pinned at the bottom. Out-of-range indices fall
+ * More lenses sub-picker, both pinned at the bottom. Out-of-range indices fall
  * back to the first persona — picker should never silently no-op on a tap, and
  * falling back to a lens (rather than a sub-picker) matches the typical "I want
  * to ask a question" intent.
@@ -1917,18 +1926,16 @@ export function pickerEntryAtIndex(idx: number | undefined | null): PickerEntry 
     const p = personas[safe];
     if (p) return { kind: 'persona', persona: p };
   }
-  if (safe === personas.length) return { kind: 'profiles' };
-  if (safe === personas.length + 1) return { kind: 'games' };
-  if (safe === personas.length + 2) return { kind: 'specialized' };
+  if (safe === personas.length) return { kind: 'games' };
+  if (safe === personas.length + 1) return { kind: 'specialized' };
   const first = personas[0];
   return first ? { kind: 'persona', persona: first } : { kind: 'games' };
 }
 
 function buildMenuPage(): RebuildPageContainer {
-  // Title shows the active lens name so the wearer knows which lens this
-  // menu belongs to. Clock sized tight around "HH:MM" so LVGL's end-of-label
-  // caret sits outside the container clip.
-  const titleText = `${recordingPaused() ? 'Paused · ' : ''}${getPersona(activePersona())?.name ?? 'Menu'}`;
+  // Keep the lens name separate from the conversation profile. Size the clock
+  // tightly around "HH:MM" so the LVGL caret stays outside the container clip.
+  const titleText = `Lens: ${getPersona(activePersona())?.name ?? 'Menu'}`;
   const processingWidth = Math.ceil(getTextWidth('99999s'));
   const processingX = SCREEN_W - 72 - processingWidth;
   const title = new TextContainerProperty({
@@ -1950,9 +1957,14 @@ function buildMenuPage(): RebuildPageContainer {
     borderWidth: 0, paddingLength: 0,
     content: formatClockTime(), isEventCapture: 0,
   });
+  const profile = new TextContainerProperty({
+    containerID: CONTAINER.profile, containerName: NAME.profile, xPosition: 16, yPosition: 40,
+    width: SCREEN_W - 32, height: 28, paddingLength: 0,
+    content: `Profile: ${conversationProfileName()}${recordingPaused() ? ' · Paused' : ''}`, isEventCapture: 0,
+  });
   const list = new ListContainerProperty({
-    containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 48,
-    width: SCREEN_W - 32, height: SCREEN_H - 48 - 32, borderWidth: 0, paddingLength: 0,
+    containerID: CONTAINER.menuList, containerName: NAME.menuList, xPosition: 16, yPosition: 76,
+    width: SCREEN_W - 32, height: SCREEN_H - 76 - 32, borderWidth: 0, paddingLength: 0,
     itemContainer: new ListItemContainerProperty({
       itemCount: builtMenuItems.length, itemWidth: SCREEN_W - 48, isItemSelectBorderEn: 1,
       itemName: builtMenuItems.map((o) => o.label),
@@ -1968,7 +1980,7 @@ function buildMenuPage(): RebuildPageContainer {
     content: MENU_HINT_DEFAULT, isEventCapture: 0,
   });
   const listObject = [list];
-  const textObject = [title, spinner, clock, hint];
+  const textObject = [title, profile, spinner, clock, hint];
   return new RebuildPageContainer({ containerTotalNum: totalContainers(listObject, textObject), listObject, textObject });
 }
 
@@ -2299,7 +2311,7 @@ function buildGamesPickerPage(presets: GamePreset[], opts: ShowGamesPickerOpts):
 // ---------- Specialized lens sub-picker ----------
 //
 // Mirrors the Games sub-picker: a second-level list reached from the main
-// picker's "Specialized ›" row. Lists the 8 non-core lenses plus a "← Back"
+// picker's "More lenses ›" row. Lists the 8 non-core lenses plus a "← Back"
 // row, and reuses the game* containers (rebuild replaces every container, so
 // sharing IDs across these sibling sub-pages is safe).
 
@@ -2331,7 +2343,7 @@ function buildSpecializedPickerPage(specialized: Persona[]): RebuildPageContaine
   const title = new TextContainerProperty({
     containerID: CONTAINER.gameTitle, containerName: NAME.gameTitle,
     xPosition: 16, yPosition: 8, width: SCREEN_W - 32, height: 36,
-    borderWidth: 0, paddingLength: 4, content: 'Specialized', isEventCapture: 0,
+    borderWidth: 0, paddingLength: 4, content: 'More lenses', isEventCapture: 0,
   });
   const list = new ListContainerProperty({
     containerID: CONTAINER.gameList, containerName: NAME.gameList,

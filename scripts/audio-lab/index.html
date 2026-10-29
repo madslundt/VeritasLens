@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VeritasLens audio lab</title>
+<style>
+  :root { color-scheme: light dark; font: 16px system-ui; }
+  body { max-width: 70rem; margin: auto; padding: 1.5rem; }
+  button, input { font: inherit; margin: .5rem .5rem .5rem 0; padding: .6rem; }
+  table { border-collapse: collapse; font-size: .85rem; width: 100%; }
+  td, th { text-align: left; padding: .5rem; border-bottom: 1px solid #8886; white-space: nowrap; }
+  .scroll { overflow-x: auto; } pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  audio { width: min(100%, 24rem); display: block; } #status { min-height: 3rem; }
+</style>
+<h1>VeritasLens audio lab</h1>
+<p>Compare VAD and RNNoise on this device. Audio stays in this browser; no API keys or microphone access are needed. The small RNNoise model is about 112 KB; the modern model is about 1.9 MB. DeepFilterNet is excluded from this page.</p>
+<p>This shorter comparison tests two suppression strengths and one long snapshot. It can still take a minute or more on slower devices. Cancel is always available.</p>
+<p>Results use one reference recording mixed with controlled noise. They measure processing speed and signal preservation, not transcription accuracy. Run inside the Even App WebView as well as Safari or Chrome before enabling denoising.</p>
+<button id="run">Run reference tests</button>
+<label>Filter: <select id="variant"><option value="small">RNNoise small (0.1)</option><option value="modern">RNNoise modern (0.2)</option></select></label>
+<label>Optional clean speech (16 kHz mono PCM16 WAV): <input id="file" type="file" accept=".wav,audio/wav"></label>
+<button id="cancel" disabled>Cancel</button>
+<button id="download" disabled>Download results</button>
+<p id="status" role="status">Ready</p>
+<p id="heartbeat">Interface responsiveness: waiting</p>
+<div id="summary"></div><div id="samples"></div><details><summary>Full results</summary><pre id="json"></pre></details>
+<script type="module">
+  const byId = (id) => document.getElementById(id);
+  let worker, report, timer, lastTick, maxDelay, urls = [], generation = 0;
+  function stop() { generation++; worker?.terminate(); worker = null; clearInterval(timer); byId('run').disabled = false; byId('cancel').disabled = true; }
+  function table(rows) {
+    const wrap = document.createElement('div'); wrap.className = 'scroll';
+    const table = document.createElement('table'); const keys = [...new Set(rows.flatMap(Object.keys))];
+    const header = table.createTHead().insertRow(); keys.forEach((key) => { const th = document.createElement('th'); th.textContent = key; header.append(th); });
+    const body = table.createTBody(); rows.forEach((row) => { const tr = body.insertRow(); keys.forEach((key) => tr.insertCell().textContent = row[key]); });
+    wrap.append(table); return wrap;
+  }
+  byId('run').onclick = async () => {
+    stop(); report = null; byId('download').disabled = true; byId('summary').replaceChildren(); byId('samples').replaceChildren(); byId('json').textContent = '';
+    urls.forEach(URL.revokeObjectURL); urls = [];
+    byId('run').disabled = true; byId('cancel').disabled = false; maxDelay = 0; lastTick = performance.now();
+    timer = setInterval(() => { const now = performance.now(); maxDelay = Math.max(maxDelay, now - lastTick - 100); lastTick = now; byId('heartbeat').textContent = `Interface active · maximum timer delay ${Math.round(maxDelay)} ms`; }, 100);
+    const run = generation;
+    const file = byId('file').files[0];
+    const variant = byId('variant').value;
+    try {
+      byId('status').textContent = 'Starting worker…';
+      const wav = await file?.arrayBuffer();
+      if (run !== generation) return;
+      const currentWorker = new Worker(new URL('./worker.mjs', import.meta.url), { type: 'module' });
+      worker = currentWorker;
+      currentWorker.onerror = (event) => { if (run !== generation) return; byId('status').textContent = `Worker failed: ${event.message}`; stop(); };
+      currentWorker.onmessage = ({ data }) => {
+        if (run !== generation) return;
+        if (data.progress) byId('status').textContent = data.progress;
+        if (data.error) { byId('status').textContent = data.error; stop(); }
+        if (data.report) {
+          report = { ...data.report, mainThreadTimerMaxDelayMs: Math.round(maxDelay), source: file?.name ?? 'Pinned public Silero reference' };
+          window.audioLabReport = report;
+          byId('json').textContent = JSON.stringify(report, null, 2);
+          const note = document.createElement('p');
+          const timing = report.longWindow.denoise[0];
+          note.textContent = `VAD detection mismatches: ${report.vadMismatches}. After RNNoise: ${report.denoisedDetectionMismatches}. A 30-second snapshot took ${(timing.totalMs / 1000).toFixed(1)} seconds. ${timing.rtf >= 1 ? 'Too slow for real-time use on this device.' : 'Faster than real time on this device; assess the added wait before enabling it.'} Stronger suppression can change speech; listen to the samples below.`;
+          byId('summary').append(note, table(report.vad), table(report.denoise));
+          for (const [name, bytes] of Object.entries(data.samples)) {
+            const label = document.createElement('p'); label.textContent = name;
+            const audio = document.createElement('audio'); audio.controls = true; audio.src = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' })); urls.push(audio.src);
+            byId('samples').append(label, audio);
+          }
+          byId('download').disabled = false;
+          byId('status').textContent = `Completed: ${report.checks.length} integration checks. Review noisy-speech results before choosing a setting.`;
+          stop();
+        }
+      };
+      currentWorker.postMessage({ wav, variant }, wav ? [wav] : []);
+    } catch (error) { if (run !== generation) return; byId('status').textContent = String(error); stop(); }
+  };
+  byId('cancel').onclick = () => { stop(); byId('status').textContent = 'Cancelled; worker and its model memory released.'; };
+  byId('download').onclick = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
+    const link = document.createElement('a'); link.href = url; link.download = 'veritaslens-audio-results.json'; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+</script>
+</html>

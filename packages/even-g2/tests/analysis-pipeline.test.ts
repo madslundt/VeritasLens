@@ -6,10 +6,12 @@ const mocks = vi.hoisted(() => ({
   gate: vi.fn(),
   call: vi.fn(),
   stream: vi.fn(),
+  noise: vi.fn(),
   listener: null as ((event: EvenHubEvent) => void) | null,
   storage: new Map<string, string>(),
   upgrades: [] as Array<{ containerName: string; content: string }>,
   visible: new Map<string, string>(),
+  listItems: [] as string[],
 }));
 
 vi.mock('@veritaslens/core', async (importOriginal) => ({
@@ -23,8 +25,9 @@ vi.mock('@veritaslens/core', async (importOriginal) => ({
 vi.mock('../src/runtime/bridge', () => ({
   getBridge: () => ({
     createStartUpPageContainer: vi.fn(async () => 0),
-    rebuildPageContainer: vi.fn(async (page: { textObject?: Array<{ containerName?: string; content?: string }> }) => {
+    rebuildPageContainer: vi.fn(async (page: { textObject?: Array<{ containerName?: string; content?: string }>; listObject?: Array<{ itemContainer?: { itemName?: string[] } }> }) => {
       mocks.visible.clear();
+      mocks.listItems = page.listObject?.flatMap(list => list.itemContainer?.itemName ?? []) ?? [];
       // Record visible content from both in-place updates and page rebuilds.
       for (const text of page.textObject ?? []) {
         if (text.containerName && typeof text.content === 'string') {
@@ -49,13 +52,18 @@ vi.mock('../src/runtime/bridge', () => ({
   }),
 }));
 
+vi.mock('../src/runtime/noiseReduction', () => ({
+  reduceSnapshotNoise: mocks.noise,
+  resetNoiseReduction: vi.fn(),
+}));
+
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { DEFAULT_CONVERSATION, AUTO_LENS_CANDIDATES, configureSettings, getPersona } from '@veritaslens/core';
-import { requestConversationHelp, pauseConversation, selectConversationProfile, startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
+import { requestConversationHelp, pauseConversation, startConversation, refreshHudPage, startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
 import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState, menuOptionAtIndex, setActiveLayout, showActivePage, isActiveHidden } from '../src/runtime/hud';
 import {
-  appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
-  saveAutoDisabledLenses, saveGeminiKey, saveTranscriptMode, saveVoiceGateRmsFloor, saveVoiceTrimEnabled,
+  activePersona, setActivePersona, appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
+  saveAutoDisabledLenses, saveGeminiKey, saveTranscriptMode, saveVoiceGateRmsFloor, saveVoiceTrimEnabled, saveNoiseReductionEnabled,
   recordingPaused, updateHistoryEntry, loadHistory, saveConversationPreferences, sessionHistory, settings, setErrorMessage, saveDiscreet,
 } from '../src/state/store';
 
@@ -98,6 +106,7 @@ describe('analysis through the gesture/audio pipeline', () => {
     mocks.storage.clear();
     mocks.upgrades.length = 0;
     mocks.visible.clear();
+    mocks.listItems = [];
     configureSettings(settings);
     setErrorMessage(null);
     clearSessionHistory();
@@ -110,8 +119,10 @@ describe('analysis through the gesture/audio pipeline', () => {
     await saveTranscriptMode(persist, 'off');
     await saveAutoDisabledLenses(persist, []);
     await saveVoiceTrimEnabled(persist, false);
+    await saveNoiseReductionEnabled(persist, false);
     await saveVoiceGateRmsFloor(persist, 200);
     mocks.gate.mockResolvedValue(voice);
+    mocks.noise.mockImplementation(async (pcm: Uint8Array) => ({ pcm, status: 'filtered', ms: 5 }));
     mocks.call.mockImplementation(async (opts: CallLensStreamOptions) =>
       'chosenLensId' in (opts.schema as { properties: object }).properties
         ? JSON.stringify({ chosenLensId: 'fact-checker' }) : answer);
@@ -222,6 +233,57 @@ describe('analysis through the gesture/audio pipeline', () => {
     expect(currentHudPage()).toBe('active');
     expect(appPhase()).toBe('listening');
     expect([...mocks.visible.values()].filter((text) => text.trim())).toEqual(['•']);
+  });
+
+  it('keeps denoising off by default and never runs it for a rejected voice gate', async () => {
+    audio(1000); tap(); await drain();
+    expect(mocks.noise).not.toHaveBeenCalled();
+    await saveNoiseReductionEnabled(async () => true, true);
+    mocks.gate.mockResolvedValueOnce({ ...voice, voiceFrames: 0 });
+    audio(2000); tap(); await drain();
+    expect(mocks.noise).not.toHaveBeenCalled();
+  });
+
+  it('uploads filtered PCM while keeping frozen raw audio for subsequent actions', async () => {
+    await saveNoiseReductionEnabled(async () => true, true);
+    const captured = audio(1000);
+    mocks.noise.mockImplementation(async (pcm: Uint8Array) => ({ pcm: new Uint8Array(pcm.length).fill(1), status: 'filtered', ms: 5 }));
+    await requestConversationHelp('fact-checker', undefined, false);
+    const sent = mocks.stream.mock.calls.at(-1)![0].wav as Uint8Array;
+    expect(sent.slice(44)).toEqual(new Uint8Array(captured.length).fill(1));
+    expect(mocks.noise.mock.calls[0]![0]).toEqual(captured);
+    await saveNoiseReductionEnabled(async () => true, false);
+    await requestConversationHelp('fact-checker');
+    const reused = mocks.stream.mock.calls.at(-1)![0].wav as Uint8Array;
+    expect(reused.slice(44)).toEqual(captured);
+    expect(mocks.noise).toHaveBeenCalledTimes(1);
+  });
+
+  it('uploads the original PCM when optional denoising falls back', async () => {
+    await saveNoiseReductionEnabled(async () => true, true);
+    mocks.noise.mockImplementation(async (pcm: Uint8Array) => ({ pcm, status: 'timeout', ms: 1000 }));
+    const captured = audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    expect(mocks.stream.mock.calls.at(-1)![0].wav.slice(44)).toEqual(captured);
+    expect(appPhase()).toBe('displaying');
+  });
+
+  it('does not send audio if cancelled while denoising', async () => {
+    await saveNoiseReductionEnabled(async () => true, true);
+    const pending = deferred<{ pcm: Uint8Array; status: string; ms: number }>();
+    mocks.noise.mockReturnValueOnce(pending.promise);
+    const captured = audio(1000); tap(); await drain();
+    expect(mocks.noise).toHaveBeenCalledOnce();
+    tap(); pending.resolve({ pcm: captured.slice(), status: 'filtered', ms: 5 }); await drain();
+    expect(mocks.call).not.toHaveBeenCalled(); expect(mocks.stream).not.toHaveBeenCalled();
+  });
+
+  it('does not send audio if the runtime stops while denoising', async () => {
+    await saveNoiseReductionEnabled(async () => true, true);
+    const pending = deferred<{ pcm: Uint8Array; status: string; ms: number }>();
+    mocks.noise.mockReturnValueOnce(pending.promise);
+    const captured = audio(1000); tap(); await drain(); await stopHudRuntime();
+    pending.resolve({ pcm: captured.slice(), status: 'filtered', ms: 5 }); await drain();
+    expect(mocks.call).not.toHaveBeenCalled(); expect(mocks.stream).not.toHaveBeenCalled();
   });
 
   it('freezes the audio at the tap and leaves audio received during VAD for the next tap', async () => {
@@ -567,9 +629,78 @@ describe('analysis through the gesture/audio pipeline', () => {
     expect(new DataView(next.buffer, next.byteOffset).getInt16(44, true)).toBe(3000);
   });
 
+  it('keeps persistent configuration off the glasses while retaining quick session actions', async () => {
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent);
+    await drain();
+    const toolsIndex = mocks.listItems.indexOf('Session tools ›');
+    expect(toolsIndex).toBeGreaterThanOrEqual(0);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: toolsIndex } } as EvenHubEvent);
+    await drain();
+    expect(mocks.listItems).toEqual([
+      '← Back', 'Pause microphone', 'View live captions',
+      getPersona('catch-up')!.name, getPersona('commitments')!.name, 'Dismiss displayed answer',
+    ]);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 1 } } as EvenHubEvent);
+    await drain();
+    expect(recordingPaused()).toBe(true);
+    expect(mocks.listItems).toContain('Resume microphone');
+  });
+
+  it('keeps the active session and refreshes profile status when phone settings are saved', async () => {
+    await startConversation('fact-checker');
+    await saveConversationPreferences(async () => true, { ...DEFAULT_CONVERSATION, profile: 'work' });
+    await refreshHudPage();
+    expect(currentHudPage()).toBe('active');
+    expect(activePersona()).toBe('fact-checker');
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('menu');
+    await saveConversationPreferences(async () => true, { ...DEFAULT_CONVERSATION, profile: 'understand' });
+    await refreshHudPage();
+    expect(currentHudPage()).toBe('menu');
+    expect(mocks.visible.get('vl-profile')).toBe('Profile: Understand');
+    expect(mocks.visible.get('vl-title')).toBe('Lens: Fact Check');
+  });
+
+  it('preserves the active lens, audio window, and enabled lenses when the profile changes', async () => {
+    await startConversation('fact-checker');
+    const duration = settings().bufferDuration;
+    const disabled = ['eli5', 'trivia'];
+    await saveAutoDisabledLenses(async () => true, disabled);
+    await saveConversationPreferences(async () => true, { ...settings().conversation!, profile: 'understand' });
+    expect(activePersona()).toBe('fact-checker');
+    expect(settings().bufferDuration).toBe(duration);
+    expect(settings().autoDisabledLenses).toEqual(disabled);
+    audio(1000); tap(); await drain();
+    expect(mocks.call).not.toHaveBeenCalled();
+    expect(mocks.stream.mock.calls.at(-1)![0].prompt).toContain('understand');
+  });
+
+  it('starts the exact HUD lens under Understand and retains an explicitly selected lens on restart', async () => {
+    await stopHudRuntime();
+    await saveConversationPreferences(async () => true, { ...DEFAULT_CONVERSATION, profile: 'understand' });
+    await startHudRuntime();
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 0 } } as EvenHubEvent);
+    await drain();
+    expect(activePersona()).toBe('auto');
+    await stopHudRuntime();
+    setActivePersona('fact-checker');
+    await startConversation();
+    expect(activePersona()).toBe('fact-checker');
+  });
+
+  it('intersects the profile candidates with the enabled Auto lenses', async () => {
+    await saveAutoDisabledLenses(async () => true, AUTO_LENS_CANDIDATES.filter(id => id !== 'fact-checker'));
+    await saveConversationPreferences(async () => true, { ...settings().conversation!, profile: 'work' });
+    audio(1000); tap(); await drain();
+    expect(mocks.call).not.toHaveBeenCalled(); // A single candidate needs no classifier.
+    expect(mocks.stream).toHaveBeenCalledTimes(1);
+    expect(sessionHistory().at(-1)?.lensId).toBe('fact-checker');
+  });
+
   it('injects profile goals and selected notes, with criticism outside default routing', async () => {
     await saveConversationPreferences(async () => true, { ...DEFAULT_CONVERSATION, profile: 'work', goal: 'Clarify ownership', contexts: [{ id: 'a', label: 'Project', body: 'Testing required' }, { id: 'b', label: 'Unrelated', body: 'PRIVATE_NOTE' }], selectedContextIds: ['a'] });
-    await selectConversationProfile('work'); audio(1000); tap(); await drain();
+    await saveConversationPreferences(async () => true, { ...settings().conversation!, profile: 'work' }); audio(1000); tap(); await drain();
     const classifier = mocks.call.mock.calls.at(-1)![0] as CallLensStreamOptions;
     expect(classifier.prompt).toContain('Clarify ownership'); expect(classifier.prompt).toContain('Testing required'); expect(classifier.prompt).not.toContain('PRIVATE_NOTE');
     const schema = classifier.schema as { properties: { chosenLensId: { enum: string[] } } };

@@ -1,4 +1,4 @@
-import { ConversationPanel, ConversationReview } from './ConversationPanel';
+import { ConversationPanel, ConversationSettings, ConversationReview } from './ConversationPanel';
 import { resultText } from '@veritaslens/core';
 // src/views/SettingsView.tsx
 import { createEffect, createMemo, createSignal, For, Index, Match, on, onCleanup, Show, Switch, untrack, type Component } from 'solid-js';
@@ -17,6 +17,7 @@ import {
   modelsLoading,
   newGamePresetId,
   newSectionId,
+  saveConversationPreferences,
   saveAutoSummaryEnabled,
   saveCrossSessionRecallEnabled,
   saveLocationEnabled,
@@ -27,6 +28,7 @@ import {
   saveAutoModeIntervalMs,
   saveVoiceGateRmsFloor,
   saveVoiceTrimEnabled,
+  saveNoiseReductionEnabled,
   saveAudioCompressionEnabled,
   AUTO_MODE_INTERVAL_MS_MAX,
   AUTO_MODE_INTERVAL_MS_MIN,
@@ -76,6 +78,8 @@ import { ApiKeyInput, SettingsIcon, lensDescription } from '@/views/SettingsUi';
 import { isHudRunning, providerConfigurationError, refreshHudPage, startHudRuntime } from '@/runtime/lifecycle';
 import { probeAndCacheLocation, probeLocation } from '@/runtime/location';
 import {
+  DEFAULT_CONVERSATION,
+  mergeConversationDraft,
   preparedConversationSections,
   resolveProviderGrounding,
   resolveSearchFallback,
@@ -104,6 +108,7 @@ import {
   AUTO_LENS_CANDIDATES,
 } from '@veritaslens/core';
 import type {
+  ConversationPreferences,
   BufferDuration,
   ClaudeModel,
   GameDifficulty,
@@ -575,6 +580,11 @@ export const SettingsView: Component = () => {
   const [geminiFetchState, setGeminiFetchState] = createSignal<FetchState>('idle');
   const [openaiFetchState, setOpenaiFetchState] = createSignal<FetchState>('idle');
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
+  const savedConversation = createMemo(() => settings().conversation ?? DEFAULT_CONVERSATION);
+  const [draftConversation, setDraftConversation] = createSignal<ConversationPreferences>(structuredClone(savedConversation()));
+  createEffect(on(savedConversation, (next, previous) => {
+    setDraftConversation(draft => structuredClone(mergeConversationDraft(draft, previous ?? DEFAULT_CONVERSATION, next)));
+  }, { defer: true }));
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
   const [draftMicSource, setDraftMicSource] = createSignal<MicSource>(settings().micSource);
   const [draftAutoEnabled, setDraftAutoEnabled] = createSignal(settings().autoSummaryEnabled);
@@ -599,6 +609,7 @@ export const SettingsView: Component = () => {
   const [draftDiscreet, setDraftDiscreet] = createSignal(settings().discreet);
   const [draftVoiceGate, setDraftVoiceGate] = createSignal(settings().voiceGateRmsFloor);
   const [draftVoiceTrim, setDraftVoiceTrim] = createSignal(settings().voiceTrimEnabled);
+  const [draftNoiseReduction, setDraftNoiseReduction] = createSignal(settings().noiseReductionEnabled);
   const [draftAudioCompression, setDraftAudioCompression] = createSignal(settings().audioCompressionEnabled);
   const [draftAutoMode, setDraftAutoMode] = createSignal(settings().autoModeEnabled);
   const [draftAutoModeStart, setDraftAutoModeStart] = createSignal(settings().autoModeStartMs);
@@ -874,7 +885,7 @@ export const SettingsView: Component = () => {
   type SettingsTab = 'session' | 'lenses' | 'games' | 'history' | 'settings' | 'llm';
   const [activeTab, setActiveTab] = createSignal<SettingsTab>('session');
   const pageCopy = {
-    session: { title: 'Your conversation', description: 'Choose your situation, then ask for the help you need.' },
+    session: { title: 'Session', description: 'Choose a lens, start listening, and ask for help.' },
     lenses: { title: 'Lenses', description: 'Choose a tool for a particular moment, or configure its behavior.' },
     games: { title: 'Games', description: 'Quizzes, true-or-false rounds, and riddles for your glasses.' },
     history: { title: 'History', description: 'A second look at the conversation.' },
@@ -1249,6 +1260,7 @@ export const SettingsView: Component = () => {
         discreet,
         voiceGate,
         voiceTrim,
+        noiseReduction,
         audioCompression,
         autoMode,
         autoModeStart,
@@ -1261,6 +1273,7 @@ export const SettingsView: Component = () => {
         transcriptMode,
         prepResult,
         prepWebGrounding,
+        conversation,
       ] = await Promise.all([
         saveProvider(setLs, draftProvider()),
         saveGeminiKey(setLs, draftKey().trim()),
@@ -1291,6 +1304,7 @@ export const SettingsView: Component = () => {
         saveDiscreet(setLs, draftDiscreet()),
         saveVoiceGateRmsFloor(setLs, draftVoiceGate()),
         saveVoiceTrimEnabled(setLs, draftVoiceTrim()),
+        saveNoiseReductionEnabled(setLs, draftNoiseReduction()),
         saveAudioCompressionEnabled(setLs, draftAudioCompression()),
         saveAutoModeEnabled(setLs, draftAutoMode()),
         saveAutoModeStartMs(setLs, draftAutoModeStart()),
@@ -1303,21 +1317,23 @@ export const SettingsView: Component = () => {
         saveTranscriptMode(setLs, draftTranscriptMode()),
         saveMeetingPrepSections(setLs, prepDraft()),
         saveMeetingPrepWebGrounding(setLs, draftMeetingPrepWebGrounding()),
+        saveConversationPreferences(setLs, draftConversation()),
       ]);
       if (prepResult.ok) setPrepError('');
       else setPrepError(prepResult.error ?? 'Could not save meeting prep.');
       const allOk = [
         provider, geminiKey, geminiModel, geminiAuto, claudeKey, claudeModel, tavilyEnabled, tavilyKey, openaiKeys,
         openaiBaseUrl, openaiModel, openaiTranscribe, sttHost, sttModel, chatFallbacks, sttFallbacks,
-        language, buffer, micSource, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim, audioCompression,
+        language, buffer, micSource, autoSummary, crossSessionRecall, locationEnabled, discreet, voiceGate, voiceTrim, noiseReduction, audioCompression,
         autoMode, autoModeStart, autoModeSilence, autoModeInterval, autoDisabled, translationMode,
-        romanize, translationSourceLangs, transcriptMode, prepWebGrounding,
+        romanize, translationSourceLangs, transcriptMode, prepWebGrounding, conversation,
       ].every(Boolean) && prepResult.ok;
       if (allOk) {
         // Re-seed the draft signals from the persisted store. The store may
         // have normalized values (e.g. meeting-prep labels are sliced at
         // MEETING_PREP_LABEL_MAX); without this re-seed the draft would
         // retain the un-normalized value and lensDirty would stay true.
+        setDraftConversation(structuredClone(savedConversation()));
         setDraftAutoDisabledLenses(settings().autoDisabledLenses);
         setDraftAudioCompression(settings().audioCompressionEnabled);
         // Auto-mode threshold saves snap+clamp before persisting, so re-seed
@@ -1403,7 +1419,8 @@ export const SettingsView: Component = () => {
   const appDirty = createMemo(() => {
     const s = settings();
     return (
-      draftLanguage() !== s.responseLanguage
+      JSON.stringify(draftConversation()) !== JSON.stringify(savedConversation())
+      || draftLanguage() !== s.responseLanguage
       || draftBuffer() !== s.bufferDuration
       || draftMicSource() !== s.micSource
       || draftAutoEnabled() !== s.autoSummaryEnabled
@@ -1413,6 +1430,7 @@ export const SettingsView: Component = () => {
       || draftDiscreet() !== s.discreet
       || draftVoiceGate() !== s.voiceGateRmsFloor
       || draftVoiceTrim() !== s.voiceTrimEnabled
+      || draftNoiseReduction() !== s.noiseReductionEnabled
       || draftAudioCompression() !== s.audioCompressionEnabled
       || draftAutoMode() !== s.autoModeEnabled
       || draftAutoModeStart() !== s.autoModeStartMs
@@ -1811,7 +1829,7 @@ export const SettingsView: Component = () => {
           </Show>
 
       </Show>
-      <div hidden={activeTab() !== 'session'}><ConversationPanel /></div>
+      <div hidden={activeTab() !== 'session'}><ConversationPanel onOpenSettings={() => changeTab('settings')} /></div>
       <Show when={activeTab() === 'lenses'}>
         <>
           <div class="lens-category-nav" role="group" aria-label="Lens categories">
@@ -1857,7 +1875,7 @@ export const SettingsView: Component = () => {
                               class="meeting-prep-trigger"
                               classList={{ open: autoConfigExpanded() }}
                               aria-expanded={autoConfigExpanded()}
-                              aria-label={autoConfigExpanded() ? 'Close Auto settings' : 'Configure Auto'}
+                              aria-label={autoConfigExpanded() ? 'Close Best next help settings' : 'Configure Best next help'}
                               onClick={() => setAutoConfigExpanded((v) => !v)}
                             >
                               <span>{autoConfigExpanded() ? 'Done' : 'Configure'}</span>
@@ -1876,7 +1894,7 @@ export const SettingsView: Component = () => {
                         <Show when={autoConfigExpanded()}>
                           <div class="meeting-prep-inline">
                             <p class="field-hint">
-                              Toggle which lenses Hands-free mode can choose from.
+                              Choose which lenses Best next help may use. Your conversation profile in Settings can narrow this list further; it never enables a disabled lens.
                             </p>
                             <ul class="meeting-prep-list">
                               <For each={autoLensItems()}>
@@ -2450,9 +2468,9 @@ export const SettingsView: Component = () => {
               <details class="settings-disclosure">
                 <summary>Advanced model settings<SettingsIcon name="chevron" /></summary>
               <label class="field">
-                <span class="field-label">Auto-lens classifier model</span>
+                <span class="field-label">Best next help routing model</span>
                 <select
-                  aria-label="Auto-lens classifier model"
+                  aria-label="Best next help routing model"
                   value={draftAutoModel() ?? ''}
                   disabled={draftKey().trim().length < 10 || modelsLoading()}
                   onChange={(e) => {
@@ -2465,7 +2483,7 @@ export const SettingsView: Component = () => {
                   <For each={availableModels()}>{(m) => <option value={m}>{m}</option>}</For>
                 </select>
                 <span class="field-hint">
-                  Optional. The Auto lens makes an extra fast call to pick a lens.
+                  Optional. Best next help uses a routing request to choose a lens.
                   Leave on “Use main model” to reuse your chosen model, or pick a
                   lighter one (e.g. flash-lite) to stay under per-model rate limits.
                 </span>
@@ -2787,6 +2805,7 @@ export const SettingsView: Component = () => {
         </form>
       </Show>
 
+      <div hidden={activeTab() !== 'settings'}><ConversationSettings preferences={draftConversation()} onChange={setDraftConversation} disabledAutoLenses={draftAutoDisabledLenses()} /></div>
       <Show when={activeTab() === 'settings'}>
         <form
           class="config"
@@ -2811,9 +2830,9 @@ export const SettingsView: Component = () => {
             </label>
 
             <label class="field">
-              <span class="field-label">Audio window</span>
+              <span class="field-label">Audio sent per analysis</span>
               <select
-                aria-label="Audio window"
+                aria-label="Audio sent per analysis"
                 value={draftBuffer()}
                 onChange={(e) => setDraftBuffer(Number(e.currentTarget.value) as BufferDuration)}
               >
@@ -2881,6 +2900,20 @@ export const SettingsView: Component = () => {
               <label class="toggle-row">
                 <input
                   type="checkbox"
+                  checked={draftNoiseReduction()}
+                  onChange={(e) => setDraftNoiseReduction(e.currentTarget.checked)}
+                />
+                <span>Reduce background noise</span>
+              </label>
+              <span class="field-hint">
+                Gently clean snapshots up to 30 seconds. Longer snapshots, slow processing, or unsupported devices use the original audio.
+              </span>
+            </div>
+
+            <div class="field preference-field">
+              <label class="toggle-row">
+                <input
+                  type="checkbox"
                   checked={draftDiscreet()}
                   onChange={(e) => setDraftDiscreet(e.currentTarget.checked)}
                 />
@@ -2936,7 +2969,7 @@ export const SettingsView: Component = () => {
                 </div>
                 <Show when={draftTranscriptMode() === 'off'}>
                   <span class="field-hint" style={{ 'margin-top': '0.4rem', 'font-style': 'italic' }}>
-                    Tip: turn on <strong>Live transcript</strong> below so Auto can skip moments it
+                    Tip: turn on <strong>Live transcript</strong> below so Hands-free mode can skip moments it
                     has already answered.
                   </span>
                 </Show>

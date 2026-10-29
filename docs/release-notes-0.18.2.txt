@@ -1,0 +1,11 @@
+VeritasLens 0.18.2
+
+Choose a lens and start listening. Conversation profiles now default to None for new users; previously saved profile choices, goals, and notes are preserved. Optional Everyday, Work, and Understand profiles add context and narrow the enabled tools available to Best next help without changing your selected lens.
+
+Session shows your selected lens, profile, and a read-only audio duration. Configure profiles, saved setups, captions, audio duration, answer display time, and hands-free preferences in phone Settings using Save changes. Phone and glasses use matching lens names, and the HUD lists Lens and Profile separately. Glasses menus keep quick session actions. Saving conversation settings preserves an active session.
+
+Optional Reduce background noise on G2 uses local RNNoise cleanup for snapshots up to 30 seconds. It is off by default, preserves raw audio, and falls back to the original if processing is unavailable, fails, or exceeds one second. Longer snapshots use the original audio to bound memory. Live captions remain unfiltered. Physical-phone speech fidelity and performance still need verification before relying on cleanup.
+
+Also improves VAD responsiveness, preserves History notes saved while Settings has unsaved edits, and adds a local audio lab for reference testing.
+
+Permissions: no new hosts or permission categories. Requires Even App 2.2.10 and SDK 0.0.16.

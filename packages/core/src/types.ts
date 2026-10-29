@@ -651,7 +651,7 @@ export type MicSource = 'glasses' | 'phone';
 export const DEFAULT_MIC_SOURCE: MicSource = 'glasses';
 
 /** User-configurable settings persisted via the SDK bridge local storage. */
-export type ConversationProfile = 'everyday' | 'work' | 'understand';
+export type ConversationProfile = 'none' | 'everyday' | 'work' | 'understand';
 export type AssistanceAction = 'respond' | 'repair' | 'catch-up' | 'commitments' | 'refine';
 export interface ConversationRecord {
   id: string;
@@ -812,6 +812,8 @@ export interface Settings {
   voiceTrimEnabled: boolean;
   /** Lossless FLAC for supported audio uploads; falls back to WAV when unavailable. */
   audioCompressionEnabled: boolean;
+  /** Optional G2 snapshot denoising. Off by default; preserves raw audio. */
+  noiseReductionEnabled: boolean;
   /**
    * Lens IDs excluded from the Auto dispatcher. Default `[]` means all
    * Auto candidates are enabled. Stored as a JSON-serialised string array

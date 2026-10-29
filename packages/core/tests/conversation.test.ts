@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { normalizeConversationPreferences, DEFAULT_CONVERSATION, conversationDirective, profileCandidates, capturedConversationContext, collectConversationRecords, exportConversation } from '../src/runtime/conversation';
+import { normalizeConversationPreferences, mergeConversationDraft, DEFAULT_CONVERSATION, conversationDirective, profileCandidates, capturedConversationContext, collectConversationRecords, exportConversation } from '../src/runtime/conversation';
 import { parseAssistanceResponse } from '../src/personas/assistance';
 import { parseAutoClassifierResponse } from '../src/personas/auto';
 import { LiveCaptionCapture } from '../src/runtime/captions';
@@ -14,6 +14,38 @@ describe('conversation profiles and evidence', () => {
     const c = normalizeConversationPreferences({ profile: 'work', cueDurationSec: -10, contexts: [{ id: 'p', label: 'Project', body: 'Scope' }], selectedContextIds: ['p', 'missing', 'p'], presets: [{ id: '1', name: 'Meeting', selectedContextIds: ['missing'] }] });
     expect(c.profile).toBe('work'); expect(c.cueDurationSec).toBe(5); expect(c.selectedContextIds).toEqual(['p']); expect(c.presets[0].selectedContextIds).toEqual([]);
   });
+  it('defaults new or invalid preferences to no profile', () => {
+    expect(DEFAULT_CONVERSATION.profile).toBe('none');
+    for (const value of [undefined, null, '', {}, '{bad', { profile: 'unknown' }]) {
+      expect(normalizeConversationPreferences(value).profile).toBe('none');
+    }
+  });
+  it.each(['everyday', 'work', 'understand'] as const)('preserves a saved %s profile and its notes', profile => {
+    const saved = { ...DEFAULT_CONVERSATION, profile, goal: 'Clarify scope', contexts: [{ id: 'p', label: 'Project', body: 'Scope' }], selectedContextIds: ['p'] };
+    expect(normalizeConversationPreferences(JSON.stringify(saved))).toEqual(saved);
+  });
+  it('preserves notes saved from History alongside unsaved Settings edits', () => {
+    const previous = structuredClone(DEFAULT_CONVERSATION);
+    const draft = { ...previous, goal: 'Clarify the next step', profile: 'work' as const };
+    const note = { id: 'history-note', label: 'Saved moment', body: 'A supported observation' };
+    const next = { ...previous, contexts: [note] };
+    const merged = mergeConversationDraft(draft, previous, next);
+    expect(merged.goal).toBe(draft.goal);
+    expect(merged.profile).toBe('work');
+    expect(merged.contexts).toEqual([note]);
+    expect(normalizeConversationPreferences(JSON.stringify(merged))).toEqual(merged);
+  });
+  it('merges independent note edits without reviving locally removed notes', () => {
+    const first = { id: 'first', label: 'First', body: 'Original' };
+    const second = { id: 'second', label: 'Second', body: 'Original' };
+    const previous = { ...DEFAULT_CONVERSATION, contexts: [first, second], selectedContextIds: ['first'] };
+    const draft = { ...previous, contexts: [second] };
+    const next = { ...previous, contexts: [first, { ...second, body: 'Updated externally' }, { id: 'new', label: 'New', body: 'Saved in History' }] };
+    const merged = mergeConversationDraft(draft, previous, next);
+    expect(merged.contexts.map(c => c.id)).toEqual(['second', 'new']);
+    expect(merged.contexts[0].body).toBe('Updated externally');
+    expect(merged.selectedContextIds).toEqual([]);
+  });
   it('includes only selected notes, goal, and boundaries in the provider prompt', () => {
     const c = normalizeConversationPreferences({ goal: 'Clarify scope', constraints: 'Do not agree yet', contexts: [{ id: 'a', label: 'Selected', body: 'Public scope' }, { id: 'b', label: 'Private', body: 'Unrelated private note' }], selectedContextIds: ['a'] });
     const prompt = conversationDirective(c);
@@ -24,6 +56,14 @@ describe('conversation profiles and evidence', () => {
     expect(profileCandidates('everyday', candidates)).toEqual(['respond', 'eli5']);
     expect(profileCandidates('work', candidates)).toEqual(['respond', 'eli5', 'commitments']);
     expect(profileCandidates('understand', candidates)).toEqual(['respond', 'eli5']);
+  });
+  it('allows opting out of profile filtering without losing saved preferences', () => {
+    const c = normalizeConversationPreferences({ ...DEFAULT_CONVERSATION, profile: 'none', goal: 'Listen carefully' });
+    expect(c.profile).toBe('none');
+    expect(c.goal).toBe('Listen carefully');
+    expect(profileCandidates(c.profile, ['eli5', 'fact-checker', 'logical-fallacy'])).toEqual(['eli5', 'fact-checker', 'logical-fallacy']);
+    expect(conversationDirective(c)).toContain('Listen carefully');
+    expect(normalizeConversationPreferences(JSON.stringify(c))).toEqual(c);
   });
   it('accepts Auto abstention without silently routing to another lens', () => { expect(parseAutoClassifierResponse('{"chosenLensId":"none"}', ['respond'])).toEqual({ chosenLensId: 'none' }); });
   it('permits no useful response and omits records missing evidence', () => {

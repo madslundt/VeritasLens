@@ -67,31 +67,48 @@ Plus a built-in **Lens Game** mode (`personas/game.ts`, `runtime/gameHistory.ts`
 
 ## Conversation profiles and flows (Even G2)
 
-The phone opens on **Session**. Choose Everyday, Work, or Understand, then start
-without preparation or expand **Goals, notes & saved setups** to add a goal,
-constraints, selected person/project notes, and a named setup. Selected notes
-are sent to the configured analysis provider; unrelated notes are excluded.
-Prepared assistance uses selected session notes alongside its labeled attachments.
+The phone opens on **Session**. Choose a lens explicitly and start listening.
+The session status lists the conversation profile and lens separately, with a
+read-only summary of the maximum audio sent per analysis.
+
+Profiles default to **None**, so choosing a lens is enough to start. Optionally
+choose Everyday, Work, or Understand in phone **Settings**. Previously saved
+profiles are preserved. A profile adds context and narrows the enabled
+lenses available to **Best next help**; it never switches your selected lens or
+enables a lens you disabled. Goals, constraints, selected person/project notes,
+and named setups also live in Settings. Selected notes are sent to the configured
+analysis provider; unrelated notes are excluded. Prepared assistance uses selected
+notes alongside its labeled attachments.
+
+**Audio sent per analysis** and **Hide answers after** are distinct settings,
+configurable only in phone Settings. The first sets the maximum recent audio
+window; the second controls answer display time. Profiles, captions, hands-free
+mode, and saved setups are configured on the phone. Drafts survive navigation
+between phone pages and use the shared **Save changes** button.
 
 **Lenses** is a separate catalogue with Conversation, Knowledge, and Arguments
 categories. **Games** has its own page, reached from Lenses. History, Settings,
-and AI setup retain their own navigation sections. Session drafts survive page
-changes until saved; saved setups are also selectable on the glasses.
+and AI setup retain their own navigation sections. The glasses picker uses the
+same lens names as the phone, with additional lenses under **More lenses**.
+The glasses menu identifies **Lens** and **Profile** separately.
 
-On glasses, single-tap opens the menu. **Help with this exchange** offers Reply,
-Explain, Check, Ask, Clarify/disagree, Remember, Catch up, Translate, and prepared
-assistance. **Examine the argument** contains the optional argument tools.
-**Refine or correct** reuses the latest captured exchange for shorter/more natural
-answers, explanations, or corrections. Double-tap captures a new exchange or
-cancels an in-flight request. Refinement leaves later speech available for the
-next check. The temporary audio snapshot is cleared when the session ends.
+On glasses, single-tap opens the menu. **Help with this exchange** offers the
+same named tools as the phone, including Help me respond, Simplify, Fact Check,
+Key Questions, Clarify or disagree, Decisions & commitments, Catch me up,
+Translate, and Prepared assistance. **Examine the argument** contains the
+optional argument tools. **Refine or correct** reuses the latest captured
+exchange for shorter/more natural answers, explanations, or corrections.
+Double-tap captures a new exchange or cancels an in-flight request. Refinement
+leaves later speech available for the next check. The temporary audio snapshot
+is cleared when the session ends.
 
-**Session tools** separates microphone pause/resume, hands-free triggering, and
-live captions. Pausing preserves the session while stopping audio capture and
-caption/automatic requests. Dismissing a cue only hides its display. Unpinned
-cues expire after the configured duration; pinned cues suppress hands-free
-interventions and remain in history. Best next help can return no intervention;
-standard profiles reserve argument criticism for deliberate requests.
+**Session tools** keeps quick actions: microphone pause/resume, viewing enabled
+live captions, catch-up, decisions and commitments, and dismissing an answer.
+Pausing preserves the session while stopping audio capture and caption/automatic
+requests. Dismissing an answer only hides its display. Unpinned answers expire
+after the configured duration; pinned answers suppress hands-free interventions
+and remain in history. Best next help can return no intervention; standard
+profiles reserve argument criticism for deliberate requests.
 
 Live captions are opt-in and use the configured Whisper host/key (or a custom
 Whisper endpoint). Speech is transcribed in serial chunks, approximately every
@@ -99,7 +116,7 @@ four seconds plus provider latency, without requiring an analysis tap. Captions
 are not a complete permanent transcript and do not establish speaker identity.
 Their display is available on the phone and under Session tools on glasses.
 
-Remember and end-of-session review capture structured decisions, commitments,
+Decisions & commitments and end-of-session review capture structured decisions, commitments,
 and questions. Proposals remain distinct from agreements; missing owners and
 deadlines stay explicit. History review separates my, other, and unassigned
 commitments, exposes supporting quotes, permits corrections, and exports the
@@ -133,6 +150,7 @@ The **Test** button in Settings runs `runSelfTest()` against the active draft, s
 - **Multi-claim per tap.** Fact, Framing, Fallacy, Trivia, Simplify, Companion, Devil's Advocate, and Key Questions can return up to 5 distinct items per request. Single-tap walks forward through them.
 - **Per-claim verbatim quote.** ≤140-char source quote attached to every claim, most recent first.
 - **Skip silence and noise.** Local Silero v6 VAD (with an Earshot candidate filter) gates every tap; silent or too-noisy taps short-circuit before any API call. HUD flashes `○` (no voice) or `~` (too noisy).
+- **Reduce background noise (optional, G2).** Settings → Listening & display → Reduce background noise enables local RNNoise small at 50% strength for lens, translation, and summary snapshots up to 30 seconds. Longer snapshots use the original audio to bound worker memory. Off by default. A worker processes a copy after the voice gate; raw audio stays unchanged in memory. Slow or failed processing falls back to the original audio after at most one second and skips further attempts until the next session or toggle. Live captions remain unfiltered.
 - **Rolling transcript.** A multi-source transcript (`core/src/runtime/transcript.ts`) merges STT byproducts and inline audio output across taps so later lenses see what was said earlier in the session — at zero extra API spend on providers that already transcribe.
 - **Multi-language responses.** 11 Latin-script European languages (English, Dansk, Svenska, Norsk, Deutsch, Français, Español, Italiano, Português, Nederlands, Polski). Verdict labels stay canonical English so HUD glyphs render correctly.
 - **Glanceable HUD layout.** Lens-specific result on the 576×288 4-bit greyscale G2 display. Result persists until the next action.

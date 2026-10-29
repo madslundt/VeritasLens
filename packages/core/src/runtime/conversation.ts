@@ -2,12 +2,13 @@ import type { ConversationPreferences, ConversationProfile, ConversationRecord, 
 
 export const CONVERSATION_KEY = 'veritaslens.conversation.v1';
 export const CONVERSATION_PROFILES = [
-  { id: 'everyday' as const, name: 'Everyday', description: 'Connect, respond naturally, and remember details.', defaultLens: 'auto', goal: 'Be an attentive conversation partner.' },
-  { id: 'work' as const, name: 'Work', description: 'Clarify proposals, advance your goal, and track commitments.', defaultLens: 'auto', goal: 'Understand the proposal and agree clear next steps.' },
-  { id: 'understand' as const, name: 'Understand', description: 'Follow speech, translate, explain, and catch up.', defaultLens: 'eli5', goal: 'Understand what is being said without losing the conversation.' },
+  { id: 'none' as const, name: 'None', description: 'Use your selected lens without a conversation profile.', goal: '' },
+  { id: 'everyday' as const, name: 'Everyday', description: 'Connect, respond naturally, and remember details.', goal: 'Be an attentive conversation partner.' },
+  { id: 'work' as const, name: 'Work', description: 'Clarify proposals, advance your goal, and track commitments.', goal: 'Understand the proposal and agree clear next steps.' },
+  { id: 'understand' as const, name: 'Understand', description: 'Follow speech, translate, explain, and catch up.', goal: 'Understand what is being said without losing the conversation.' },
 ];
 export const DEFAULT_CONVERSATION: ConversationPreferences = {
-  profile: 'everyday', goal: '', constraints: '', tone: 'natural', captionsEnabled: false,
+  profile: 'none', goal: '', constraints: '', tone: 'natural', captionsEnabled: false,
   cueDurationSec: 20, contexts: [], selectedContextIds: [], presets: [],
 };
 const object = (v: unknown): Record<string, unknown> => v && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : {};
@@ -15,7 +16,7 @@ const str = (v: unknown, limit: number) => typeof v === 'string' ? v.trim().slic
 export function normalizeConversationPreferences(value: unknown): ConversationPreferences {
   if (typeof value === 'string') { try { value = JSON.parse(value); } catch { value = {}; } }
   const v = object(value);
-  const profile = (p: unknown): ConversationProfile => p === 'work' || p === 'understand' ? p : 'everyday';
+  const profile = (p: unknown): ConversationProfile => p === 'everyday' || p === 'work' || p === 'understand' ? p : 'none';
   const contexts = (Array.isArray(v.contexts) ? v.contexts : []).slice(0, 20).map(object)
     .map(c => ({ id: str(c.id, 80), label: str(c.label, 80), body: str(c.body, 4000) })).filter(c => c.id && c.label && c.body);
   const validIds = new Set(contexts.map(c => c.id));
@@ -28,6 +29,39 @@ export function normalizeConversationPreferences(value: unknown): ConversationPr
     tone: v.tone === 'brief' || v.tone === 'professional' ? v.tone : 'natural', captionsEnabled: v.captionsEnabled === true,
     cueDurationSec: typeof v.cueDurationSec === 'number' && Number.isFinite(v.cueDurationSec) ? Math.max(5, Math.min(120, Math.round(v.cueDurationSec))) : 20,
     contexts, selectedContextIds: ids(v.selectedContextIds), presets,
+  };
+}
+
+/** Rebase unsaved phone edits onto preferences updated by History review. */
+export function mergeConversationDraft(
+  draft: ConversationPreferences, previous: ConversationPreferences, next: ConversationPreferences,
+): ConversationPreferences {
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const choose = <T>(local: T, base: T, saved: T): T => same(local, base) ? saved : local;
+  const records = <T extends { id: string }>(local: T[], base: T[], saved: T[]): T[] => {
+    const before = new Map(base.map(record => [record.id, record]));
+    const latest = new Map(saved.map(record => [record.id, record]));
+    const merged = local.flatMap(record => {
+      const old = before.get(record.id);
+      if (!old || !same(record, old)) return [record];
+      const current = latest.get(record.id);
+      return current ? [current] : [];
+    });
+    const localIds = new Set(local.map(record => record.id));
+    return [...merged, ...saved.filter(record => !before.has(record.id) && !localIds.has(record.id))];
+  };
+  const contexts = records(draft.contexts, previous.contexts, next.contexts);
+  return {
+    profile: choose(draft.profile, previous.profile, next.profile),
+    goal: choose(draft.goal, previous.goal, next.goal),
+    constraints: choose(draft.constraints, previous.constraints, next.constraints),
+    tone: choose(draft.tone, previous.tone, next.tone),
+    captionsEnabled: choose(draft.captionsEnabled, previous.captionsEnabled, next.captionsEnabled),
+    cueDurationSec: choose(draft.cueDurationSec, previous.cueDurationSec, next.cueDurationSec),
+    contexts,
+    selectedContextIds: choose(draft.selectedContextIds, previous.selectedContextIds, next.selectedContextIds)
+      .filter(id => contexts.some(context => context.id === id)),
+    presets: records(draft.presets, previous.presets, next.presets),
   };
 }
 
@@ -49,6 +83,7 @@ export function preparedConversationSections(sections: readonly MeetingPrepSecti
 }
 
 export function profileCandidates(profile: ConversationProfile, candidates: readonly string[]): string[] {
+  if (profile === 'none') return [...candidates];
   const allowed = profile === 'everyday'
     ? ['respond', 'key-questions', 'eli5', 'trivia', 'companion', 'fact-checker']
     : profile === 'work'

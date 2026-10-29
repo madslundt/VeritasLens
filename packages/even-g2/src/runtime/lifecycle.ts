@@ -1,9 +1,9 @@
-import { CONVERSATION_PROFILES, DEFAULT_CONVERSATION, preparedConversationSections, conversationDirective, capturedConversationContext, collectConversationRecords, resultText, profileCandidates, LiveCaptionCapture, captionConfigurationError } from '@veritaslens/core';
-import type { ConversationProfile } from '@veritaslens/core';
-import { saveConversationPreferences, saveAutoModeEnabled, updateHistoryEntry, recordingPaused, setRecordingPaused, liveCaptionText, setLiveCaptionText, liveCaptionStatus, setLiveCaptionStatus } from '@/state/store';
+import { preparedConversationSections, conversationDirective, capturedConversationContext, collectConversationRecords, resultText, profileCandidates, LiveCaptionCapture, captionConfigurationError } from '@veritaslens/core';
+import { updateHistoryEntry, recordingPaused, setRecordingPaused, liveCaptionText, setLiveCaptionText, liveCaptionStatus, setLiveCaptionStatus } from '@/state/store';
 import { showConversationOptions, conversationOptionAtIndex, showCaptionsPage, updateCaptionsPage } from './hud';
 // src/runtime/lifecycle.ts
 import { getBridge } from './bridge';
+import { reduceSnapshotNoise, resetNoiseReduction, type SnapshotAudioFormat } from '@/runtime/noiseReduction';
 import { isLocationFresh, kickOffLocationRefresh, probeAndCacheLocation } from './location';
 import {
   PcmRingBuffer,
@@ -185,7 +185,7 @@ let captionCaptureEnabled = false;
 let cueExpiryTimer: ReturnType<typeof setTimeout> | null = null;
 let pinnedCue = false;
 let lastConversationOptionIndex = 0;
-let conversationOptionsKind: 'profiles' | 'help' | 'refine' | 'tools' | 'arguments' = 'help';
+let conversationOptionsKind: 'help' | 'refine' | 'tools' | 'arguments' = 'help';
 const storeWrite = (key: string, value: string) => getBridge().setLocalStorage(key, value);
 function stopConversationCapture(): void {
   captionCapture?.stop(); captionCapture = null; captionCaptureEnabled = false;
@@ -226,21 +226,12 @@ function syncCaptionCapture(): void {
   setLiveCaptionStatus('Waiting for speech…');
   captionCapture.start(buffer!.bytesProduced);
 }
-export async function selectConversationProfile(profile: ConversationProfile, presetId?: string): Promise<void> {
-  const c = settings().conversation ?? DEFAULT_CONVERSATION;
-  const preset = c.presets.find(p => p.id === presetId);
-  const next = preset ? { ...c, profile: preset.profile, goal: preset.goal, constraints: preset.constraints, selectedContextIds: preset.selectedContextIds } : { ...c, profile };
-  if (!await saveConversationPreferences(storeWrite, next)) throw new Error('Could not save conversation profile.');
-  if (buffer) { await cancelConversationAnalysis(); setActivePersona(CONVERSATION_PROFILES.find(p => p.id === next.profile)!.defaultLens); await restoreActivePage(); }
-  else await showPickerPage();
-}
 export async function startConversation(personaId?: string): Promise<void> {
   if (!running) await startHudRuntime();
   const error = providerConfigurationError(settings());
   if (error) { setErrorMessage(error); return; }
   if (buffer) { if (personaId) { await cancelConversationAnalysis(); setActivePersona(personaId); } await restoreActivePage(); return; }
-  const profile = CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile) ?? CONVERSATION_PROFILES[0];
-  await enterActiveSession(personaId ?? profile.defaultLens);
+  await enterActiveSession(personaId ?? activePersona());
 }
 async function cancelConversationAnalysis(): Promise<void> {
   inflight?.abort(); inflight = null; analyzing = false;
@@ -275,21 +266,12 @@ export async function endConversation(): Promise<void> {
   }
   await leaveActiveSession();
 }
-async function openProfileOptions(): Promise<void> {
-  conversationOptionsKind = 'profiles'; lastConversationOptionIndex = 0;
-  await showConversationOptions('Choose your situation', [
-    ...CONVERSATION_PROFILES.map(p => ({ id: `profile:${p.id}`, label: p.name })),
-    ...(settings().conversation?.presets ?? []).map(p => ({ id: `preset:${p.id}`, label: p.name })),
-  ]);
-}
 async function openHelpOptions(): Promise<void> {
   conversationOptionsKind = 'help'; lastConversationOptionIndex = 0;
   await showConversationOptions('Help with this exchange', [
-    { id: 'help:respond', label: 'Help me respond' }, { id: 'help:eli5', label: 'Explain' },
-    { id: 'help:fact-checker', label: 'Check a fact' }, { id: 'help:key-questions', label: 'What should I ask?' },
-    { id: 'help:repair', label: 'Clarify or disagree' }, { id: 'help:commitments', label: 'Remember decisions & commitments' },
-    { id: 'help:catch-up', label: 'Catch me up' }, { id: 'conversation-arguments', label: 'Examine the argument ›' },
-    { id: 'help:translation', label: 'Translate' }, { id: 'help:meeting-prep', label: 'Use prepared context' },
+    ...['respond', 'eli5', 'fact-checker', 'key-questions', 'repair', 'commitments', 'catch-up', 'translation', MEETING_PREP_ID]
+      .map(id => ({ id: `help:${id}`, label: getPersona(id)!.name })),
+    { id: 'conversation-arguments', label: 'Examine the argument ›' },
   ]);
 }
 async function openRefineOptions(): Promise<void> {
@@ -308,11 +290,9 @@ async function openSessionOptions(): Promise<void> {
   conversationOptionsKind = 'tools'; lastConversationOptionIndex = 0;
   await showConversationOptions('Session tools', [
     { id: 'conversation-pause', label: recordingPaused() ? 'Resume microphone' : 'Pause microphone' },
-    { id: 'conversation-hands-free', label: settings().autoModeEnabled ? 'Hands-free: on → turn off' : 'Hands-free: off → turn on' },
     { id: 'conversation-captions', label: 'View live captions' },
-    { id: 'conversation-caption-toggle', label: settings().conversation?.captionsEnabled ? 'Stop live captions' : 'Enable live captions' },
-    { id: 'help:catch-up', label: 'Catch me up' }, { id: 'help:commitments', label: 'Review decisions & commitments' },
-    { id: 'conversation-profiles', label: 'Change profile ›' }, { id: 'conversation-dismiss', label: 'Dismiss displayed cue' },
+    ...['catch-up', 'commitments'].map(id => ({ id: `help:${id}`, label: getPersona(id)!.name })),
+    { id: 'conversation-dismiss', label: 'Dismiss displayed answer' },
   ]);
 }
 async function handleConversationOptionGesture(g: Gesture): Promise<void> {
@@ -320,19 +300,14 @@ async function handleConversationOptionGesture(g: Gesture): Promise<void> {
   if (g.type !== OsEventTypeList.CLICK_EVENT && g.type !== undefined) return;
   const id = conversationOptionAtIndex(lastConversationOptionIndex);
   if (id === 'conversation-back') { if (buffer) await openMenuForCurrentContext(); else await showPickerPage(); return; }
-  if (id.startsWith('profile:')) { await selectConversationProfile(id.slice(8) as ConversationProfile); return; }
-  if (id.startsWith('preset:')) { const p = settings().conversation?.presets.find(p => p.id === id.slice(7)); if (p) await selectConversationProfile(p.profile, p.id); return; }
   if (id.startsWith('help:')) { await requestConversationHelp(id.slice(5)); return; }
   if (id.startsWith('refine:')) { await requestConversationHelp('refine', id.slice(7)); return; }
-  if (id === 'conversation-profiles') { await openProfileOptions(); return; }
   if (id === 'conversation-arguments') {
     conversationOptionsKind = 'arguments'; lastConversationOptionIndex = 0;
     await showConversationOptions('Examine the argument', ['logical-fallacy', 'bias-detector', 'devils-advocate'].map(id => ({ id: `help:${id}`, label: getPersona(id)!.name }))); return;
   }
   if (id === 'conversation-pause') await pauseConversation();
-  if (id === 'conversation-hands-free') await saveAutoModeEnabled(storeWrite, !settings().autoModeEnabled);
-  if (id === 'conversation-caption-toggle') await saveConversationPreferences(storeWrite, { ...(settings().conversation ?? DEFAULT_CONVERSATION), captionsEnabled: !settings().conversation?.captionsEnabled });
-  if (id === 'conversation-captions') { await showCaptionsPage(liveCaptionText(), recordingPaused() ? 'Microphone paused' : liveCaptionStatus() || 'Enable captions in Session tools'); return; }
+  if (id === 'conversation-captions') { await showCaptionsPage(liveCaptionText(), recordingPaused() ? 'Microphone paused' : liveCaptionStatus() || 'Enable live captions in phone Settings'); return; }
   if (id === 'conversation-dismiss') { await restoreActivePage(); await dismissActiveAnswer(); return; }
   if (id === 'conversation-pin' || id.startsWith('feedback:')) {
     const entry = sessionHistory().filter(e => e.sessionId === currentSessionId).at(-1);
@@ -524,6 +499,7 @@ export async function startHudRuntime(): Promise<void> {
     return;
   }
   running = true;
+  resetNoiseReduction();
   try {
     setAppPhase('booting');
     await bootstrapHud(configured ? 'picker' : 'unconfigured');
@@ -543,12 +519,18 @@ export async function startHudRuntime(): Promise<void> {
 }
 
 export async function refreshHudPage(): Promise<void> {
-  if (!running) return;
+  if (!running || leavingActiveSession) return;
   gameLocationController?.abort();
   gameLocationController = null;
   const configured = isProviderConfigured();
-  if (configured) await showPickerPage();
-  else await showUnconfiguredPage();
+  if (!configured) { await showUnconfiguredPage(); return; }
+  // Phone preference saves must not replace a live session with the picker.
+  // The menu includes profile status; other session pages keep their content.
+  if (buffer) {
+    if (currentHudPage() === 'menu') await openMenuForCurrentContext();
+    return;
+  }
+  await showPickerPage();
 }
 
 export async function stopHudRuntime(): Promise<void> {
@@ -583,6 +565,7 @@ export async function stopHudRuntime(): Promise<void> {
   inflight?.abort();
   inflight = null;
   analyzing = false;
+  resetNoiseReduction();
   stopAutoModeWatcher();
   void setAutoModeIndicator(false);
   // Clear wearer-speak state so its 12 s safety timer can't fire after
@@ -822,7 +805,6 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
   if (typeof g.itemIndex === 'number') lastPickerIndex = g.itemIndex;
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     const entry = pickerEntryAtIndex(lastPickerIndex);
-    if (entry.kind === 'profiles') { await openProfileOptions(); return; }
     if (entry.kind === 'games') {
       await openGamesPicker();
       return;
@@ -841,8 +823,7 @@ async function handlePickerEvent(g: Gesture): Promise<void> {
       await flashPickerHint('Add notes in phone settings first');
       return;
     }
-    const profile = CONVERSATION_PROFILES.find(p => p.id === settings().conversation?.profile);
-    await enterActiveSession(persona.id === 'auto' && profile ? profile.defaultLens : persona.id);
+    await enterActiveSession(persona.id);
   }
 }
 
@@ -1227,6 +1208,7 @@ async function handleMidSummaryGesture(g: Gesture): Promise<void> {
 }
 
 async function enterActiveSession(personaId: PersonaId): Promise<void> {
+  resetNoiseReduction();
   const persona = getPersona(personaId);
   if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
   // A previous session may have left a detached final-summary call in flight.
@@ -1755,6 +1737,31 @@ async function showNoVoiceFeedback(message: string): Promise<void> {
   }, 2500);
 }
 
+async function prepareSnapshotPcm(
+  pcm: Uint8Array, format: SnapshotAudioFormat, signal: AbortSignal,
+  enabled = settings().noiseReductionEnabled,
+): Promise<Uint8Array> {
+  if (signal.aborted) throw new DOMException('Analysis cancelled', 'AbortError');
+  if (!enabled) return pcm;
+  const result = await reduceSnapshotNoise(pcm, {
+    sampleRate: format.sampleRate,
+    bitsPerSample: format.bitsPerSample,
+    channels: format.channels,
+    enabled,
+    signal,
+  });
+  if (signal.aborted) throw new DOMException('Analysis cancelled', 'AbortError');
+  pushDebugEvent({ label: 'noise-reduction', detail: `${result.status} | ${Math.round(result.ms)}ms` });
+  return result.pcm;
+}
+
+async function encodeSnapshotForUpload(
+  pcm: Uint8Array, format: SnapshotAudioFormat, signal: AbortSignal,
+  enabled = settings().noiseReductionEnabled,
+): Promise<Uint8Array> {
+  return encodePcmToWav(await prepareSnapshotPcm(pcm, format, signal, enabled), format);
+}
+
 async function runAnalysis(options: { personaId?: string; reuse?: boolean; instruction?: string; memory?: boolean } = {}): Promise<void> {
   const page = currentHudPage();
   if (page === 'history-list' || page === 'history-detail' || page === 'mid-summary' || page === 'conversation-options' || page === 'captions') await restoreActivePage();
@@ -1908,7 +1915,8 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
     // the full buffer to enumerate every region, then crop. Falls back to the
     // full PCM silently when Silero is unavailable (FFT fallback returns
     // `null` segments) or when trimming would not shrink the payload.
-    let pcmForUpload = linearPcm;
+    let pcmForUpload = await prepareSnapshotPcm(linearPcm, analysisBuffer, controller.signal, s.noiseReductionEnabled);
+    assertCurrentAnalysis();
     if (s.voiceTrimEnabled) {
       // Reuse the same RMS floor as the gate so trim and gate agree on what
       // counts as silence — passing the historical 200 here while the gate
@@ -1922,7 +1930,9 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
       trimMs = performance.now() - trimStartedAt;
       assertCurrentAnalysis();
       if (segments && segments.length > 0) {
-        const trimmed = trimPcmToSegments(linearPcm, segments, {
+        // Boundaries come from the raw recording. Enhancement compensates its
+        // delay and preserves length, so the same offsets remain valid.
+        const trimmed = trimPcmToSegments(pcmForUpload, segments, {
           sampleRate: analysisBuffer.sampleRate,
           bytesPerSample: analysisBuffer.bitsPerSample / 8,
         });
@@ -2115,7 +2125,7 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
       const enabled = candidates.filter((id) => !settings().autoDisabledLenses.includes(id));
       if (enabled.length === 0) {
         await stopSpinner();
-        await setStatus('No Auto lenses enabled — configure in settings');
+        await setStatus('No lenses enabled for Best next help — configure on phone');
         return;
       }
       transcript = prepareLensTranscript(wav, controller.signal)
@@ -2536,13 +2546,8 @@ async function runSayMore(): Promise<void> {
     romanize: s.romanizeForeignScript,
   });
 
-  const wav = encodePcmToWav(buffer.toLinearPcm(), {
-    sampleRate: buffer.sampleRate,
-    bitsPerSample: buffer.bitsPerSample,
-    channels: buffer.channels,
-  });
-
   try {
+    const wav = await encodeSnapshotForUpload(buffer.toLinearPcm(), buffer, controller.signal, s.noiseReductionEnabled);
     const rawText = await callLens({
       wav,
       prompt,
@@ -2661,12 +2666,6 @@ async function runWearerSpeakAnalyze(): Promise<void> {
     await updateTranslationWearerSpeakResult('', '');
     return;
   }
-  const wav = encodePcmToWav(linearPcm, {
-    sampleRate: buffer.sampleRate,
-    bitsPerSample: buffer.bitsPerSample,
-    channels: buffer.channels,
-  });
-
   inflight?.abort();
   const controller = new AbortController();
   inflight = controller;
@@ -2681,10 +2680,11 @@ async function runWearerSpeakAnalyze(): Promise<void> {
   // Same provider-coverage gap as runAnalysis: Gemini / OpenRouter never fire
   // `onTranscript`, so fire the parallel whisper-sidecar with speaker='wearer'
   // alongside the lens call.
-  if (shouldRunWhisperSidecar()) {
-    void runWhisperSidecar(wav, 'wearer', controller.signal);
-  }
   try {
+    const wav = await encodeSnapshotForUpload(linearPcm, buffer, controller.signal, s.noiseReductionEnabled);
+    if (shouldRunWhisperSidecar()) {
+      void runWhisperSidecar(wav, 'wearer', controller.signal);
+    }
     const rawText = await callLens({
       wav,
       prompt,
@@ -2822,6 +2822,8 @@ function startSettingsWatcher(): void {
       syncAutoModeWatcher();
     });
     createEffect(on(() => [settings().conversation?.captionsEnabled, recordingPaused()], () => syncCaptionCapture()));
+    const noiseReductionEnabled = createMemo(() => settings().noiseReductionEnabled);
+    createEffect(on(noiseReductionEnabled, () => resetNoiseReduction(), { defer: true }));
   });
 }
 
@@ -2918,24 +2920,23 @@ async function runAutoSummary(): Promise<void> {
   // Always gate auto-summary on voice presence — there is no user knob for
   // this because there is nothing to summarise in a silent/noisy window, and
   // skipping the API call here is pure upside.
-  const linearPcm = buffer.toLinearPcm();
+  const summaryBuffer = buffer;
+  const linearPcm = summaryBuffer.toLinearPcm();
   const summaryFloor = settings().voiceGateRmsFloor;
   if (summaryFloor > 0) {
-    const va = await analyzeBufferForVoice(linearPcm, buffer.sampleRate, summaryFloor);
+    const va = await analyzeBufferForVoice(linearPcm, summaryBuffer.sampleRate, summaryFloor);
     if (va.totalFrames > 0 && va.voiceFrames === 0) return;
   }
+  if (buffer !== summaryBuffer) return;
   // Per-tick abort handle so leaveActiveSession / stopHudRuntime can cancel
   // a tick mid-fetch. The identity check on success ensures we don't push a
   // result that arrived after an exit reset the accumulator.
   autoSummaryInflight?.abort();
   const controller = new AbortController();
   autoSummaryInflight = controller;
-  let wav: Uint8Array | null = encodePcmToWav(linearPcm, {
-    sampleRate: buffer.sampleRate,
-    bitsPerSample: buffer.bitsPerSample,
-    channels: buffer.channels,
-  });
+  let wav: Uint8Array | null = null;
   try {
+    wav = await encodeSnapshotForUpload(linearPcm, summaryBuffer, controller.signal);
     const rawText = await callLens({
       wav,
       prompt: buildSessionSummaryPrompt(settings().responseLanguage),
@@ -3006,14 +3007,10 @@ async function runMidSummary(): Promise<void> {
 
   await showMidSummaryPage(true, midSummaryResult?.result ?? null);
 
-  let wav: Uint8Array | null = buffer
-    ? encodePcmToWav(buffer.toLinearPcm(), {
-        sampleRate: buffer.sampleRate,
-        bitsPerSample: buffer.bitsPerSample,
-        channels: buffer.channels,
-      })
-    : null;
+  let wav: Uint8Array | null = null;
+  const summaryBuffer = buffer;
   try {
+    if (summaryBuffer) wav = await encodeSnapshotForUpload(summaryBuffer.toLinearPcm(), summaryBuffer, controller.signal);
     const rawText = await callLens({
       wav: wav ?? new Uint8Array(0),
       prompt: buildSessionSummaryPrompt(settings().responseLanguage),
@@ -3160,11 +3157,11 @@ async function runLastTickSummary(
   const controller = new AbortController();
   finalSummaryInflight = controller;
   try {
-    const wav = encodePcmToWav(inputs.linearPcm, {
+    const wav = await encodeSnapshotForUpload(inputs.linearPcm, {
       sampleRate: inputs.sampleRate,
       bitsPerSample: inputs.bitsPerSample,
       channels: inputs.channels,
-    });
+    }, controller.signal);
     const rawText = await callLens({
       wav,
       prompt: buildSessionSummaryPrompt(inputs.language),

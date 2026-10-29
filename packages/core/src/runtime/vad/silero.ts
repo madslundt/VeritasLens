@@ -29,6 +29,7 @@ const SPEECH_END_MS = 1400;
 const MIN_SPEECH_FRAMES = Math.ceil(MIN_SPEECH_MS / 16);
 const SILENCE_FRAMES = Math.ceil(SPEECH_END_MS / 16);
 const VALIDATION_PAD_SAMPLES = 3200; // 200 ms of context around candidates
+const INFERENCE_SLICE_MS = 8;
 
 interface LocalVadEngine {
   run: (input: Float32Array, sampleRate: number) => AsyncGenerator<{
@@ -282,6 +283,12 @@ function int16ToFloat32(pcm: Uint8Array, sampleRate: number): Float32Array {
   const outputSamples = Math.ceil((samples * 16_000) / sampleRate);
   const out = new Float32Array(Math.ceil(outputSamples / MODEL_FRAME_SAMPLES) * MODEL_FRAME_SAMPLES);
   const dv = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  // G2 already supplies 16 kHz PCM. Avoid resampling arithmetic and an inner
+  // loop for every sample on the phone's UI thread.
+  if (sampleRate === 16_000) {
+    for (let i = 0; i < samples; i++) out[i] = dv.getInt16(i * 2, true) / 32768;
+    return out;
+  }
   for (let i = 0; i < outputSamples; i++) {
     const start = Math.ceil((i * sampleRate) / 16_000);
     const end = Math.min(samples, Math.ceil(((i + 1) * sampleRate) / 16_000));
@@ -350,6 +357,7 @@ async function createCascadeVAD(): Promise<LocalVadEngine> {
     frameProcessor: { endSegment: reset },
     destroy: () => silero.free(),
     run: async function* (audio) {
+      const yieldIfNeeded = createInferenceBudget();
       const blockSamples = CANDIDATE_BLOCK_FRAMES * CANDIDATE_FRAME_SAMPLES;
       let start = -1;
       let positives = 0;
@@ -372,7 +380,7 @@ async function createCascadeVAD(): Promise<LocalVadEngine> {
           }
           if (start >= 0 && probability < 0.35 && ++silence >= SILENCE_FRAMES) {
             const end = Math.min(audio.length, frameStart + CANDIDATE_FRAME_SAMPLES);
-            if (positives >= MIN_SPEECH_FRAMES && await confirmSpeech(silero, audio, start, end)) {
+            if (positives >= MIN_SPEECH_FRAMES && await confirmSpeech(silero, audio, start, end, yieldIfNeeded)) {
               yield { audio: audio.subarray(start, end), start: start / 16, end: end / 16 };
             }
             start = -1;
@@ -380,13 +388,12 @@ async function createCascadeVAD(): Promise<LocalVadEngine> {
             silence = 0;
           }
         }
-        // Yield to UI/gesture events roughly every 10 ms of candidate work,
-        // rather than paying a timer for every frame/block of a long buffer.
-        if (offset > 0 && (offset / blockSamples) % 16 === 0) {
-          await new Promise<void>((resolve) => setTimeout(resolve, 0));
-        }
+        // Elapsed time matters on slower phones; a fixed number of blocks
+        // can otherwise monopolize the UI thread for tens of milliseconds.
+        const pause = yieldIfNeeded();
+        if (pause) await pause;
       }
-      if (start >= 0 && positives >= MIN_SPEECH_FRAMES && await confirmSpeech(silero, audio, start, audio.length)) {
+      if (start >= 0 && positives >= MIN_SPEECH_FRAMES && await confirmSpeech(silero, audio, start, audio.length, yieldIfNeeded)) {
         yield { audio: audio.subarray(start), start: start / 16, end: audio.length / 16 };
       }
     },
@@ -394,7 +401,10 @@ async function createCascadeVAD(): Promise<LocalVadEngine> {
 }
 
 /** V6 checks only until 200 ms of speech is confirmed, then stops inference. */
-async function confirmSpeech(silero: FluidVad, audio: Float32Array, start: number, end: number): Promise<boolean> {
+async function confirmSpeech(
+  silero: FluidVad, audio: Float32Array, start: number, end: number,
+  yieldIfNeeded: () => Promise<void> | undefined,
+): Promise<boolean> {
   silero.reset();
   const from = Math.max(0, start - VALIDATION_PAD_SAMPLES);
   const to = Math.min(audio.length, end + VALIDATION_PAD_SAMPLES);
@@ -411,9 +421,20 @@ async function confirmSpeech(silero: FluidVad, audio: Float32Array, start: numbe
     } finally {
       for (const event of events) event.free();
     }
-    if (offset > from && ((offset - from) / MODEL_FRAME_SAMPLES) % 32 === 0) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    }
+    const pause = yieldIfNeeded();
+    if (pause) await pause;
   }
   return false;
+}
+
+/** Share one wall-clock budget across candidate and confirmation inference. */
+function createInferenceBudget(): () => Promise<void> | undefined {
+  let deadline = performance.now() + INFERENCE_SLICE_MS;
+  return () => {
+    if (performance.now() < deadline) return undefined;
+    return new Promise<void>((resolve) => setTimeout(() => {
+      deadline = performance.now() + INFERENCE_SLICE_MS;
+      resolve();
+    }, 0));
+  };
 }
