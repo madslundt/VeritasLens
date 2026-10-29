@@ -1,4 +1,4 @@
-import { CONVERSATION_KEY, DEFAULT_CONVERSATION, normalizeConversationPreferences, parseAssistanceResponse } from '@veritaslens/core';
+import { CONVERSATION_KEY, DEFAULT_CONVERSATION, mergeConversationDraft, normalizeConversationPreferences, parseAssistanceResponse } from '@veritaslens/core';
 import type { ConversationPreferences } from '@veritaslens/core';
 // src/state/store.ts
 import { createSignal } from 'solid-js';
@@ -1302,14 +1302,23 @@ export function clearDebugEvents(): void {
   setDebugEvents([]);
 }
 
+let conversationWriteChain: Promise<void> = Promise.resolve();
 export async function saveConversationPreferences(setLs: SetLs, value: ConversationPreferences): Promise<boolean> {
-  // An external History save may add notes while Settings has a draft. Do
-  // not silently truncate either set when the merged draft exceeds capacity.
   if (value.contexts.length > 20 || value.presets.length > 12) return false;
-  const conversation = normalizeConversationPreferences(value);
-  const ok = await setLs(CONVERSATION_KEY, JSON.stringify(conversation));
-  if (ok) setSettings(s => ({ ...s, conversation }));
-  return ok;
+  const draft = structuredClone(value);
+  const base = structuredClone(settings().conversation ?? DEFAULT_CONVERSATION);
+  const write = conversationWriteChain.then(async () => {
+    // Merge when this operation reaches storage, after earlier writes have
+    // published. Queuing already serialized snapshots would still lose edits.
+    const merged = mergeConversationDraft(draft, base, settings().conversation ?? DEFAULT_CONVERSATION);
+    if (merged.contexts.length > 20 || merged.presets.length > 12) return false;
+    const conversation = normalizeConversationPreferences(merged);
+    const ok = await setLs(CONVERSATION_KEY, JSON.stringify(conversation));
+    if (ok) setSettings(s => ({ ...s, conversation }));
+    return ok;
+  });
+  conversationWriteChain = write.then(() => undefined, () => undefined);
+  return write;
 }
 export async function updateHistoryEntry(id: string, patch: Partial<Pick<HistoryEntry, 'result' | 'pinned' | 'feedback'>>, setLs: SetLs): Promise<void> {
   const previous = sessionHistory();

@@ -18,6 +18,10 @@ All notable changes to VeritasLens are recorded here. Format loosely follows [Ke
 - Reconcile deleted History entries on glasses while preserving live sessions and surviving detail pages.
 - Cancel periodic and end-of-session summaries throughout voice checks, encoding, provider requests, and final synthesis; abort outstanding work before waiting for HUD shutdown writes.
 
+- Remove deleted moments from active swipe recall, queued result replays, and translation actions as well as the History list.
+- Serialize and rebase overlapping preference writes at commit time so History notes and Settings edits survive each other, including edits made while a save is pending.
+- Cancel pending Speak timers and mid-session summaries on Pause, reconcile late SDK summary-page rebuilds, and reject canceled Prepared assistance before publishing results.
+
 
 ## [0.18.1] — 2026-10-16
 

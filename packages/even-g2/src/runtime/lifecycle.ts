@@ -256,7 +256,11 @@ export async function pauseConversation(): Promise<void> {
   if (!buffer) return;
   const paused = !recordingPaused();
   if (paused) {
+    cancelWearerSpeak();
     autoSummaryInflight?.abort();
+    midSummaryController?.abort();
+    midSummaryController = null;
+    midSummaryLoading = false;
     captionCapture?.stop();
     await cancelConversationAnalysis();
     if (noVoiceStatusTimer) clearTimeout(noVoiceStatusTimer); noVoiceStatusTimer = null;
@@ -265,6 +269,7 @@ export async function pauseConversation(): Promise<void> {
   const ok = await getBridge().audioControl(!paused, settings().micSource === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses);
   if (!ok) { setErrorMessage('Microphone state could not be changed.'); return; }
   setRecordingPaused(paused); syncAutoModeWatcher(); syncCaptionCapture();
+  if (paused && (currentHudPage() === 'mid-summary' || currentHudPage() === 'translation-wearer-speak')) await restoreActivePage();
   setAppPhase('listening'); await setStatus(paused ? 'PAUSED' : 'listening');
   if (currentHudPage() === 'captions') await updateCaptionsPage(liveCaptionText(), paused ? 'Microphone paused' : liveCaptionStatus());
 }
@@ -444,6 +449,7 @@ const MAX_INTERMEDIATE_SUMMARIES = 40;
 type MidSummaryResult = Extract<LensResult, { type: 'session-summary' }>;
 let midSummaryResult: { result: MidSummaryResult; generatedAt: number } | null = null;
 let midSummaryLoading = false;
+let midSummaryGeneration = 0;
 let midSummaryController: AbortController | null = null;
 
 let lastPickerIndex = 0;
@@ -542,8 +548,16 @@ export async function refreshHudPage(): Promise<void> {
   // Phone preference saves must not replace a live session with the picker.
   // The menu includes profile status; other session pages keep their content.
   if (buffer) {
+    const deleted = await refreshHistoryPages(sessionHistory().filter(entry => entry.sessionId === currentSessionId));
+    if (deleted) {
+      cachedExchange = null;
+      pinnedCue = false;
+      if (cueExpiryTimer) clearTimeout(cueExpiryTimer);
+      cueExpiryTimer = null;
+      cancelWearerSpeak();
+      setStateResult(null);
+    }
     if (currentHudPage() === 'menu') await openMenuForCurrentContext();
-    await refreshHistoryPages(sessionHistory().filter(entry => entry.sessionId === currentSessionId));
     if (currentHudPage() === 'history-list') lastHistoryIndex = 0;
     return;
   }
@@ -2063,6 +2077,7 @@ async function runAnalysis(options: { personaId?: string; reuse?: boolean; instr
         result.claims[0].sourceMeta = webCitations[0].domain;
       }
       await stopSpinner();
+      assertCurrentAnalysis();
       rememberDisplayedCue(result);
       setStateResult(result);
       // Decorate the badge with a trailing `°` when grounding was requested
@@ -2650,7 +2665,7 @@ async function startWearerSpeak(): Promise<void> {
  *  `runSayMore` so concurrent fires are coordinated through one path. */
 async function runWearerSpeakAnalyze(): Promise<void> {
   if (!wearerSpeakActive) return;
-  if (!buffer) return;
+  if (!running || recordingPaused() || !buffer) return;
   wearerSpeakActive = false;
   if (wearerSpeakTimeoutTimer) {
     clearTimeout(wearerSpeakTimeoutTimer);
@@ -3019,14 +3034,20 @@ async function runMidSummary(): Promise<void> {
 
   midSummaryController?.abort();
   const controller = new AbortController();
+  const generation = ++midSummaryGeneration;
   midSummaryController = controller;
   midSummaryLoading = true;
-
-  await showMidSummaryPage(true, midSummaryResult?.result ?? null);
 
   let wav: Uint8Array | null = null;
   const summaryBuffer = buffer;
   try {
+    await showMidSummaryPage(true, midSummaryResult?.result ?? null);
+    if (controller.signal.aborted || midSummaryController !== controller) {
+      // A slow SDK rebuild may finish after Pause. Reconcile its loading
+      // page only when no newer summary request owns the view.
+      if (generation === midSummaryGeneration && running && buffer && !leavingActiveSession && currentHudPage() === 'mid-summary') await restoreActivePage();
+      return;
+    }
     if (summaryBuffer) wav = await encodeSnapshotForUpload(summaryBuffer.toLinearPcm(), summaryBuffer, controller.signal);
     const rawText = await callLens({
       wav: wav ?? new Uint8Array(0),

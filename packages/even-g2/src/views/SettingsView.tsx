@@ -582,7 +582,11 @@ export const SettingsView: Component = () => {
   const [draftLanguage, setDraftLanguage] = createSignal<LanguageCode>(settings().responseLanguage);
   const savedConversation = createMemo(() => settings().conversation ?? DEFAULT_CONVERSATION);
   const [draftConversation, setDraftConversation] = createSignal<ConversationPreferences>(structuredClone(savedConversation()));
+  let conversationSavePending = false;
   createEffect(on(savedConversation, (next, previous) => {
+    // Own-save publication is reconciled against the submitted snapshot below;
+    // the old saved baseline cannot distinguish edits reverted while waiting.
+    if (conversationSavePending) return;
     setDraftConversation(draft => structuredClone(mergeConversationDraft(draft, previous ?? DEFAULT_CONVERSATION, next)));
   }, { defer: true }));
   const [draftBuffer, setDraftBuffer] = createSignal<BufferDuration>(settings().bufferDuration);
@@ -1222,14 +1226,29 @@ export const SettingsView: Component = () => {
    * refreshes when both tabs are dirty.
    */
   const onSave = async () => {
+    if (saveState() === 'saving' || conversationSavePending) return;
     if (draftTavilyEnabled() && !draftTavilyKey().trim()) { setKeyError('Add a Tavily API key or turn off Tavily search.'); return; }
     if (customUrlError() || sttDraftError() || fallbackError()) { setKeyError(customUrlError() || sttDraftError() || fallbackError()); return; }
     if (isCustomEndpoint()) setDraftOpenaiKeys((prev) => ({ ...prev, [draftOpenaiBaseUrl()]: draftOpenaiKey() }));
     if (isCustomSttHost(draftSttHost())) setDraftOpenaiKeys((prev) => ({ ...prev, [draftSttHost()]: prev[draftSttHost()] ?? '' }));
+    const conversationSnapshot = structuredClone(draftConversation());
+    const conversationBase = structuredClone(savedConversation());
     setSaveState('saving');
     try {
       const bridge = getBridge();
       const setLs = (k: string, v: string) => bridge.setLocalStorage(k, v);
+      conversationSavePending = true;
+      const reconcileConversationSave = (saved: boolean) => {
+        conversationSavePending = false;
+        setDraftConversation(current => structuredClone(mergeConversationDraft(current, saved ? conversationSnapshot : conversationBase, savedConversation())));
+      };
+      const conversationWrite = saveConversationPreferences(setLs, conversationSnapshot).then(ok => {
+        reconcileConversationSave(ok);
+        return ok;
+      }, error => {
+        reconcileConversationSave(false);
+        throw error;
+      });
       // Meeting-prep returns `{ok, error}` (byte-budget validation), so it
       // runs in parallel with the boolean savers but contributes its own
       // failure path. Resolve to a uniform boolean for the aggregate `ok`
@@ -1317,7 +1336,7 @@ export const SettingsView: Component = () => {
         saveTranscriptMode(setLs, draftTranscriptMode()),
         saveMeetingPrepSections(setLs, prepDraft()),
         saveMeetingPrepWebGrounding(setLs, draftMeetingPrepWebGrounding()),
-        saveConversationPreferences(setLs, draftConversation()),
+        conversationWrite,
       ]);
       if (prepResult.ok) setPrepError('');
       else setPrepError(prepResult.error ?? 'Could not save meeting prep.');
@@ -1333,7 +1352,6 @@ export const SettingsView: Component = () => {
         // have normalized values (e.g. meeting-prep labels are sliced at
         // MEETING_PREP_LABEL_MAX); without this re-seed the draft would
         // retain the un-normalized value and lensDirty would stay true.
-        setDraftConversation(structuredClone(savedConversation()));
         setDraftAutoDisabledLenses(settings().autoDisabledLenses);
         setDraftAudioCompression(settings().audioCompressionEnabled);
         // Auto-mode threshold saves snap+clamp before persisting, so re-seed

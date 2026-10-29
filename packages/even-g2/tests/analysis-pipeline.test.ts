@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   visible: new Map<string, string>(),
   listItems: [] as string[],
   hudWriteBarrier: null as Promise<void> | null,
+  hudRebuildBarrier: null as Promise<void> | null,
 }));
 
 vi.mock('@veritaslens/core', async (importOriginal) => ({
@@ -27,6 +28,7 @@ vi.mock('../src/runtime/bridge', () => ({
   getBridge: () => ({
     createStartUpPageContainer: vi.fn(async () => 0),
     rebuildPageContainer: vi.fn(async (page: { textObject?: Array<{ containerName?: string; content?: string }>; listObject?: Array<{ itemContainer?: { itemName?: string[] } }> }) => {
+      if (mocks.hudRebuildBarrier) await mocks.hudRebuildBarrier;
       mocks.visible.clear();
       mocks.listItems = page.listObject?.flatMap(list => list.itemContainer?.itemName ?? []) ?? [];
       // Record visible content from both in-place updates and page rebuilds.
@@ -62,9 +64,9 @@ vi.mock('../src/runtime/noiseReduction', () => ({
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { DEFAULT_CONVERSATION, AUTO_LENS_CANDIDATES, configureSettings, getPersona } from '@veritaslens/core';
 import { requestConversationHelp, pauseConversation, startConversation, refreshHudPage, startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
-import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState, menuOptionAtIndex, setActiveLayout, showActivePage, isActiveHidden, setLensResult, showHistoryListPage, showHistoryDetailPage, getHistoryListEntries } from '../src/runtime/hud';
+import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState, menuOptionAtIndex, setActiveLayout, showActivePage, isActiveHidden, setLensResult, showHistoryListPage, showHistoryDetailPage, getHistoryListEntries, scrollActiveReason, hasPendingActiveResult } from '../src/runtime/hud';
 import {
-  deleteHistorySession, activePersona, setActivePersona, appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
+  saveMeetingPrepSections, lensResult, deleteHistorySession, activePersona, setActivePersona, appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
   saveAutoDisabledLenses, saveGeminiKey, saveTranscriptMode, saveVoiceGateRmsFloor, saveVoiceTrimEnabled, saveNoiseReductionEnabled,
   recordingPaused, updateHistoryEntry, loadHistory, saveConversationPreferences, sessionHistory, settings, setErrorMessage, saveDiscreet,
 } from '../src/state/store';
@@ -110,6 +112,7 @@ describe('analysis through the gesture/audio pipeline', () => {
     mocks.visible.clear();
     mocks.listItems = [];
     mocks.hudWriteBarrier = null;
+    mocks.hudRebuildBarrier = null;
     configureSettings(settings);
     setErrorMessage(null);
     clearSessionHistory();
@@ -143,6 +146,97 @@ describe('analysis through the gesture/audio pipeline', () => {
   });
 
   afterEach(async () => { await stopHudRuntime(); await drain(); await saveDiscreet(async () => true, false); vi.useRealTimers(); });
+
+  it('removes deleted answers from visible and hidden active recall', async () => {
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    expect(mocks.visible.get('vl-reason')).toContain('Paris');
+    await clearSessionHistory(async () => true);
+    await refreshHudPage();
+    expect(mocks.visible.get('vl-reason') ?? '').not.toContain('Paris');
+    await scrollActiveReason(1);
+    expect(await scrollActiveReason(-1)).toBe('noop');
+    expect(lensResult()).toBeNull();
+  });
+
+  it('does not replay an answer deleted while waiting on the menu', async () => {
+    const pending = deferred<string>();
+    mocks.stream.mockReturnValueOnce(pending.promise);
+    audio(1000); tap(); await drain();
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent);
+    await drain();
+    pending.resolve(answer); await drain();
+    expect(hasPendingActiveResult()).toBe(true);
+    await clearSessionHistory(async () => true);
+    await refreshHudPage();
+    expect(hasPendingActiveResult()).toBe(false);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: 0 } } as EvenHubEvent);
+    await drain();
+    expect([...mocks.visible.values()].join(' ')).not.toContain('Paris');
+    expect(await scrollActiveReason(-1)).toBe('noop');
+  });
+
+  it('cancels pending Speak uploads on pause and does not revive them on resume', async () => {
+    vi.useFakeTimers();
+    await startConversation('translation');
+    await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Hola', translatedText: 'Hello', replyStarters: [] });
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = mocks.listItems.indexOf('Speak →');
+    expect(index).toBeGreaterThanOrEqual(0);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    audio(1000); await pauseConversation();
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(mocks.call).not.toHaveBeenCalled();
+    await pauseConversation();
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(mocks.call).not.toHaveBeenCalled();
+  });
+
+  it('aborts a mid-session summary and ignores its late response after Pause', async () => {
+    vi.useFakeTimers(); audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    vi.setSystemTime(Date.now() + 61000);
+    const pending = deferred<string>(); mocks.call.mockReturnValueOnce(pending.promise);
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = mocks.listItems.findIndex((_, i) => menuOptionAtIndex(i) === 'mid-summary');
+    expect(index).toBeGreaterThanOrEqual(0);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    const signal = mocks.call.mock.calls.at(-1)![0].signal as AbortSignal;
+    await pauseConversation();
+    const aborted = signal.aborted;
+    pending.resolve(JSON.stringify({ title: 'Late summary', summary: 'SHOULD_NOT_APPEAR', topics: [], keyPoints: [] })); await drain();
+    expect(aborted).toBe(true);
+    expect([...mocks.visible.values()].join(' ')).not.toContain('SHOULD_NOT_APPEAR');
+    expect(currentHudPage()).toBe('active');
+  });
+
+  it('restores the paused HUD when a canceled summary page finishes rebuilding', async () => {
+    vi.useFakeTimers(); audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    vi.setSystemTime(Date.now() + 61000);
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = mocks.listItems.findIndex((_, i) => menuOptionAtIndex(i) === 'mid-summary');
+    const page = deferred<void>(); mocks.hudRebuildBarrier = page.promise;
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    await pauseConversation();
+    page.resolve(); await drain(); mocks.hudRebuildBarrier = null;
+    expect(recordingPaused()).toBe(true);
+    expect(currentHudPage()).toBe('active');
+    expect(mocks.call).not.toHaveBeenCalled();
+  });
+
+  it('discards canceled Prepared assistance after a slow spinner write', async () => {
+    await saveMeetingPrepSections(async () => true, [{ id: 'general', label: '', body: 'Review a project.' }]);
+    const barrier = deferred<void>();
+    mocks.stream.mockImplementationOnce(async () => {
+      mocks.hudWriteBarrier = barrier.promise;
+      return JSON.stringify({ answer: 'CANCELED_RESULT', source: '' });
+    });
+    audio(1000);
+    const analysis = requestConversationHelp('meeting-prep', undefined, false); await drain();
+    const change = startConversation('eli5'); await drain();
+    barrier.resolve(); await change; await analysis; await drain();
+    expect(activePersona()).toBe('eli5');
+    expect(sessionHistory()).toHaveLength(0);
+    expect(lensResult()?.type).not.toBe('meeting-prep');
+  });
 
   it('restores listening after switching lenses while a request is in flight', async () => {
     const pending = deferred<string>();

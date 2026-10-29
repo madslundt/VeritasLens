@@ -66,6 +66,8 @@ import {
   pickerEntryAtIndex,
   showSpecializedPickerPage,
   specializedPickerEntryAtIndex,
+  refreshHistoryPages,
+  restoreActivePage,
   resetHudSessionState,
   scrollActiveReason,
   scrollHistoryDetail,
@@ -1035,6 +1037,33 @@ describe('session-wide swipe scroll', () => {
       result: { type: 'fact-check', claims: [{ quote: '', verdict: opts.verdict, claim: opts.claim, reason: opts.reason ?? 'r' }] },
     };
   }
+
+  it('removes deleted recall pages while preserving surviving answers', async () => {
+    await bootstrapHud(); await showActivePage(getPersona('fact-checker')!);
+    const kept = entry({ id: 'kept', verdict: 'TRUE', claim: 'KEEP', reason: 'SURVIVING_ANSWER' });
+    const removed = entry({ id: 'removed', verdict: 'TRUE', claim: 'REMOVE', reason: 'DELETED_ANSWER' });
+    await setLensResult(removed.result, { sessionEntries: [kept, removed], newEntryIds: new Set(['removed']) });
+    expect(await refreshHistoryPages([kept])).toBe(true);
+    expect(visibleHudText('vl-reason') ?? '').not.toContain('DELETED_ANSWER');
+    expect(await scrollActiveReason(-1)).toBe('revealed');
+    expect(visibleHudText('vl-reason')).toContain('SURVIVING_ANSWER');
+    await scrollActiveReason(1); await scrollActiveReason(-1);
+    expect(visibleHudText('vl-reason') ?? '').not.toContain('DELETED_ANSWER');
+  });
+
+  it('keeps persisted session context when replaying a result received on the menu', async () => {
+    await bootstrapHud(); await showActivePage(getPersona('fact-checker')!);
+    const first = entry({ id: 'first', verdict: 'TRUE', claim: 'FIRST', reason: 'FIRST_ANSWER' });
+    const next = entry({ id: 'next', verdict: 'TRUE', claim: 'NEXT', reason: 'NEXT_ANSWER' });
+    await setLensResult(first.result, { sessionEntries: [first], newEntryIds: new Set(['first']) });
+    await showMenuPage();
+    await setLensResult(next.result, { sessionEntries: [first, next], newEntryIds: new Set(['next']) });
+    await refreshHistoryPages([first, next]);
+    await restoreActivePage();
+    expect(visibleHudText('vl-reason')).toContain('NEXT_ANSWER');
+    await scrollActiveReason(-1);
+    expect(visibleHudText('vl-reason')).toContain('FIRST_ANSWER');
+  });
 
   it('first analysis: 1/N within-analysis, scroll-up at first claim noop (single analysis)', async () => {
     await bootstrapHud('picker');

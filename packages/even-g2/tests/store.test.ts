@@ -30,7 +30,7 @@ import {
   sessionHistory,
   settings,
 } from '../src/state/store';
-import { DEFAULT_BUFFER_DURATION, DEFAULT_GEMINI_AUTO_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_LANGUAGE, DEFAULT_MIC_SOURCE } from '@veritaslens/core';
+import { CONVERSATION_KEY, DEFAULT_CONVERSATION, DEFAULT_BUFFER_DURATION, DEFAULT_GEMINI_AUTO_MODEL, DEFAULT_GEMINI_MODEL, DEFAULT_LANGUAGE, DEFAULT_MIC_SOURCE } from '@veritaslens/core';
 import type { HistoryEntry } from '@veritaslens/core';
 
 const HISTORY_BYTE_BUDGET = 400 * 1024;
@@ -474,6 +474,55 @@ describe('pushHistoryEntry — in-memory cap', () => {
 });
 
 describe('conversation review persistence', () => {
+  it.each(['history-first', 'settings-first'] as const)('merges overlapping Settings and History writes: %s', async order => {
+    const ls = fakeLocalStorage();
+    await saveConversationPreferences(ls.set, structuredClone(DEFAULT_CONVERSATION));
+    const base = structuredClone(settings().conversation!);
+    const withNote = { ...base, contexts: [{ id: 'note', label: 'History', body: 'Remember this' }] };
+    const withGoal = { ...base, goal: 'Keep my goal', profile: 'work' as const };
+    let release!: () => void;
+    const firstWrite = new Promise<void>(resolve => { release = resolve; });
+    let calls = 0;
+    const write = async (key: string, value: string) => {
+      if (++calls === 1) await firstWrite;
+      return ls.set(key, value);
+    };
+    const first = saveConversationPreferences(write, order === 'history-first' ? withNote : withGoal);
+    const second = saveConversationPreferences(write, order === 'history-first' ? withGoal : withNote);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    release();
+    expect(await first).toBe(true);
+    expect(await second).toBe(true);
+    expect(settings().conversation!.goal).toBe('Keep my goal');
+    expect(settings().conversation!.profile).toBe('work');
+    expect(settings().conversation!.contexts).toEqual(withNote.contexts);
+    expect(JSON.parse(ls.data.get(CONVERSATION_KEY)!)).toEqual(settings().conversation);
+  });
+
+  it('continues queued preference writes after a failed write', async () => {
+    const ls = fakeLocalStorage();
+    await saveConversationPreferences(ls.set, structuredClone(DEFAULT_CONVERSATION));
+    const base = structuredClone(settings().conversation!);
+    const failed = saveConversationPreferences(async () => { throw new Error('Storage offline'); }, { ...base, goal: 'Not saved' });
+    const next = saveConversationPreferences(ls.set, { ...base, goal: 'Recovered' });
+    await expect(failed).rejects.toThrow('Storage offline');
+    expect(await next).toBe(true);
+    expect(settings().conversation!.goal).toBe('Recovered');
+  });
+
+  it('rejects over-capacity queued merges without discarding the earlier saved note', async () => {
+    const ls = fakeLocalStorage();
+    const initial = { ...structuredClone(DEFAULT_CONVERSATION), contexts: Array.from({ length: 19 }, (_, i) => ({ id: String(i), label: `Note ${i}`, body: 'Saved' })) };
+    await saveConversationPreferences(ls.set, initial);
+    const first = saveConversationPreferences(ls.set, { ...initial, contexts: [...initial.contexts, { id: 'history', label: 'History', body: 'Keep me' }] });
+    const second = saveConversationPreferences(ls.set, { ...initial, contexts: [...initial.contexts, { id: 'draft', label: 'Draft', body: 'Unsaved' }] });
+    expect(await first).toBe(true);
+    expect(await second).toBe(false);
+    expect(settings().conversation!.contexts).toHaveLength(20);
+    expect(settings().conversation!.contexts.at(-1)!.id).toBe('history');
+    expect(JSON.parse(ls.data.get(CONVERSATION_KEY)!).contexts).toEqual(settings().conversation!.contexts);
+  });
+
   it('rejects over-capacity merged notes without silently truncating or writing them', async () => {
     const previous = settings().conversation!;
     const set = vi.fn(async () => true);

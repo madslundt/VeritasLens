@@ -235,7 +235,7 @@ let historyDetailIndex = -1;
 // they opened the menu while analysis was in flight). Consumed when the
 // active page is next rebuilt, so the answer they were waiting for is
 // surfaced on return instead of being silently dropped.
-let pendingActiveResult: LensResult | null = null;
+let pendingActiveResult: { result: LensResult; context?: SetLensResultContext } | null = null;
 // Most recent Translate result for this session. Cached separately from
 // `sessionEntries` so the menu's "Reply…" item can resolve a picker page
 // without having to walk the entry list and find the latest translation —
@@ -429,7 +429,7 @@ export async function showActivePage(persona: Persona): Promise<void> {
   if (pendingActiveResult) {
     const replay = pendingActiveResult;
     pendingActiveResult = null;
-    await setLensResult(replay);
+    await setLensResult(replay.result, replay.context);
   }
 }
 
@@ -544,8 +544,48 @@ export async function restoreHistoryListPage(): Promise<void> {
   await showHistoryListPage(cachedHistoryEntries);
 }
 
+/** Drop deleted moments from active recall and queued results. */
+async function reconcileActiveHistory(entries: HistoryEntry[]): Promise<boolean> {
+  const validIds = new Set(entries.map(entry => entry.id));
+  const currentId = currentActiveEntry()?.id;
+  const retained = sessionEntries.filter(entry => validIds.has(entry.id));
+  let deleted = retained.length !== sessionEntries.length;
+  if (pendingActiveResult?.context) {
+    deleted ||= pendingActiveResult.context.sessionEntries.some(entry => !validIds.has(entry.id));
+    const newEntryIds = new Set([...pendingActiveResult.context.newEntryIds].filter(id => validIds.has(id)));
+    if (newEntryIds.size === 0) {
+      pendingActiveResult = null;
+      deleted = true;
+    } else pendingActiveResult.context = { sessionEntries: entries, newEntryIds };
+  }
+  if (deleted) {
+    sessionEntries = retained;
+    recomputeSessionPages();
+    latestAnalysisRange = null;
+    const index = sessionEntries.findIndex(entry => entry.id === currentId);
+    sessionPageIndex = index < 0 ? 0 : firstPageIndexForEntry(index);
+    const translation = [...entries].reverse().find(entry => entry.result.type === 'translation');
+    lastTranslationResult = translation?.result.type === 'translation' ? translation.result : null;
+    activeTranslationStarter = null;
+    lastTranslationStarterIndex = 0;
+    if (index < 0) {
+      if (currentPage === 'active') await hideActiveResultInPlace();
+      else {
+        activeAnswerCaption = undefined;
+        activeHidden = true;
+        recordingDotEligible = true;
+        if (isDiscreetLayout(activeLayout)) setActiveLayout('discreet-minimal');
+        if (currentPage === 'translation-picker' || currentPage === 'translation-teleprompter' || currentPage === 'translation-wearer-speak') await restoreActivePage();
+      }
+    } else if (currentPage === 'active' && !activeHidden) await renderActivePage();
+  }
+  return deleted;
+}
+
 /** Reconcile phone History edits without leaving the wearer's live session. */
-export async function refreshHistoryPages(entries: HistoryEntry[]): Promise<void> {
+export async function refreshHistoryPages(entries: HistoryEntry[]): Promise<boolean> {
+  await streamingWrite;
+  const deleted = await reconcileActiveHistory(entries);
   const shown = cachedHistoryEntries[historyDetailIndex];
   cachedHistoryEntries = entries;
   if (currentPage === 'history-list') await showHistoryListPage(entries);
@@ -559,6 +599,7 @@ export async function refreshHistoryPages(entries: HistoryEntry[]): Promise<void
       await showHistoryListPage(entries);
     }
   }
+  return deleted;
 }
 
 /** Resume the previously-active persona page after the menu. */
@@ -814,7 +855,7 @@ export async function setLensResult(result: LensResult | null, context?: SetLens
   if (currentPage !== 'active' && currentPage !== 'history-detail') {
     // User is off the active page (typically on the menu after opening it
     // mid-analysis). Stash the answer so the next showActivePage replays it.
-    if (result) pendingActiveResult = result;
+    if (result) pendingActiveResult = { result, context };
     return;
   }
 
