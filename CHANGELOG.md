@@ -12,6 +12,10 @@
 - Improve VAD responsiveness with elapsed-time inference yielding and a fast path for native 16 kHz PCM.
 - Add an audio lab with real WASM inference, reference fixtures, resampling and fidelity checks, timing reports, and cancellation-safe browser workers.
 - Merge unsaved conversation edits with newly saved History notes, and reject over-capacity merges without silently dropping notes.
+- Fix live lens changes so canceled requests return to listening and pending Translate/Speak timers cannot upload after another lens is selected.
+- Reconcile deleted History entries on glasses while preserving live sessions and surviving detail pages.
+- Cancel periodic and end-of-session summaries throughout voice checks, encoding, provider requests, and final synthesis; abort outstanding work before waiting for HUD shutdown writes.
+
 
 ## 0.18.1 — 2026-10-16
 

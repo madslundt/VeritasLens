@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   upgrades: [] as Array<{ containerName: string; content: string }>,
   visible: new Map<string, string>(),
   listItems: [] as string[],
+  hudWriteBarrier: null as Promise<void> | null,
 }));
 
 vi.mock('@veritaslens/core', async (importOriginal) => ({
@@ -38,6 +39,7 @@ vi.mock('../src/runtime/bridge', () => ({
       return true;
     }),
     textContainerUpgrade: vi.fn(async (upgrade: { containerName: string; content: string }) => {
+      if (mocks.hudWriteBarrier) await mocks.hudWriteBarrier;
       mocks.upgrades.push(upgrade);
       mocks.visible.set(upgrade.containerName, upgrade.content);
       return true;
@@ -60,9 +62,9 @@ vi.mock('../src/runtime/noiseReduction', () => ({
 import { OsEventTypeList } from '@evenrealities/even_hub_sdk';
 import { DEFAULT_CONVERSATION, AUTO_LENS_CANDIDATES, configureSettings, getPersona } from '@veritaslens/core';
 import { requestConversationHelp, pauseConversation, startConversation, refreshHudPage, startHudRuntime, stopHudRuntime } from '../src/runtime/lifecycle';
-import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState, menuOptionAtIndex, setActiveLayout, showActivePage, isActiveHidden } from '../src/runtime/hud';
+import { _resetHudBootstrapForTesting, currentHudPage, getLensStreamingState, menuOptionAtIndex, setActiveLayout, showActivePage, isActiveHidden, setLensResult, showHistoryListPage, showHistoryDetailPage, getHistoryListEntries } from '../src/runtime/hud';
 import {
-  activePersona, setActivePersona, appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
+  deleteHistorySession, activePersona, setActivePersona, appPhase, clearSessionHistory, errorMessage, saveAutoSummaryEnabled,
   saveAutoDisabledLenses, saveGeminiKey, saveTranscriptMode, saveVoiceGateRmsFloor, saveVoiceTrimEnabled, saveNoiseReductionEnabled,
   recordingPaused, updateHistoryEntry, loadHistory, saveConversationPreferences, sessionHistory, settings, setErrorMessage, saveDiscreet,
 } from '../src/state/store';
@@ -107,6 +109,7 @@ describe('analysis through the gesture/audio pipeline', () => {
     mocks.upgrades.length = 0;
     mocks.visible.clear();
     mocks.listItems = [];
+    mocks.hudWriteBarrier = null;
     configureSettings(settings);
     setErrorMessage(null);
     clearSessionHistory();
@@ -140,6 +143,184 @@ describe('analysis through the gesture/audio pipeline', () => {
   });
 
   afterEach(async () => { await stopHudRuntime(); await drain(); await saveDiscreet(async () => true, false); vi.useRealTimers(); });
+
+  it('restores listening after switching lenses while a request is in flight', async () => {
+    const pending = deferred<string>();
+    mocks.stream.mockReturnValueOnce(pending.promise);
+    audio(1000); tap(); await drain();
+    expect(appPhase()).toBe('thinking');
+    await startConversation('eli5');
+    pending.reject(new DOMException('Cancelled', 'AbortError'));
+    await drain();
+    expect(activePersona()).toBe('eli5');
+    expect(appPhase()).toBe('listening');
+    expect(currentHudPage()).toBe('active');
+  });
+
+  it('cancels the pending Speak timer when selecting another lens', async () => {
+    vi.useFakeTimers();
+    await startConversation('translation');
+    await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Hola', translatedText: 'Hello', replyStarters: [] });
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent);
+    await drain();
+    const speakIndex = mocks.listItems.indexOf('Speak →');
+    expect(speakIndex).toBeGreaterThanOrEqual(0);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: speakIndex } } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('translation-wearer-speak');
+    await startConversation('eli5');
+    audio(1000);
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(activePersona()).toBe('eli5');
+    expect(mocks.call).not.toHaveBeenCalled();
+    expect(mocks.stream).not.toHaveBeenCalled();
+  });
+
+  it.each(['list', 'detail'] as const)('invalidates cleared HUD history from the %s page without ending the session', async page => {
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    await showHistoryListPage(sessionHistory());
+    if (page === 'detail') await showHistoryDetailPage(sessionHistory()[0]!);
+    await clearSessionHistory(async () => true);
+    await refreshHudPage();
+    expect(getHistoryListEntries()).toHaveLength(0);
+    expect(currentHudPage()).toBe('history-list');
+    expect(appPhase()).toBe('displaying');
+  });
+
+  it('removes a deleted session from HUD history but preserves a remaining detail on preference refresh', async () => {
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    const entry = sessionHistory()[0]!;
+    await showHistoryListPage(sessionHistory());
+    await showHistoryDetailPage(entry);
+    await refreshHudPage();
+    expect(currentHudPage()).toBe('history-detail');
+    expect(getHistoryListEntries()).toEqual([entry]);
+    await deleteHistorySession(entry.sessionId, async () => true);
+    await refreshHudPage();
+    expect(getHistoryListEntries()).toHaveLength(0);
+    expect(currentHudPage()).toBe('history-list');
+  });
+
+  const summary = JSON.stringify({ title: 'Conversation', summary: 'A short summary.', topics: ['Paris'], keyPoints: ['Paris is in France'] });
+  async function exitWithSummary() {
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent);
+    await drain();
+    const exitIndex = mocks.listItems.findIndex((_, i) => menuOptionAtIndex(i) === 'exit');
+    expect(exitIndex).toBeGreaterThanOrEqual(0);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: exitIndex } } as EvenHubEvent);
+    await drain();
+    expect(currentHudPage()).toBe('picker');
+  }
+
+  it.each(['stop', 'new-session'] as const)('cancels stop-time summary before the voice gate completes on %s', async action => {
+    vi.useFakeTimers();
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    await saveAutoSummaryEnabled(async () => true, true);
+    vi.setSystemTime(Date.now() + 61000);
+    const gate = deferred<VoiceBufferAnalysis>();
+    mocks.gate.mockReturnValueOnce(gate.promise);
+    mocks.call.mockClear();
+    await exitWithSummary();
+    expect(mocks.gate).toHaveBeenCalledTimes(2);
+    if (action === 'stop') await stopHudRuntime();
+    else await startConversation('fact-checker');
+    gate.resolve(voice); await drain();
+    expect(mocks.call).not.toHaveBeenCalled();
+    expect(sessionHistory()).toHaveLength(1);
+  });
+
+  it('does not persist a late stop-time summary after runtime shutdown', async () => {
+    vi.useFakeTimers();
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    await saveAutoSummaryEnabled(async () => true, true);
+    vi.setSystemTime(Date.now() + 61000);
+    const pending = deferred<string>();
+    mocks.call.mockReturnValueOnce(pending.promise);
+    await exitWithSummary();
+    const signal = mocks.call.mock.calls.at(-1)![0].signal as AbortSignal;
+    await stopHudRuntime();
+    expect(signal.aborted).toBe(true);
+    pending.resolve(summary); await drain();
+    expect(sessionHistory()).toHaveLength(1);
+  });
+
+  it('cancels a periodic summary that is still checking for voice when paused', async () => {
+    vi.useFakeTimers();
+    await stopHudRuntime();
+    await saveAutoSummaryEnabled(async () => true, true);
+    await startConversation('fact-checker');
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    const gate = deferred<VoiceBufferAnalysis>();
+    mocks.gate.mockReturnValueOnce(gate.promise);
+    mocks.call.mockClear();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(mocks.gate).toHaveBeenCalledTimes(2);
+    await pauseConversation();
+    gate.resolve(voice); await drain();
+    expect(recordingPaused()).toBe(true);
+    expect(mocks.call).not.toHaveBeenCalled();
+  });
+
+  it('cancels summaries before shutdown waits for a slow HUD write', async () => {
+    vi.useFakeTimers();
+    await stopHudRuntime();
+    await saveAutoSummaryEnabled(async () => true, true);
+    await startConversation('fact-checker');
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    const gate = deferred<VoiceBufferAnalysis>();
+    mocks.gate.mockReturnValueOnce(gate.promise);
+    mocks.call.mockClear();
+    await vi.advanceTimersByTimeAsync(60000);
+    const hud = deferred<void>();
+    mocks.hudWriteBarrier = hud.promise;
+    const shutdown = stopHudRuntime();
+    gate.resolve(voice); await drain();
+    const callsDuringShutdown = mocks.call.mock.calls.length;
+    hud.resolve(); await shutdown;
+    mocks.hudWriteBarrier = null;
+    expect(callsDuringShutdown).toBe(0);
+    expect(mocks.call).not.toHaveBeenCalled();
+  });
+
+  it('keeps the microphone paused when switching lenses', async () => {
+    await pauseConversation();
+    await startConversation('eli5');
+    expect(recordingPaused()).toBe(true);
+    expect(appPhase()).toBe('listening');
+    expect(activePersona()).toBe('eli5');
+    audio(1000); tap(); await drain();
+    expect(mocks.call).not.toHaveBeenCalled();
+    expect(mocks.stream).not.toHaveBeenCalled();
+  });
+
+  it.each(['complete', 'cancel'] as const)('keeps one stop-time cancellation signal through the final synthesis: %s', async outcome => {
+    vi.useFakeTimers();
+    await stopHudRuntime();
+    await saveAutoSummaryEnabled(async () => true, true);
+    await startConversation('fact-checker');
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    mocks.call.mockResolvedValueOnce(summary);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(mocks.call).toHaveBeenCalledTimes(1);
+    const pending = deferred<string>();
+    mocks.call.mockReturnValueOnce(pending.promise);
+    await exitWithSummary();
+    if (outcome === 'cancel') await startConversation('fact-checker');
+    pending.resolve(summary); await drain();
+    expect(sessionHistory().map(entry => entry.result.type)).toEqual(outcome === 'cancel'
+      ? ['fact-check'] : ['fact-check', 'session-summary', 'session-summary']);
+  });
+
+  it('still saves a successful stop-time summary', async () => {
+    vi.useFakeTimers();
+    audio(1000); await requestConversationHelp('fact-checker', undefined, false);
+    await saveAutoSummaryEnabled(async () => true, true);
+    vi.setSystemTime(Date.now() + 61000);
+    mocks.call.mockResolvedValueOnce(summary);
+    await exitWithSummary();
+    await drain();
+    expect(sessionHistory().map(entry => entry.result.type)).toEqual(['fact-check', 'session-summary']);
+  });
 
   it.each([false, true])('routes up/down, click, and menu Back to answers or dot-only listening (discreet=%s)', async (discreet) => {
     await saveDiscreet(async () => true, discreet);

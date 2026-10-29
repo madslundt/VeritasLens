@@ -90,6 +90,7 @@ import {
   resetHudSessionState,
   restoreActivePage,
   restoreHistoryListPage,
+  refreshHistoryPages,
   scrollActiveReason,
   scrollHistoryDetail,
   seedMenuSpinnerFrame,
@@ -230,7 +231,20 @@ export async function startConversation(personaId?: string): Promise<void> {
   if (!running) await startHudRuntime();
   const error = providerConfigurationError(settings());
   if (error) { setErrorMessage(error); return; }
-  if (buffer) { if (personaId) { await cancelConversationAnalysis(); setActivePersona(personaId); } await restoreActivePage(); return; }
+  if (buffer) {
+    if (personaId) {
+      const persona = getPersona(personaId);
+      if (!persona) { setErrorMessage(`Unknown lens: ${personaId}`); return; }
+      cancelWearerSpeak();
+      await cancelConversationAnalysis();
+      if (!buffer || leavingActiveSession) return;
+      setActivePersona(personaId);
+      setAppPhase('listening');
+      await setStatus(recordingPaused() ? 'PAUSED' : 'listening');
+      await showActivePage(persona);
+    } else await restoreActivePage();
+    return;
+  }
   await enterActiveSession(personaId ?? activePersona());
 }
 async function cancelConversationAnalysis(): Promise<void> {
@@ -242,10 +256,11 @@ export async function pauseConversation(): Promise<void> {
   if (!buffer) return;
   const paused = !recordingPaused();
   if (paused) {
+    autoSummaryInflight?.abort();
+    captionCapture?.stop();
     await cancelConversationAnalysis();
     if (noVoiceStatusTimer) clearTimeout(noVoiceStatusTimer); noVoiceStatusTimer = null;
     if (errClearTimer) clearTimeout(errClearTimer); errClearTimer = null;
-    captionCapture?.stop(); autoSummaryInflight?.abort();
   }
   const ok = await getBridge().audioControl(!paused, settings().micSource === 'phone' ? AudioInputSource.Phone : AudioInputSource.Glasses);
   if (!ok) { setErrorMessage('Microphone state could not be changed.'); return; }
@@ -528,6 +543,8 @@ export async function refreshHudPage(): Promise<void> {
   // The menu includes profile status; other session pages keep their content.
   if (buffer) {
     if (currentHudPage() === 'menu') await openMenuForCurrentContext();
+    await refreshHistoryPages(sessionHistory().filter(entry => entry.sessionId === currentSessionId));
+    if (currentHudPage() === 'history-list') lastHistoryIndex = 0;
     return;
   }
   await showPickerPage();
@@ -537,20 +554,18 @@ export async function stopHudRuntime(): Promise<void> {
   stopConversationCapture();
   if (!running) return;
   running = false;
+  // Cancel the detached chain before any asynchronous teardown can yield.
+  finalSummaryInflight?.abort();
+  finalSummaryInflight = null;
   gameLocationController?.abort();
   gameLocationController = null;
   stopSettingsWatcher();
-  await stopSpinner();
   // Abort the auto-summary tick BEFORE clearing the timer, so a tick already
   // mid-fetch when shutdown begins doesn't keep its network call (and the WAV
   // / base64 closures behind it) alive past teardown.
   autoSummaryInflight?.abort();
   autoSummaryInflight = null;
   stopAutoSummaryTimer();
-  // Same reasoning for the detached final-summary call: abort it so its WAV
-  // closure can be GC'd immediately rather than living until Gemini responds.
-  finalSummaryInflight?.abort();
-  finalSummaryInflight = null;
   // System shutdown deliberately discards any accumulated intermediate
   // summaries — firing a Gemini call here would race the runtime teardown
   // (no reliable way to complete the fetch + localStorage write), so the
@@ -576,6 +591,7 @@ export async function stopHudRuntime(): Promise<void> {
   // Drop any in-flight game session along with its abort controller so the
   // next HUD start sees a clean slate.
   teardownGame();
+  await stopSpinner();
   if (noVoiceStatusTimer) {
     clearTimeout(noVoiceStatusTimer);
     noVoiceStatusTimer = null;
@@ -2909,7 +2925,7 @@ function buildMidSummaryMenuItems(): MenuItem[] {
 }
 
 async function runAutoSummary(): Promise<void> {
-  if (recordingPaused()) return;
+  if (!running || recordingPaused()) return;
   if (!buffer || buffer.bytesBuffered === 0) return;
   // Skip when the active provider is not configured — the facade would throw
   // and we'd just be burning Silero inference time before discovering that.
@@ -2922,12 +2938,6 @@ async function runAutoSummary(): Promise<void> {
   // skipping the API call here is pure upside.
   const summaryBuffer = buffer;
   const linearPcm = summaryBuffer.toLinearPcm();
-  const summaryFloor = settings().voiceGateRmsFloor;
-  if (summaryFloor > 0) {
-    const va = await analyzeBufferForVoice(linearPcm, summaryBuffer.sampleRate, summaryFloor);
-    if (va.totalFrames > 0 && va.voiceFrames === 0) return;
-  }
-  if (buffer !== summaryBuffer) return;
   // Per-tick abort handle so leaveActiveSession / stopHudRuntime can cancel
   // a tick mid-fetch. The identity check on success ensures we don't push a
   // result that arrived after an exit reset the accumulator.
@@ -2936,7 +2946,14 @@ async function runAutoSummary(): Promise<void> {
   autoSummaryInflight = controller;
   let wav: Uint8Array | null = null;
   try {
+    const summaryFloor = settings().voiceGateRmsFloor;
+    if (summaryFloor > 0) {
+      const va = await analyzeBufferForVoice(linearPcm, summaryBuffer.sampleRate, summaryFloor);
+      if (va.totalFrames > 0 && va.voiceFrames === 0) return;
+    }
+    if (controller.signal.aborted || !running || recordingPaused() || buffer !== summaryBuffer) return;
     wav = await encodeSnapshotForUpload(linearPcm, summaryBuffer, controller.signal);
+    if (controller.signal.aborted || !running || recordingPaused() || buffer !== summaryBuffer) return;
     const rawText = await callLens({
       wav,
       prompt: buildSessionSummaryPrompt(settings().responseLanguage),
@@ -3109,40 +3126,44 @@ function captureStopTimeInputs(): StopTimeInputs | null {
  *   it would just duplicate the last tick.
  */
 async function runStopTimeSummaries(inputs: StopTimeInputs): Promise<void> {
-  // Same gate as runAutoSummary: no summary for a session shorter than the
-  // minimum, or one that produced zero analyses. Skipping here avoids the
-  // 'generating' badge flash and the last-tick Gemini call.
-  if (!canRunSummary()) return;
+  if (!running || inputs.sessionId !== currentSessionId || !canRunSummary()) return;
 
-  let lastTick: IntermediateSummary | null = null;
-
-  if (inputs.linearPcm) {
-    const stopFloor = settings().voiceGateRmsFloor;
-    const hasVoice = stopFloor > 0
-      ? (await analyzeBufferForVoice(inputs.linearPcm, inputs.sampleRate, stopFloor)).voiceFrames > 0
-      : true;
-    if (hasVoice) {
-      await setSummaryBadgeState('generating');
-      lastTick = await runLastTickSummary(inputs);
+  // One controller covers the voice gate, tail upload, and final synthesis.
+  // Register it before the first await so stop/new-session can cancel every stage.
+  finalSummaryInflight?.abort();
+  const controller = new AbortController();
+  finalSummaryInflight = controller;
+  const { signal } = controller;
+  try {
+    let lastTick: IntermediateSummary | null = null;
+    if (inputs.linearPcm) {
+      const stopFloor = settings().voiceGateRmsFloor;
+      const hasVoice = stopFloor > 0
+        ? (await analyzeBufferForVoice(inputs.linearPcm, inputs.sampleRate, stopFloor)).voiceFrames > 0
+        : true;
+      if (signal.aborted) return;
+      if (hasVoice) {
+        await setSummaryBadgeState('generating');
+        if (signal.aborted) return;
+        lastTick = await runLastTickSummary(inputs, signal);
+      }
     }
+    if (signal.aborted) return;
+    if (inputs.priorIntermediates.length === 0) {
+      if (lastTick) await setSummaryBadgeState('ready');
+      return;
+    }
+    const allIntermediates = lastTick
+      ? [...inputs.priorIntermediates, lastTick]
+      : inputs.priorIntermediates;
+    await runFinalSummary({ sessionId: inputs.sessionId, intermediates: allIntermediates }, signal);
+  } catch (err) {
+    if (signal.aborted || (err as Error)?.name === 'AbortError') return;
+    pushDebugEvent({ label: 'stop-summary-fail', detail: err instanceof Error ? err.message : String(err) });
+    await setSummaryBadgeState('idle');
+  } finally {
+    if (finalSummaryInflight === controller) finalSummaryInflight = null;
   }
-
-  if (inputs.priorIntermediates.length === 0) {
-    // Only the last tick fired — synthesising from a single intermediate
-    // would just duplicate it. Flip the badge to ready so the picker reflects
-    // that the summary is done.
-    if (lastTick) await setSummaryBadgeState('ready');
-    return;
-  }
-
-  const allIntermediates = lastTick
-    ? [...inputs.priorIntermediates, lastTick]
-    : inputs.priorIntermediates;
-
-  await runFinalSummary({
-    sessionId: inputs.sessionId,
-    intermediates: allIntermediates,
-  });
 }
 
 /**
@@ -3151,24 +3172,23 @@ async function runStopTimeSummaries(inputs: StopTimeInputs): Promise<void> {
  * step can fold it in.
  */
 async function runLastTickSummary(
-  inputs: StopTimeInputs,
+  inputs: StopTimeInputs, signal: AbortSignal,
 ): Promise<IntermediateSummary | null> {
-  if (!inputs.linearPcm) return null;
-  const controller = new AbortController();
-  finalSummaryInflight = controller;
+  if (!inputs.linearPcm || signal.aborted) return null;
   try {
     const wav = await encodeSnapshotForUpload(inputs.linearPcm, {
       sampleRate: inputs.sampleRate,
       bitsPerSample: inputs.bitsPerSample,
       channels: inputs.channels,
-    }, controller.signal);
+    }, signal);
+    if (signal.aborted) return null;
     const rawText = await callLens({
       wav,
       prompt: buildSessionSummaryPrompt(inputs.language),
       schema: SESSION_SUMMARY_SCHEMA,
-      signal: controller.signal,
+      signal,
     });
-    if (controller.signal.aborted) return null;
+    if (signal.aborted) return null;
     const result = parseSessionSummaryResponse(rawText);
     if (result.type !== 'session-summary' || result.summary.trim().length === 0) {
       return null;
@@ -3192,14 +3212,12 @@ async function runLastTickSummary(
       quote: result.quote,
     };
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError') return null;
+    if (signal.aborted || (err as Error)?.name === 'AbortError') return null;
     pushDebugEvent({
       label: 'last-tick-summary-fail',
       detail: err instanceof Error ? err.message : String(err),
     });
     return null;
-  } finally {
-    if (finalSummaryInflight === controller) finalSummaryInflight = null;
   }
 }
 
@@ -3254,11 +3272,11 @@ function synthesizeSummaryFromIntermediates(
  *
  * Best-effort; failures land in pushDebugEvent and never throw.
  */
-async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
-  const controller = new AbortController();
-  finalSummaryInflight = controller;
-  await setSummaryBadgeState('generating');
+async function runFinalSummary(inputs: FinalSummaryInputs, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return;
   try {
+    await setSummaryBadgeState('generating');
+    if (signal.aborted) return;
     // The last-tick audio summary is already written by runLastTickSummary at
     // this point, so the final synthesis consolidates intermediates only — no
     // fresh audio call. Skip entirely when no intermediates exist (e.g. when
@@ -3269,10 +3287,6 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
         label: 'final-summary-skip',
         detail: 'no intermediates at session end',
       });
-      await setSummaryBadgeState('idle');
-      return;
-    }
-    if (controller.signal.aborted) {
       await setSummaryBadgeState('idle');
       return;
     }
@@ -3291,16 +3305,14 @@ async function runFinalSummary(inputs: FinalSummaryInputs): Promise<void> {
       tags: extractTags(synth),
     }, (k, v) => getBridge().setLocalStorage(k, v));
     await reloadHistoryFromStorage();
-    await setSummaryBadgeState('ready');
+    if (!signal.aborted) await setSummaryBadgeState('ready');
   } catch (err) {
-    if ((err as Error)?.name === 'AbortError') return;
+    if (signal.aborted || (err as Error)?.name === 'AbortError') return;
     pushDebugEvent({
       label: 'final-summary-fail',
       detail: err instanceof Error ? err.message : String(err),
     });
     await setSummaryBadgeState('idle');
-  } finally {
-    if (finalSummaryInflight === controller) finalSummaryInflight = null;
   }
 }
 

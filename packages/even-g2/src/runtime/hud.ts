@@ -544,6 +544,23 @@ export async function restoreHistoryListPage(): Promise<void> {
   await showHistoryListPage(cachedHistoryEntries);
 }
 
+/** Reconcile phone History edits without leaving the wearer's live session. */
+export async function refreshHistoryPages(entries: HistoryEntry[]): Promise<void> {
+  const shown = cachedHistoryEntries[historyDetailIndex];
+  cachedHistoryEntries = entries;
+  if (currentPage === 'history-list') await showHistoryListPage(entries);
+  else if (currentPage === 'history-detail') {
+    const remaining = entries.find(entry => entry.id === shown?.id);
+    if (remaining) await showHistoryDetailPage(remaining);
+    else {
+      detailPages = [];
+      detailPageIndex = 0;
+      historyDetailIndex = -1;
+      await showHistoryListPage(entries);
+    }
+  }
+}
+
 /** Resume the previously-active persona page after the menu. */
 export async function restoreActivePage(): Promise<void> {
   if (!menuPersona) return;
