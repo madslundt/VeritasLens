@@ -191,6 +191,54 @@ describe('analysis through the gesture/audio pipeline', () => {
     expect(mocks.call).not.toHaveBeenCalled();
   });
 
+  it.each(['double-tap', 'tap'] as const)('cancels an in-flight Speak request with %s and ignores its late response', async gesture => {
+    vi.useFakeTimers();
+    await startConversation('translation');
+    await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Hola', translatedText: 'Hello', replyStarters: [] });
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = mocks.listItems.indexOf('Speak →');
+    expect(index).toBeGreaterThanOrEqual(0);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    const pending = deferred<string>();
+    mocks.call.mockReturnValueOnce(pending.promise);
+    audio(1000); tap(); await drain();
+    expect(mocks.call).toHaveBeenCalledTimes(1);
+    const signal = mocks.call.mock.calls[0]![0].signal as AbortSignal;
+    if (gesture === 'double-tap') tap();
+    else mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent);
+    await drain();
+    const aborted = signal.aborted;
+    pending.resolve(JSON.stringify({ spoken: 'Hello', translated: 'LATE_TRANSLATION_AFTER_CANCEL' })); await drain();
+    expect(aborted).toBe(true);
+    expect(currentHudPage()).toBe('active');
+    expect(appPhase()).toBe('listening');
+    expect([...mocks.visible.values()].join(' ')).not.toContain('LATE_TRANSLATION_AFTER_CANCEL');
+    await vi.advanceTimersByTimeAsync(12000);
+    expect(mocks.call).toHaveBeenCalledTimes(1);
+  });
+
+  it('still sends Speak audio and starts a new recording on double-tap after a result', async () => {
+    vi.useFakeTimers();
+    await startConversation('translation');
+    await setLensResult({ type: 'translation', sourceLanguage: 'es', sourceText: 'Hola', translatedText: 'Hello', replyStarters: [] });
+    mocks.listener!({ sysEvent: { eventType: OsEventTypeList.CLICK_EVENT } } as EvenHubEvent); await drain();
+    const index = mocks.listItems.indexOf('Speak →');
+    expect(index).toBeGreaterThanOrEqual(0);
+    mocks.listener!({ listEvent: { eventType: OsEventTypeList.CLICK_EVENT, currentSelectItemIndex: index } } as EvenHubEvent); await drain();
+    mocks.call.mockResolvedValueOnce(JSON.stringify({ spoken: 'Good morning', translated: 'Buenos días' }));
+    audio(1000); tap(); await drain();
+    expect(mocks.call).toHaveBeenCalledTimes(1);
+    expect([...mocks.visible.values()].join(' ')).toContain('Buenos días');
+    tap(); await drain();
+    expect(currentHudPage()).toBe('translation-wearer-speak');
+    expect([...mocks.visible.values()].join(' ')).toContain('Speak now');
+    expect(mocks.call).toHaveBeenCalledTimes(1);
+    mocks.call.mockResolvedValueOnce(JSON.stringify({ spoken: 'Thank you', translated: 'Gracias' }));
+    audio(1000); tap(); await drain();
+    expect(mocks.call).toHaveBeenCalledTimes(2);
+    expect([...mocks.visible.values()].join(' ')).toContain('Gracias');
+  });
+
   it('aborts a mid-session summary and ignores its late response after Pause', async () => {
     vi.useFakeTimers(); audio(1000); await requestConversationHelp('fact-checker', undefined, false);
     vi.setSystemTime(Date.now() + 61000);

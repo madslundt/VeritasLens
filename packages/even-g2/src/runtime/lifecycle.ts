@@ -765,7 +765,7 @@ function handleEvent(event: EvenHubEvent): void {
       cancelGame().catch((err) => logDispatchError('cancel-game-fail', err));
       return;
     }
-    if (page === 'translation-wearer-speak') {
+    if (page === 'translation-wearer-speak' && !analyzing) {
       // Recording: double-tap forces an immediate send (manual override for
       // when VAD didn't trigger fast enough OR when the wearer is in a noisy
       // environment and wants to skip the silence-wait). Result: double-tap
@@ -788,6 +788,7 @@ function handleEvent(event: EvenHubEvent): void {
       inflight = null;
       analyzing = false;
       c?.abort();
+      if (page === 'translation-wearer-speak') cancelWearerSpeak();
       clearLensStreamingHeading();
       setLensPartialResult(null);
       // Tear the loading spinner down here rather than waiting for the abort to
@@ -803,6 +804,8 @@ function handleEvent(event: EvenHubEvent): void {
         await discardLensStreamingHeading(() => inflight === null && buffer === cancelledBuffer);
         if (inflight !== null || buffer !== cancelledBuffer) return;
         await stopSpinner(); // also resets the status slot to 'listening'
+        if (inflight !== null || buffer !== cancelledBuffer) return;
+        if (page === 'translation-wearer-speak' && currentHudPage() === page) await restoreActivePage();
         await setActiveHint(ACTIVE_HINT_DEFAULT);
       })().catch((err) => logDispatchError('cancel-analysis-fail', err));
       return;
@@ -2620,6 +2623,10 @@ async function handleTranslationWearerSpeakGesture(g: Gesture): Promise<void> {
   if (g.type === OsEventTypeList.CLICK_EVENT || g.type === undefined) {
     if (getWearerSpeakState() === 'recording') {
       cancelWearerSpeak();
+      const cancelledBuffer = buffer;
+      await cancelConversationAnalysis();
+      if (inflight !== null || buffer !== cancelledBuffer || currentHudPage() !== 'translation-wearer-speak') return;
+      setAppPhase('listening');
       await restoreActivePage();
     } else {
       await openMenuForCurrentContext();
